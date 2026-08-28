@@ -14,26 +14,20 @@ import (
 //     works afterward)?
 //   - same question for stdin-close?
 //
-// Both require a live, authenticated `claude` subprocess. As of 2026-08-28,
-// every `claude --print` invocation on Darkstar fails immediately with
-// "Failed to authenticate: OAuth session expired and could not be
-// refreshed" (a dead-refresh-token condition per the cc-oauth-forensics
-// skill, confirmed as a standing/known issue, not something this spike's
-// own claude invocations triggered). These tests are SKIPPED until that is
-// fixed — the bodies below are complete and were written to run as-is once
-// the t.Skip lines are removed.
+// Both require a live, authenticated `claude` subprocess. As of 2026-08-28
+// these ran for real, after the operator ran `claude /login` to clear the
+// dead-refresh-token OAuth condition that had every `claude --print`
+// invocation failing earlier the same day. See testdata/README.md for the
+// verdicts.
 
 func skipUnlessLiveClaudeAvailable(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skip("claude binary not on PATH")
 	}
-	// Hard skip regardless of PATH presence: `claude` is present on
-	// Darkstar (2.1.250) but its OAuth session is dead as of 2026-08-28.
-	// Remove this line (leaving the LookPath check above) once
-	// `claude /login` has been run and a plain `echo hi | claude --print`
-	// succeeds again.
-	t.Skip("BLOCKED pending live claude OAuth fix (2026-08-28) — see testdata/README.md; remove this line once `claude /login` has restored a working session")
+	// OAuth fixed 2026-08-28 (operator ran `claude /login`); the hard
+	// skip that lived here is removed. Live resumability tests run for
+	// real now.
 }
 
 func resumabilityCheck(t *testing.T, sessionID string) (resumable bool, replyText string) {
@@ -91,8 +85,15 @@ func TestCancel_SIGINT_ResumabilityAfter_LiveClaude(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
-	// Let real generation start before cancelling.
-	time.Sleep(2 * time.Second)
+	// Let real generation start before cancelling. Empirically load-bearing:
+	// a 2s delay was flaky (3/4 trials landed the SIGINT during
+	// subprocess startup / SessionStart-hook execution, before
+	// system.init even flushed, producing a truncated ~6-frame capture
+	// and an unresumable-looking session on --resume; the 1/4 that
+	// happened to land after init resumed cleanly). 5s reliably lands
+	// after init and into real generation — see testdata/README.md
+	// "SIGINT resumability" for the full writeup.
+	time.Sleep(5 * time.Second)
 	if err := sp.Cancel(CancelSIGINT); err != nil {
 		t.Fatalf("cancel(sigint): %v", err)
 	}

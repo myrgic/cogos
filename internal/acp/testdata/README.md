@@ -1,33 +1,18 @@
 # internal/acp/testdata — golden frame corpus
 
-## Status: capture BLOCKED as of 2026-08-28
+## Status: CAPTURED 2026-08-28 (L1 lane closed)
 
-`claude --version` on Darkstar is 2.1.250 (current — no upgrade needed for
-this spike). Every invocation of `claude --print` (plain or stream-json)
-fails immediately with:
+`claude` 2.1.250 on Darkstar. An earlier attempt this same day was blocked by a
+dead-refresh-token OAuth condition (`Failed to authenticate: OAuth session
+expired and could not be refreshed`, diagnosed via `cc-oauth-forensics`); the
+operator ran `claude /login` and all four captures plus both live cancellation
+tests then ran for real. Nothing below is fabricated — every table is a census
+of a committed `.ndjson` file, and every verdict is a logged test result.
 
-    Failed to authenticate: OAuth session expired and could not be refreshed
+## Captures
 
-Diagnosed via the `cc-oauth-forensics` skill as a dead-refresh-token
-condition (keychain `Claude Code-credentials` has `accessToken.expiresAt: 0`
-— needs refresh — but the refresh itself fails), confirmed as a standing,
-already-known issue rather than something triggered by this spike's own
-`claude` calls. Fix requires an interactive `claude /login` (operator
-action, out of scope for an automated lane). The golden_*.ndjson fixtures
-below do not exist yet; `census_test.go`'s `TestFrameCensus` and
-`cancellation_live_test.go`'s two `*_LiveClaude` tests are skipped
-pending capture.
-
-**No fixtures have been fabricated to stand in for real captures.** The
-tables below are the planned filenames and the exact invocation each one
-will use, to be run verbatim once `claude /login` succeeds.
-
-## Planned captures
-
-All captures should be run from this repo's root (`internal/acp/../..`,
-i.e. the `cogos` worktree root) so `go.mod` is a realistic Read target, with
-a fresh `--session-id` per capture (uuidgen), and should redirect raw
-stdout — untouched — straight to the target file:
+Run from the worktree root so `go.mod` is a realistic `Read` target, fresh
+`--session-id` per capture, raw stdout redirected untouched:
 
 ```sh
 SID=$(uuidgen | tr 'A-Z' 'a-z')
@@ -37,64 +22,116 @@ printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"text"
       > internal/acp/testdata/golden_tool_turn_baseline.ndjson
 ```
 
-| File | Invocation (flags added to the baseline above) | Purpose |
+| File | Extra flags | Session ID |
 |---|---|---|
-| `golden_tool_turn_baseline.ndjson` | none (baseline shown above) | default frame catalogue for a tool-using turn |
-| `golden_tool_turn_partial.ndjson` | add `--include-partial-messages` | frames that only appear when partial-message streaming is on (expected: `stream_event` content_block_delta/input_json_delta chatter) |
-| `golden_tool_turn_hookevents.ndjson` | add `--include-hook-events` | full hook lifecycle frames, vs. the `hook_started`/`hook_response` frames that (per an initial manual probe on 2026-08-28, without this flag) already appeared unconditionally on this machine due to Darkstar's own configured user-level hooks — worth re-confirming with the flag once live captures resume: does `--include-hook-events` add MORE hook subtypes, or is it orthogonal to what already surfaces? |
-| `golden_tool_turn_partial_hookevents.ndjson` | both flags together | union / interaction check |
+| `golden_tool_turn_baseline.ndjson` | none | `3bf3ff20-8504-4616-a747-bd1511afced4` |
+| `golden_tool_turn_partial.ndjson` | `--include-partial-messages` | `421efb5a-ab05-4fff-becc-01910014e0e2` |
+| `golden_tool_turn_hookevents.ndjson` | `--include-hook-events` | `0e3ae6a0-3f28-4fed-8425-9f07702126c9` |
+| `golden_tool_turn_partial_hookevents.ndjson` | both | `8c04a8d9-5c47-487f-91c9-ce18ddc660fc` |
 
-Each capture's exact session ID and any stderr should be noted in this file
-as an appendix once run, so re-capture is fully reproducible.
+All four `.stderr` files are empty (0 bytes). All four turns are
+`result/success`, `is_error=false`, with a real `Read` tool call and a real
+tool result. `TestFrameCensus` (`census_test.go`) reads these and prints the
+census below; it is the drift detector for future `claude` upgrades.
+
+## Frame census
+
+| frame | baseline | +partial | +hookevents | both |
+|---|---|---|---|---|
+| `system/init` | 1 | 1 | 1 | 1 |
+| `system/hook_started` | 3 | 3 | 7 | 7 |
+| `system/hook_response` | 3 | 3 | 7 | 7 |
+| `system/status` | 0 | 2 | 0 | 2 |
+| `system/thinking_tokens` | 2 | 2 | 0 | 0 |
+| `system/task_summary` | 2 | 2 | 2 | 2 |
+| `system/post_turn_summary` | 1 | 1 | 1 | 1 |
+| `assistant` | 3 | 3 | 2 | 3 |
+| `user` (tool result) | 1 | 1 | 1 | 1 |
+| `stream_event` | 0 | 22 | 0 | 22 |
+| `rate_limit_event` | 1 | 1 | 1 | 1 |
+| `result/success` | 1 | 1 | 1 | 1 |
+
+`stream_event` breakdown under `--include-partial-messages` (baseline run):
+`message_start` ×2, `content_block_start` (`text` / `thinking` / `tool_use`),
+`content_block_delta` × {`text_delta`, `thinking_delta`, `signature_delta`,
+`input_json_delta`}, `content_block_stop` ×3, `message_delta` ×2,
+`message_stop` ×2.
+
+## Verdicts — what this kills
+
+**R2 resolved: `rate_limit_event` EXISTS.** Present exactly once in all four
+captures, and it is **not** in the `acp.EventType` set, so it currently falls
+through `ParseLine` to `Unknown`. Shape:
+
+```json
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":...,
+ "rateLimitType":"five_hour","overageStatus":"rejected",
+ "overageDisabledReason":"out_of_credits","isUsingOverage":false,
+ "unifiedWindows":{"five_hour":{"utilization":0.07,"resetsAt":...},
+                   "seven_day":{"utilization":0.26,"resetsAt":...}}},
+ "uuid":"…","session_id":"…"}
+```
+
+This is genuinely useful telemetry (subscription-lane utilization against two
+windows) and belongs in an ACP `usage_update` or an out-of-band status, not in
+`Unknown`.
+
+**`--include-partial-messages` DOES gate `stream_event` entirely.** 0 frames
+without it, 22 with. The whole streaming path in the §4.1 translator mapping is
+conditional on this flag — it must be passed unconditionally by
+ManagedSession, not assumed on by default.
+
+**`--include-hook-events` is ADDITIVE, not a gate.** `hook_started` /
+`hook_response` appear without it (3 pairs, from Darkstar's own user-level
+hooks) and the flag raises that to 7 pairs. The L1 brief's assumption that the
+flag gates their existence is wrong. Note also that turning hook events on
+*suppressed* `system/thinking_tokens` in these runs (2 → 0) — an interaction
+worth re-checking, not yet explained.
+
+**Four undocumented `system` subtypes** none of which appear in ADR-093 or any
+published changelog: `status` (`{"status":"requesting"}`, partial-only),
+`thinking_tokens` (`estimated_tokens`, `estimated_tokens_delta`),
+`task_summary` (`{"detail":"Reading go.mod"}` — a human-readable progress
+line), and `post_turn_summary` (`summarizes_uuid`, `status_category:
+"review_ready"`, `status_detail`, `needs_action`). `task_summary` in particular
+is a ready-made ACP tool-call `title`, and `post_turn_summary` has no ACP slot
+at all. The translator's `Unknown` fallback must stay total: this vendor ships
+new `system` subtypes without documenting them.
+
+**The `user` frame carries the tool result, richly.** Confirms the §4.1 fix:
+`message.content[].tool_use_id` + `tool_result`, plus a sibling
+`tool_use_result` object with typed file metadata (`filePath`, `content`,
+`numLines`, `startLine`, `totalLines`). That sibling is what makes real ACP
+diffs/locations possible. `EventUser` is declared at `streamjson.go:17` but
+absent from the `Event` union and `ParseLine`'s switch, so today all of this
+lands in `Unknown`. First code fix, unchanged.
 
 ## Cancellation fixtures
 
-No separate fixture files — the cancellation tests drive `claude` live and
-log frames inline (see `cancellation_live_test.go`), since the interesting
-observable is the live process's exit behavior and post-cancel resumability
-check, not a static NDJSON artifact.
+No static fixtures — the observable is live process behavior. See
+`cancellation_test.go` (fake process, deterministic, always runs) and
+`cancellation_live_test.go` (real `claude`).
 
-## Manual probe already run (2026-08-28, pre-OAuth-death, informational only)
+**R4 resolved. Both cancellation paths leave a RESUMABLE session.**
 
-Before the OAuth session died mid-investigation, one baseline-shaped
-invocation (no --include-partial-messages / --include-hook-events) DID
-complete far enough to observe the frame shape below, though it ultimately
-also hit the same auth failure inside the turn (its `result.result` is the
-same "Failed to authenticate..." text — so this is NOT a valid golden
-fixture and was not saved as one). It still cheaply confirms the
-system-frame ordering and field shape ahead of a real capture:
+| Path | Frames after cancel | Terminal `result` | Resumable? |
+|---|---|---|---|
+| `CancelSIGINT` | 11 | `subtype=error_during_execution`, `is_error=true` | **yes** — `--resume` replied `RESUMED` |
+| `CancelStdinClose` | 14 | `subtype=success`, `is_error=false` | **yes** — `--resume` replied `RESUMED` |
 
-```
-system/hook_started   x3
-system/hook_response  x3
-system/init            (fields: cwd, session_id, tools, mcp_servers, model,
-                         permissionMode, slash_commands,
-                         terminal_slash_commands, apiKeySource,
-                         claude_code_version, output_style, agents, skills,
-                         plugins, capabilities, analytics_disabled,
-                         product_feedback_disabled, uuid, memory_paths,
-                         messaging_socket_path, fast_mode_state,
-                         fast_mode_disabled_reason)
-assistant               (one frame, synthetic auth-error message)
-result/success          (is_error=true — the auth failure surfaces as a
-                         "successful" turn subtype carrying an error payload,
-                         not as its own error subtype — worth re-checking
-                         against a real successful turn once unblocked)
-```
+Consequences for the ACP server: `session/cancel` is implementable against
+either path, and the ACP contract ("agent may still emit trailing
+`session/update`s, then answers the original `session/prompt` with
+`stopReason: "cancelled"`") maps cleanly — 11–14 trailing frames arrive after
+the signal and must be drained, not dropped. **Neither engine result subtype
+means "cancelled"**, so the translator must track cancellation state itself
+and override the mapped `stopReason`; taking `is_error=true` at face value
+would surface a user cancel as a refusal.
 
-Notably: `system/hook_started` and `system/hook_response` appeared WITHOUT
-passing `--include-hook-events` — contradicting the assumption in the L1
-research brief that this flag gates their presence. Either the flag's
-effect is additive (more hook detail, not gating existence) or Darkstar's
-locally-configured hooks (`corpus-resonance`, `loopback-resolver`,
-`memory-janitor` — see `reference_autonomic_hook_layer_map.md`) always
-surface here regardless of the flag on this specific machine/config. This
-needs re-confirming once live captures resume by diffing baseline vs.
-+hookevents captures.
-
-Also notable: **no `rate_limit_event` frame appeared** in this probe or in
-either of the pre-existing `spike_test.go` / `multiturn_test.go` runs (both
-of which also failed on the same OAuth error) — but none of these are
-successful turns, so this is not yet evidence either way; ADR-093 §10
-reported observing one during a real one-prompt test in May. Re-check once
-real turns complete.
+**Timing hazard, empirically load-bearing.** A 2s delay before SIGINT was
+flaky: 3 of 4 trials landed the signal during subprocess startup /
+`SessionStart` hook execution, before `system/init` flushed, producing a
+truncated ~6-frame capture and a session that looked unresumable. 5s reliably
+lands after init and inside real generation. A production `Cancel()` must
+refuse (or queue) a cancel that arrives before `system/init` has been seen —
+there is no session to cancel yet, and killing there loses it.
