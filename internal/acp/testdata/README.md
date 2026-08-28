@@ -64,7 +64,7 @@ translator just needs to add it, not a parse failure).
 - **`--include-hook-events` does NOT gate hook-frame *existence* — it gates
   *which lifecycle points* get reported.** Without the flag, only
   `SessionStart:startup` hooks appear (3 `hook_started` + 3 `hook_response`
-  — Darkstar's 3 configured user-level hooks: corpus-resonance,
+  — examplenode's 3 configured user-level hooks: corpus-resonance,
   loopback-resolver, memory-janitor). With the flag, the same 3 SessionStart
   events appear PLUS `UserPromptSubmit` (2), `PreToolUse:Read` (1), and
   `Stop` (1) — 7 and 7. So this corrects the L1 brief's framing (the ADR-093
@@ -189,3 +189,13 @@ unedited record of what `claude --print --output-format stream-json`
 actually emitted, not a synthesized approximation). This has been flagged
 by review; retained as-is pending operator ruling on whether the local
 paths/username should be redacted.
+
+## Redaction note (2026-08-28, operator-ruled)
+
+Fixtures are redacted for operator privacy (public repo): username -> `operator`,
+machine name -> `examplenode`, applied uniformly across paths and captured hook
+context. Frame structure, types, ordering, and all protocol-relevant bytes are
+untouched; remaining runtime values (kernel version, timings) are non-identifying.
+This redaction defines the canonical fixture shape: future captures should be
+recorded on a sanitized environment or redacted with the same mapping before
+commit. Unredacted originals exist only in the capturing session's local history.
