@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 )
@@ -175,6 +176,45 @@ func (s *Subprocess) CloseInput() error {
 // Events returns the channel of typed stream-json events. The channel
 // closes when the subprocess exits and the read loop finishes.
 func (s *Subprocess) Events() <-chan Event { return s.events }
+
+// CancelMode selects how Cancel asks the subprocess to stop an in-flight
+// turn. ADR-093 §10 flagged both as unvalidated; this is that validation
+// surface. Neither variant waits for or guarantees a particular outcome —
+// see cancellation_test.go for what each was observed to do against a real
+// `claude` subprocess.
+type CancelMode int
+
+const (
+	// CancelSIGINT sends SIGINT to the subprocess, mirroring what a
+	// terminal delivers on Ctrl-C.
+	CancelSIGINT CancelMode = iota
+	// CancelStdinClose closes stdin without signaling the process. This is
+	// exactly CloseInput — kept as a named CancelMode so callers can pick
+	// a cancellation strategy without caring which mechanism it maps to.
+	CancelStdinClose
+)
+
+// Cancel asks the subprocess to stop its current turn using the given
+// mode. It returns as soon as the request is issued (signal delivered, or
+// stdin closed) — it does NOT wait for the subprocess to exit or for
+// Events() to drain. Callers should keep draining Events() and call Wait()
+// to observe the actual outcome (trailing frames, exit code).
+func (s *Subprocess) Cancel(mode CancelMode) error {
+	switch mode {
+	case CancelSIGINT:
+		if s.cmd.Process == nil {
+			return fmt.Errorf("acp: cancel: subprocess not started")
+		}
+		if err := s.cmd.Process.Signal(os.Interrupt); err != nil {
+			return fmt.Errorf("acp: cancel: signal: %w", err)
+		}
+		return nil
+	case CancelStdinClose:
+		return s.CloseInput()
+	default:
+		return fmt.Errorf("acp: cancel: unknown mode %d", mode)
+	}
+}
 
 // Wait blocks until the subprocess exits and returns its exit error
 // (nil on clean exit). May be called from any goroutine.
