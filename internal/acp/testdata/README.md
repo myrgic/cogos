@@ -1,137 +1,176 @@
 # internal/acp/testdata — golden frame corpus
 
-## Status: CAPTURED 2026-08-28 (L1 lane closed)
+## Status: captured 2026-08-28, live against claude 2.1.250
 
-`claude` 2.1.250 on Darkstar. An earlier attempt this same day was blocked by a
-dead-refresh-token OAuth condition (`Failed to authenticate: OAuth session
-expired and could not be refreshed`, diagnosed via `cc-oauth-forensics`); the
-operator ran `claude /login` and all four captures plus both live cancellation
-tests then ran for real. Nothing below is fabricated — every table is a census
-of a committed `.ndjson` file, and every verdict is a logged test result.
+Operator ran `claude /login` to clear a dead-refresh-token OAuth condition
+that had every `claude --print` invocation failing earlier the same day
+(unrelated to this spike — a standing issue, diagnosed via the
+`cc-oauth-forensics` skill). All four captures below and both live
+cancellation-resumability tests in `cancellation_live_test.go` ran for real
+after that fix. No fixtures were fabricated during the blocked window.
 
 ## Captures
 
-Run from the worktree root so `go.mod` is a realistic `Read` target, fresh
-`--session-id` per capture, raw stdout redirected untouched:
+All four ran from this worktree's root with a fresh `--session-id`
+(uuidgen) and `--allowedTools "Read"`, driving the same tool-forcing prompt:
 
 ```sh
 SID=$(uuidgen | tr 'A-Z' 'a-z')
 printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Read the first line of go.mod using the Read tool and tell me what Go module this repo is."}]}}' \
   | claude --print --verbose --input-format stream-json --output-format stream-json \
       --allowedTools "Read" --session-id "$SID" \
-      > internal/acp/testdata/golden_tool_turn_baseline.ndjson
+      > internal/acp/testdata/<file>.ndjson
 ```
 
-| File | Extra flags | Session ID |
-|---|---|---|
-| `golden_tool_turn_baseline.ndjson` | none | `3bf3ff20-8504-4616-a747-bd1511afced4` |
-| `golden_tool_turn_partial.ndjson` | `--include-partial-messages` | `421efb5a-ab05-4fff-becc-01910014e0e2` |
-| `golden_tool_turn_hookevents.ndjson` | `--include-hook-events` | `0e3ae6a0-3f28-4fed-8425-9f07702126c9` |
-| `golden_tool_turn_partial_hookevents.ndjson` | both | `8c04a8d9-5c47-487f-91c9-ce18ddc660fc` |
-
-All four `.stderr` files are empty (0 bytes). All four turns are
-`result/success`, `is_error=false`, with a real `Read` tool call and a real
-tool result. `TestFrameCensus` (`census_test.go`) reads these and prints the
-census below; it is the drift detector for future `claude` upgrades.
-
-## Frame census
-
-| frame | baseline | +partial | +hookevents | both |
-|---|---|---|---|---|
-| `system/init` | 1 | 1 | 1 | 1 |
-| `system/hook_started` | 3 | 3 | 7 | 7 |
-| `system/hook_response` | 3 | 3 | 7 | 7 |
-| `system/status` | 0 | 2 | 0 | 2 |
-| `system/thinking_tokens` | 2 | 2 | 0 | 0 |
-| `system/task_summary` | 2 | 2 | 2 | 2 |
-| `system/post_turn_summary` | 1 | 1 | 1 | 1 |
-| `assistant` | 3 | 3 | 2 | 3 |
-| `user` (tool result) | 1 | 1 | 1 | 1 |
-| `stream_event` | 0 | 22 | 0 | 22 |
-| `rate_limit_event` | 1 | 1 | 1 | 1 |
-| `result/success` | 1 | 1 | 1 | 1 |
-
-`stream_event` breakdown under `--include-partial-messages` (baseline run):
-`message_start` ×2, `content_block_start` (`text` / `thinking` / `tool_use`),
-`content_block_delta` × {`text_delta`, `thinking_delta`, `signature_delta`,
-`input_json_delta`}, `content_block_stop` ×3, `message_delta` ×2,
-`message_stop` ×2.
-
-## Verdicts — what this kills
-
-**R2 resolved: `rate_limit_event` EXISTS.** Present exactly once in all four
-captures, and it is **not** in the `acp.EventType` set, so it currently falls
-through `ParseLine` to `Unknown`. Shape:
-
-```json
-{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":...,
- "rateLimitType":"five_hour","overageStatus":"rejected",
- "overageDisabledReason":"out_of_credits","isUsingOverage":false,
- "unifiedWindows":{"five_hour":{"utilization":0.07,"resetsAt":...},
-                   "seven_day":{"utilization":0.26,"resetsAt":...}}},
- "uuid":"…","session_id":"…"}
-```
-
-This is genuinely useful telemetry (subscription-lane utilization against two
-windows) and belongs in an ACP `usage_update` or an out-of-band status, not in
-`Unknown`.
-
-**`--include-partial-messages` DOES gate `stream_event` entirely.** 0 frames
-without it, 22 with. The whole streaming path in the §4.1 translator mapping is
-conditional on this flag — it must be passed unconditionally by
-ManagedSession, not assumed on by default.
-
-**`--include-hook-events` is ADDITIVE, not a gate.** `hook_started` /
-`hook_response` appear without it (3 pairs, from Darkstar's own user-level
-hooks) and the flag raises that to 7 pairs. The L1 brief's assumption that the
-flag gates their existence is wrong. Note also that turning hook events on
-*suppressed* `system/thinking_tokens` in these runs (2 → 0) — an interaction
-worth re-checking, not yet explained.
-
-**Four undocumented `system` subtypes** none of which appear in ADR-093 or any
-published changelog: `status` (`{"status":"requesting"}`, partial-only),
-`thinking_tokens` (`estimated_tokens`, `estimated_tokens_delta`),
-`task_summary` (`{"detail":"Reading go.mod"}` — a human-readable progress
-line), and `post_turn_summary` (`summarizes_uuid`, `status_category:
-"review_ready"`, `status_detail`, `needs_action`). `task_summary` in particular
-is a ready-made ACP tool-call `title`, and `post_turn_summary` has no ACP slot
-at all. The translator's `Unknown` fallback must stay total: this vendor ships
-new `system` subtypes without documenting them.
-
-**The `user` frame carries the tool result, richly.** Confirms the §4.1 fix:
-`message.content[].tool_use_id` + `tool_result`, plus a sibling
-`tool_use_result` object with typed file metadata (`filePath`, `content`,
-`numLines`, `startLine`, `totalLines`). That sibling is what makes real ACP
-diffs/locations possible. `EventUser` is declared at `streamjson.go:17` but
-absent from the `Event` union and `ParseLine`'s switch, so today all of this
-lands in `Unknown`. First code fix, unchanged.
-
-## Cancellation fixtures
-
-No static fixtures — the observable is live process behavior. See
-`cancellation_test.go` (fake process, deterministic, always runs) and
-`cancellation_live_test.go` (real `claude`).
-
-**R4 resolved. Both cancellation paths leave a RESUMABLE session.**
-
-| Path | Frames after cancel | Terminal `result` | Resumable? |
+| File | Flags added | Session ID | Lines |
 |---|---|---|---|
-| `CancelSIGINT` | 11 | `subtype=error_during_execution`, `is_error=true` | **yes** — `--resume` replied `RESUMED` |
-| `CancelStdinClose` | 14 | `subtype=success`, `is_error=false` | **yes** — `--resume` replied `RESUMED` |
+| `golden_tool_turn_baseline.ndjson` | none | `3bf3ff20-8504-4616-a747-bd1511afced4` | 18 |
+| `golden_tool_turn_partial.ndjson` | `--include-partial-messages` | `421efb5a-ab05-4fff-becc-01910014e0e2` | 42 |
+| `golden_tool_turn_hookevents.ndjson` | `--include-hook-events` | `0e3ae6a0-3f28-4fed-8425-9f07702126c9` | 23 |
+| `golden_tool_turn_partial_hookevents.ndjson` | both | `8c04a8d9-5c47-487f-91c9-ce18ddc660fc` | 48 |
 
-Consequences for the ACP server: `session/cancel` is implementable against
-either path, and the ACP contract ("agent may still emit trailing
-`session/update`s, then answers the original `session/prompt` with
-`stopReason: "cancelled"`") maps cleanly — 11–14 trailing frames arrive after
-the signal and must be drained, not dropped. **Neither engine result subtype
-means "cancelled"**, so the translator must track cancellation state itself
-and override the mapped `stopReason`; taking `is_error=true` at face value
-would surface a user cancel as a refusal.
+All four exited 0 with empty stderr, and all four genuinely exercised a
+tool call (the assistant emitted a `tool_use` for `Read`, the tool result
+came back as a `user` frame with a `tool_use_result`/`tool_result` payload,
+and the final answer correctly named `github.com/myrgic/cogos`).
 
-**Timing hazard, empirically load-bearing.** A 2s delay before SIGINT was
-flaky: 3 of 4 trials landed the signal during subprocess startup /
-`SessionStart` hook execution, before `system/init` flushed, producing a
-truncated ~6-frame capture and a session that looked unresumable. 5s reliably
-lands after init and inside real generation. A production `Cancel()` must
-refuse (or queue) a cancel that arrives before `system/init` has been seen —
-there is no session to cancel yet, and killing there loses it.
+## Frame census (`go test -run TestFrameCensus -v ./internal/acp/...`)
+
+| type/subtype | baseline | hookevents | partial | partial+hookevents |
+|---|---|---|---|---|
+| system/hook_started | 3 | 7 | 3 | 7 |
+| system/hook_response | 3 | 7 | 3 | 7 |
+| system/init | 1 | 1 | 1 | 1 |
+| system/thinking_tokens | 2 | 0 | 2 | 0 |
+| system/status | 0 | 0 | 0 | 2 |
+| system/task_summary | 2 | 2 | 2 | 2 |
+| system/post_turn_summary | 1 | 1 | 1 | 1 |
+| assistant | 3 | 2 | 3 | 3 |
+| user | 1 | 1 | 1 | 1 |
+| stream_event | 0 | 0 | 22 | 22 |
+| rate_limit_event | 1 | 1 | 1 | 1 |
+| result/success | 1 | 1 | 1 | 1 |
+
+`rate_limit_event` is not in `acp.EventType` — every row above falls
+through `ParseLine` to `Event.Unknown` for that frame today (harmless: the
+translator just needs to add it, not a parse failure).
+
+### What each flag actually gates
+
+- **`--include-partial-messages` gates `stream_event` cleanly and
+  completely.** 0 in both captures without the flag, 22 in both captures
+  with it. This is a clean, deterministic signal — the strongest one in
+  the whole census.
+- **`--include-hook-events` does NOT gate hook-frame *existence* — it gates
+  *which lifecycle points* get reported.** Without the flag, only
+  `SessionStart:startup` hooks appear (3 `hook_started` + 3 `hook_response`
+  — Darkstar's 3 configured user-level hooks: corpus-resonance,
+  loopback-resolver, memory-janitor). With the flag, the same 3 SessionStart
+  events appear PLUS `UserPromptSubmit` (2), `PreToolUse:Read` (1), and
+  `Stop` (1) — 7 and 7. So this corrects the L1 brief's framing (the ADR-093
+  §10 text implicitly read as "the flag gates hook-frame presence"): session
+  lifecycle hooks are visible unconditionally; per-turn/per-tool hook
+  lifecycle only surfaces with `--include-hook-events`.
+- **`thinking_tokens`/`status` counts are noise, not flag-driven** — each
+  capture is an independent, non-deterministic model invocation, and these
+  two subtypes are incidental progress indicators (`thinking_tokens`:
+  running token-estimate counter; `status`: `"requesting"` ping) that
+  varied across the 4 independent runs without a clean correlation to
+  either flag. Not treated as a finding.
+- `assistant` frame count (2 vs 3) is likewise just how many content blocks
+  the model happened to split a given turn into (e.g. a `thinking` block
+  landing in its own frame sometimes) — not flag-driven.
+
+### The three L1 verdicts
+
+1. **Does `rate_limit_event` exist?** YES — present in all 4 captures,
+   exactly once each, unconditionally (not gated by either flag). Confirms
+   ADR-093 §10's May observation still holds on 2.1.250.
+2. **Does SIGINT leave a usable/resumable session?** YES, conditionally —
+   see "SIGINT resumability" below. The short version: yes, reliably, once
+   the turn has actually started generating; unreliable if the interrupt
+   lands during the ~2-5s subprocess-startup/hook window.
+3. **What actually gates `stream_event`?** `--include-partial-messages`,
+   cleanly and exclusively. `--include-hook-events` has no effect on it.
+
+## Cancellation — SIGINT and stdin-close resumability (live, 2026-08-28)
+
+Both `cancellation_live_test.go` tests ran for real against live claude
+(`TestCancel_SIGINT_ResumabilityAfter_LiveClaude`,
+`TestCancel_StdinClose_ResumabilityAfter_LiveClaude`). Flow: spawn a fresh
+pinned session, send a prompt engineered to force a long generation ("write
+a very long, detailed 1500-word essay..."), wait, cancel, drain trailing
+frames, `Wait()`, then spawn a second subprocess with
+`SpawnOpts{SessionID: pinned, ResumeExisting: true}` and check whether a
+trivial "reply with exactly: RESUMED" follow-up actually comes back
+containing RESUMED.
+
+### SIGINT — timing-sensitive, not simply yes/no
+
+First pass used a 2s pre-cancel delay (mirroring "cancel mid-turn" loosely)
+and was **flaky**: 1 of 4 trials resumed cleanly, 3 of 4 did not. Digging
+in with manual captures (`kill -INT` at controlled delays) explained why:
+
+- At 2s, the subprocess is often still inside `SessionStart:startup` hook
+  execution — the capture that failed to resume terminated after only 6
+  frames (the 3 hook_started/hook_response pairs), **before `system.init`
+  was even emitted**. No properly-initialized session to resume from.
+- At 5-6s, the subprocess is reliably past `system.init` and into real
+  generation (`thinking_tokens` frames observed). SIGINT there produces a
+  clean `result` frame (`subtype: "error_during_execution", is_error:
+  true`), the process exits without a crash, and `--resume <id>` afterward
+  replies coherently — 4/4 clean runs once the delay was bumped to 5s (2
+  via `go test`, 2 manual, one taken to a full raw resume transcript
+  showing `"result":"RESUMED"`, `"stop_reason":"end_turn"`).
+
+**Verdict: SIGINT delivered once the turn is genuinely in flight (past
+`system.init`) leaves a resumable session, reliably (4/4).** SIGINT
+delivered during the subprocess's startup/hook window is a race whose
+outcome (mostly no usable session, 1/4 usable in this sample) depends on
+exactly where the interrupt lands relative to session-file
+initialization — this is a real hazard for a production `Cancel()` caller
+that fires immediately after `Send()` without knowing whether `system.init`
+has arrived yet. `cancellation_live_test.go` now waits 5s before cancelling
+to get a deterministic test; a production caller should gate `Cancel` on
+having seen `system.init` first, not on wall-clock time.
+
+### stdin-close — does not abort in-flight work at all
+
+`TestCancel_StdinClose_ResumabilityAfter_LiveClaude` took ~75s to
+complete — because stdin-close does **not** interrupt the current turn; it
+only prevents future turns. The in-flight 1500-word essay ran to natural
+completion (`result subtype: "success", is_error: false`) and *then* the
+subprocess exited on EOF. Resumability was trivially true (2/2) because
+nothing was actually aborted — this is a different semantic contract than
+SIGINT, not a weaker version of the same one: **stdin-close is "stop
+sending new input," not "abort the current turn."** A caller wanting fast
+turn abandonment should use `CancelSIGINT`; `CancelStdinClose` is for
+graceful "no more turns after this one" shutdown.
+
+## Contract drift vs. the May §10 baseline
+
+- **Frame catalogue is wider still.** May's list (`system.{init,
+  hook_started, hook_response}`, `stream_event`, `assistant`, `result`,
+  `rate_limit_event`) is missing `system.thinking_tokens`,
+  `system.task_summary`, `system.post_turn_summary`, `system.status`, and
+  the `user` frame (tool-result carrier — already flagged in the L1
+  research brief §4.1 as needing a `streamjson.go` fix, now empirically
+  confirmed present and shaped as `{tool_use_id, type: "tool_result",
+  content}`). None of these are exotic — they showed up on ordinary runs,
+  not edge cases.
+  - `rate_limit_info` payload itself grew too: `unifiedWindows` with
+    per-window `{five_hour, seven_day}` utilization, `overageStatus`,
+    `overageDisabledReason` — richer than a May-era bare quota ping would
+    suggest, though the May text didn't record the payload shape to diff
+    against directly.
+- **`--include-hook-events`'s actual effect was previously unrecorded** —
+  the May findings didn't test it explicitly against a real tool-using
+  turn; this capture is the first evidence that it's additive
+  (more lifecycle points) rather than a plain gate.
+- **Cancellation is no longer purely unvalidated** (May explicitly flagged
+  it as not-yet-tested) — now empirically characterized, including the
+  startup-window race, which is new information nobody had in May.
+- Everything else in §10 (multi-turn continuity, required
+  `--verbose` flag, `--session-id` create-only semantics) still holds —
+  `TestSpike_MultiTurnOverResume` and `TestSpike_OnePromptOneResponse` both
+  pass cleanly against 2.1.250.
