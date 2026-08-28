@@ -320,6 +320,18 @@ func (ms *ManagedSession) Detach() error {
 	return nil
 }
 
+// spawnNewManagedSession and spawnResumeManagedSession are package-level
+// indirections over NewManagedSession/ResumeManagedSession purely so tests
+// can substitute a counting/stub spawner to verify the registry's
+// singleflight behavior (see managed_session_test.go's
+// TestManagedSessionRegistry_*_ConcurrentSameID_SingleSpawn) without adding
+// a new dependency or threading a spawner interface through every call
+// site. Production code always uses the defaults below.
+var (
+	spawnNewManagedSession    = NewManagedSession
+	spawnResumeManagedSession = ResumeManagedSession
+)
+
 // ManagedSessionRegistry is the session-ID-keyed registry ADR-093 §2/§7 describes
 // (ManagedSession.Get, and the eventual GET /v1/managed-sessions surface —
 // not part of this lane; see the file-level doc comment). This skeleton is
@@ -327,11 +339,91 @@ func (ms *ManagedSession) Detach() error {
 type ManagedSessionRegistry struct {
 	mu       sync.RWMutex
 	sessions map[string]*ManagedSession
+	// inflight tracks sessionIDs currently being spawned by New/Resume, so
+	// concurrent callers racing the same not-yet-registered ID share the
+	// one winner's result instead of each spawning their own subprocess.
+	// See getOrSpawn.
+	inflight map[string]*inflightSpawn
+}
+
+// inflightSpawn is a single-use reservation for one sessionID's spawn.
+// Exactly one goroutine (the one that installs it into
+// ManagedSessionRegistry.inflight) performs the actual spawn and later
+// writes ms/err before closing done; every other goroutine that finds this
+// entry only reads ms/err after observing done closed, which is safe under
+// the Go memory model (a channel close happens-before the corresponding
+// receive completes) without any additional lock.
+type inflightSpawn struct {
+	done chan struct{}
+	ms   *ManagedSession
+	err  error
 }
 
 // NewManagedSessionRegistry returns an empty registry.
 func NewManagedSessionRegistry() *ManagedSessionRegistry {
-	return &ManagedSessionRegistry{sessions: make(map[string]*ManagedSession)}
+	return &ManagedSessionRegistry{
+		sessions: make(map[string]*ManagedSession),
+		inflight: make(map[string]*inflightSpawn),
+	}
+}
+
+// getOrSpawn implements ADR-093 §6 idempotent session creation with
+// singleflight-per-ID semantics. It replaces the naive
+// "RLock/check/RUnlock/spawn/Lock/insert" sequence, which has a
+// check-then-act race: two concurrent callers for the same
+// not-yet-registered sessionID can both observe "not live" before either
+// has inserted, and both then spawn a real subprocess — only the second
+// insert survives, orphaning the first ManagedSession's subprocess and its
+// startEventPump goroutine (it blocks forever once the 32-slot outCh fills,
+// since nothing is left calling Events() on it).
+//
+// The fix: reserve the sessionID under the write lock (install a
+// placeholder inflightSpawn) *before* releasing the lock to spawn — the
+// spawn itself must happen unlocked since it can take real wall-clock
+// time (subprocess exec + first-byte). Any other caller that arrives while
+// a reservation is outstanding waits on that reservation's done channel
+// instead of starting a second spawn, and receives the exact same
+// *ManagedSession the winner produced. On spawn failure the reservation is
+// cleared (not left installed) so a later call can retry cleanly rather
+// than being wedged behind a permanently-failed placeholder.
+func (r *ManagedSessionRegistry) getOrSpawn(sessionID string, spawn func() (*ManagedSession, error)) (*ManagedSession, error) {
+	for {
+		r.mu.Lock()
+		if existing := r.liveLocked(sessionID); existing != nil {
+			r.mu.Unlock()
+			return existing, nil
+		}
+		if inf, ok := r.inflight[sessionID]; ok {
+			r.mu.Unlock()
+			<-inf.done
+			if inf.err != nil {
+				// The winner's spawn failed and already cleared the
+				// reservation. Loop back around: this caller (or whoever
+				// gets there first) becomes the new spawner.
+				continue
+			}
+			return inf.ms, nil
+		}
+
+		// Reserve sessionID before unlocking. No other goroutine can win
+		// this race for the same ID until we resolve inf.done below.
+		inf := &inflightSpawn{done: make(chan struct{})}
+		r.inflight[sessionID] = inf
+		r.mu.Unlock()
+
+		ms, err := spawn()
+
+		r.mu.Lock()
+		delete(r.inflight, sessionID)
+		if err == nil {
+			r.sessions[sessionID] = ms
+		}
+		r.mu.Unlock()
+
+		inf.ms, inf.err = ms, err
+		close(inf.done)
+		return ms, err
+	}
 }
 
 // liveLocked returns the registered session for id if it is neither
@@ -352,43 +444,24 @@ func (r *ManagedSessionRegistry) liveLocked(id string) *ManagedSession {
 // New creates a fresh session and registers it under sessionID. Idempotent
 // per ADR-093 §6: if sessionID already maps to a live session, that
 // session is returned rather than starting a second subprocess for the
-// same ID.
+// same ID. Concurrent New calls for the same not-yet-registered sessionID
+// share one spawn (see getOrSpawn) rather than each spawning their own
+// subprocess.
 func (r *ManagedSessionRegistry) New(ctx context.Context, sessionID string, opts ManagedSessionOpts) (*ManagedSession, error) {
-	r.mu.RLock()
-	existing := r.liveLocked(sessionID)
-	r.mu.RUnlock()
-	if existing != nil {
-		return existing, nil
-	}
-
-	ms, err := NewManagedSession(ctx, sessionID, opts)
-	if err != nil {
-		return nil, err
-	}
-	r.mu.Lock()
-	r.sessions[sessionID] = ms
-	r.mu.Unlock()
-	return ms, nil
+	return r.getOrSpawn(sessionID, func() (*ManagedSession, error) {
+		return spawnNewManagedSession(ctx, sessionID, opts)
+	})
 }
 
 // Resume attaches to an existing on-disk session, or returns the
 // already-live in-process one if present (ADR-093 §6 idempotency).
+// Concurrent Resume calls for the same not-yet-registered sessionID share
+// one spawn (see getOrSpawn) rather than each spawning their own
+// subprocess.
 func (r *ManagedSessionRegistry) Resume(ctx context.Context, sessionID string, opts ManagedSessionOpts) (*ManagedSession, error) {
-	r.mu.RLock()
-	existing := r.liveLocked(sessionID)
-	r.mu.RUnlock()
-	if existing != nil {
-		return existing, nil
-	}
-
-	ms, err := ResumeManagedSession(ctx, sessionID, opts)
-	if err != nil {
-		return nil, err
-	}
-	r.mu.Lock()
-	r.sessions[sessionID] = ms
-	r.mu.Unlock()
-	return ms, nil
+	return r.getOrSpawn(sessionID, func() (*ManagedSession, error) {
+		return spawnResumeManagedSession(ctx, sessionID, opts)
+	})
 }
 
 // Get returns the session registered under sessionID, or nil if none is

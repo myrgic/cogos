@@ -174,3 +174,18 @@ graceful "no more turns after this one" shutdown.
   `--verbose` flag, `--session-id` create-only semantics) still holds —
   `TestSpike_MultiTurnOverResume` and `TestSpike_OnePromptOneResponse` both
   pass cleanly against 2.1.250.
+
+## Fixture privacy note (flagged by review, 2026-08-28)
+
+The four `golden_tool_turn_*.ndjson` fixtures above were recorded verbatim
+from a live capture on the capturing operator's own machine and
+intentionally contain that machine's local paths and username where they
+appear in tool-call/tool-result payloads (e.g. `Read` targeting this
+worktree's `go.mod` by absolute path). There are no credentials in any
+fixture — the session IDs listed in the Captures table are one-shot
+per-capture UUIDs, not reusable secrets. Recorded verbatim is deliberate
+per golden-corpus discipline (the fixtures are supposed to be a faithful,
+unedited record of what `claude --print --output-format stream-json`
+actually emitted, not a synthesized approximation). This has been flagged
+by review; retained as-is pending operator ruling on whether the local
+paths/username should be redacted.

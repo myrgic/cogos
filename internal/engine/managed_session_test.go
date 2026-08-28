@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -224,5 +225,157 @@ func TestManagedSessionRegistry_New_IsIdempotentForLiveSessions(t *testing.T) {
 	snapshot := reg.List()
 	if _, ok := snapshot["fake-session-4"]; !ok {
 		t.Fatalf("List() missing fake-session-4: %v", snapshot)
+	}
+}
+
+// stubSpawnCounter substitutes one of the package-level spawn indirections
+// (spawnNewManagedSession / spawnResumeManagedSession) with a wrapper that
+// counts calls while still delegating to the real fake-subprocess spawner,
+// so these tests observe how many times a *spawn* happened (not just how
+// many *pointers* came back distinct) without touching production code
+// paths or spawning a real `claude` binary. It returns a function that
+// reads the current count and a restore func that must run before the test
+// returns, since the variable is package-global and other tests in this
+// file rely on the real spawner.
+type spawnCounter struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *spawnCounter) inc() {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+}
+
+func (c *spawnCounter) get() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+// TestManagedSessionRegistry_New_ConcurrentSameID_SingleSpawn is the
+// regression test for the check-then-act race described in the
+// cog-review finding on internal/engine/managed_session.go: N goroutines
+// racing New() for the same not-yet-registered sessionID must produce
+// exactly one spawn and hand every caller the same *ManagedSession,
+// instead of each goroutine passing the nil check and spawning its own
+// subprocess (leaving all-but-one orphaned: leaked subprocess, and a
+// startEventPump goroutine permanently blocked once its 32-slot outCh
+// fills with nothing draining it).
+func TestManagedSessionRegistry_New_ConcurrentSameID_SingleSpawn(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	orig := spawnNewManagedSession
+	var counter spawnCounter
+	spawnNewManagedSession = func(ctx context.Context, sessionID string, opts ManagedSessionOpts) (*ManagedSession, error) {
+		counter.inc()
+		return orig(ctx, sessionID, opts)
+	}
+	defer func() { spawnNewManagedSession = orig }()
+
+	reg := NewManagedSessionRegistry()
+	opts := ManagedSessionOpts{ClaudePath: fakeClaudePath(t)}
+
+	const n = 25
+	results := make([]*ManagedSession, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			ms, err := reg.New(ctx, "race-new-session", opts)
+			results[i] = ms
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: New returned error: %v", i, err)
+		}
+	}
+	first := results[0]
+	if first == nil {
+		t.Fatalf("goroutine 0 got a nil *ManagedSession with no error")
+	}
+	for i, ms := range results {
+		if ms != first {
+			t.Fatalf("goroutine %d got *ManagedSession %p, want the shared winner %p — concurrent New() calls raced past each other instead of sharing one reservation", i, ms, first)
+		}
+	}
+
+	if got := counter.get(); got != 1 {
+		t.Fatalf("spawnNewManagedSession invoked %d times across %d concurrent New() calls racing the same not-yet-registered sessionID; want exactly 1", got, n)
+	}
+
+	drainInBackground(first)
+	waitForState(t, first, StateLive, 2*time.Second)
+	if err := first.Detach(); err != nil {
+		t.Fatalf("cleanup detach: %v", err)
+	}
+}
+
+// TestManagedSessionRegistry_Resume_ConcurrentSameID_SingleSpawn is the
+// Resume-side twin of the New test above: the same reservation race exists
+// independently in Resume (it has its own
+// RLock/liveLocked/RUnlock/spawn/Lock/insert sequence), so it needs its own
+// regression coverage rather than relying on New's passing.
+func TestManagedSessionRegistry_Resume_ConcurrentSameID_SingleSpawn(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	orig := spawnResumeManagedSession
+	var counter spawnCounter
+	spawnResumeManagedSession = func(ctx context.Context, sessionID string, opts ManagedSessionOpts) (*ManagedSession, error) {
+		counter.inc()
+		return orig(ctx, sessionID, opts)
+	}
+	defer func() { spawnResumeManagedSession = orig }()
+
+	reg := NewManagedSessionRegistry()
+	opts := ManagedSessionOpts{ClaudePath: fakeClaudePath(t)}
+
+	const n = 25
+	results := make([]*ManagedSession, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			ms, err := reg.Resume(ctx, "race-resume-session", opts)
+			results[i] = ms
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: Resume returned error: %v", i, err)
+		}
+	}
+	first := results[0]
+	if first == nil {
+		t.Fatalf("goroutine 0 got a nil *ManagedSession with no error")
+	}
+	for i, ms := range results {
+		if ms != first {
+			t.Fatalf("goroutine %d got *ManagedSession %p, want the shared winner %p — concurrent Resume() calls raced past each other instead of sharing one reservation", i, ms, first)
+		}
+	}
+
+	if got := counter.get(); got != 1 {
+		t.Fatalf("spawnResumeManagedSession invoked %d times across %d concurrent Resume() calls racing the same not-yet-registered sessionID; want exactly 1", got, n)
+	}
+
+	drainInBackground(first)
+	waitForState(t, first, StateLive, 2*time.Second)
+	if err := first.Detach(); err != nil {
+		t.Fatalf("cleanup detach: %v", err)
 	}
 }
