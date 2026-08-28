@@ -748,6 +748,25 @@ type BackgroundTaskOpts struct {
 
 // SpawnBackground starts a Claude Code process that outlives the HTTP request.
 // Results are delivered via the process manager's callback mechanism.
+//
+// Deprecated: SpawnBackground is deprecated as a substrate primitive per
+// ADR-093 §8 (Migration plan, Commit 1). It spawns a one-shot
+// `claude -p --no-session-persistence` process with no lifecycle tracking
+// beyond the process manager's callback — no state machine, no
+// resumability, no cancellation contract. New substrate callers must use
+// ManagedSession (internal/engine/managed_session.go) instead, which spawns
+// via internal/acp.Subprocess and exposes the ADR-093 §4
+// Starting/Live/Stalled/Detached/Crashed lifecycle plus a Cancel() that
+// encodes the L1 cancellation spike's verdict (gate SIGINT on having
+// observed system.init; stdin-close is "no more turns", not abort).
+//
+// This method is not yet removed: its sole current caller,
+// serve_claude_code.go's POST /v1/claude-code/spawn handler, has not been
+// migrated (that migration is ADR-093 §8 Commits 3-4, a later lane — this
+// commit only marks the primitive deprecated and adds audit_callers.go to
+// flag any *additional* caller before that migration lands). Do not add
+// new SpawnBackground call sites; wire new spawn paths through
+// ManagedSessionRegistry.
 func (p *ClaudeCodeProvider) SpawnBackground(opts BackgroundTaskOpts) (string, error) {
 	args := []string{"-p"}
 	args = append(args, "--output-format", "json")
