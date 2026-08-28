@@ -18,6 +18,31 @@ const (
 	EventResult    EventType = "result"
 	// stream_event carries Anthropic's raw SSE deltas mid-turn.
 	EventStream EventType = "stream_event"
+	// rate_limit_event carries quota/overage status. Confirmed present on
+	// every real turn (L1 golden corpus, 2026-08-28) though absent from the
+	// ADR-093 §10 May catalogue — see RateLimitEvent.
+	EventRateLimit EventType = "rate_limit_event"
+)
+
+// System subtypes observed on ordinary tool-using turns beyond "init"
+// (ADR-093 §10 finding 4 / L1 golden corpus, 2026-08-28: contract drift vs.
+// the May catalogue). These already parsed correctly before this change —
+// ParseLine's EventSystem case dispatches on the "system" type alone and
+// decodes any subtype into SystemEvent, so init/hook_started/hook_response/
+// thinking_tokens/status/task_summary/post_turn_summary all land as
+// Event.System with SystemEvent.Subtype set accordingly, never Unknown.
+// Named here so callers (the L4 translator, tests) can switch on them
+// without stringly-typed literals; promote any of these to a dedicated
+// typed struct (as SystemEvent's own comment invites) if/when the
+// translator needs fields beyond Subtype/SessionID.
+const (
+	SystemSubtypeInit            = "init"
+	SystemSubtypeHookStarted     = "hook_started"
+	SystemSubtypeHookResponse    = "hook_response"
+	SystemSubtypeThinkingTokens  = "thinking_tokens"
+	SystemSubtypeStatus          = "status"
+	SystemSubtypeTaskSummary     = "task_summary"
+	SystemSubtypePostTurnSummary = "post_turn_summary"
 )
 
 // rawEvent is the wire envelope used for initial dispatch — every line is
@@ -54,15 +79,22 @@ type AssistantEvent struct {
 	SessionID string `json:"session_id,omitempty"`
 }
 
-// ContentItem is one entry inside an assistant message's content array.
-// We model text and tool_use here; thinking/redacted_thinking can be added
-// when we wire thought-streaming.
+// ContentItem is one entry inside an assistant or user message's content
+// array. We model text, tool_use, and tool_result here; thinking/
+// redacted_thinking can be added when we wire thought-streaming.
 type ContentItem struct {
 	Type  string          `json:"type"`
 	Text  string          `json:"text,omitempty"`
 	ID    string          `json:"id,omitempty"`    // tool_use
 	Name  string          `json:"name,omitempty"`  // tool_use
 	Input json.RawMessage `json:"input,omitempty"` // tool_use
+
+	// tool_result fields (carried on a UserEvent's content array — see
+	// UserEvent). Content is left raw because the API allows either a bare
+	// string or a content-block array here.
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
 }
 
 // StreamEvent is the mid-turn delta carrier — Anthropic's SSE event shape
@@ -88,6 +120,54 @@ type StreamDelta struct {
 		Type string `json:"type"`
 		Text string `json:"text,omitempty"`
 	} `json:"delta"`
+}
+
+// UserEvent carries a "user"-role frame emitted back to us by claude. In
+// practice the only source of these on a tool-using turn is a tool result
+// being handed back after an assistant tool_use — see
+// testdata/golden_tool_turn_baseline.ndjson for a real capture. Previously
+// undispatched: EventUser was declared but ParseLine's switch had no case
+// for it, so every one of these fell through to Unknown (ADR-093 §10
+// finding 4 / L1 golden corpus, 2026-08-28). First code fix from the ACP
+// translator spec §4.1.
+type UserEvent struct {
+	Type    string `json:"type"`
+	Message struct {
+		Role    string        `json:"role"`
+		Content []ContentItem `json:"content"`
+	} `json:"message"`
+	SessionID       string          `json:"session_id,omitempty"`
+	ParentToolUseID *string         `json:"parent_tool_use_id,omitempty"`
+	ToolUseResult   json.RawMessage `json:"tool_use_result,omitempty"`
+}
+
+// RateLimitEvent carries quota/overage status, emitted once per turn on
+// every capture in the L1 golden corpus (2026-08-28), unconditionally —
+// not gated by --include-partial-messages or --include-hook-events, and
+// absent from the ADR-093 §10 May frame catalogue.
+type RateLimitEvent struct {
+	Type          string        `json:"type"`
+	RateLimitInfo RateLimitInfo `json:"rate_limit_info"`
+	SessionID     string        `json:"session_id,omitempty"`
+}
+
+// RateLimitInfo is the payload observed on 2.1.250; richer than the bare
+// quota ping the May-era text implied (see testdata/README.md).
+type RateLimitInfo struct {
+	Status                string                     `json:"status,omitempty"`
+	RateLimitType         string                     `json:"rateLimitType,omitempty"`
+	ResetsAt              int64                      `json:"resetsAt,omitempty"`
+	OverageStatus         string                     `json:"overageStatus,omitempty"`
+	OverageDisabledReason string                     `json:"overageDisabledReason,omitempty"`
+	IsUsingOverage        bool                       `json:"isUsingOverage,omitempty"`
+	UnifiedWindows        map[string]RateLimitWindow `json:"unifiedWindows,omitempty"`
+}
+
+// RateLimitWindow is one entry of RateLimitInfo.UnifiedWindows, e.g. keyed
+// by "five_hour" / "seven_day".
+type RateLimitWindow struct {
+	Utilization float64 `json:"utilization,omitempty"`
+	ResetsAt    int64   `json:"resetsAt,omitempty"`
 }
 
 // ResultEvent terminates a turn. It carries the final text, usage, and any
@@ -116,8 +196,10 @@ type UnknownEvent struct {
 type Event struct {
 	System    *SystemEvent
 	Assistant *AssistantEvent
+	User      *UserEvent
 	Stream    *StreamEvent
 	Result    *ResultEvent
+	RateLimit *RateLimitEvent
 	Unknown   *UnknownEvent
 }
 
@@ -142,6 +224,18 @@ func ParseLine(line []byte) (Event, error) {
 			return Event{}, err
 		}
 		return Event{Assistant: &ev}, nil
+	case EventUser:
+		var ev UserEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			return Event{}, err
+		}
+		return Event{User: &ev}, nil
+	case EventRateLimit:
+		var ev RateLimitEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			return Event{}, err
+		}
+		return Event{RateLimit: &ev}, nil
 	case EventStream:
 		var ev StreamEvent
 		if err := json.Unmarshal(line, &ev); err != nil {
