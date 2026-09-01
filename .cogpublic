@@ -1,9 +1,19 @@
 # .cogpublic — Public release gate for myrgic/cogos
 # Defines what crosses the constellation boundary outward.
-# Used by `cog plan upstream` / `cog apply upstream` to sanitize pushes.
 #
-# Gate 1: private dev → org upstream (myrgic/cogos, direct branch workflow)
-# Gate 2: squash-merge to main
+# ENFORCED BY: scripts/cogpublic-guard.py, run in CI on every PR
+#   ("Public release gate" steps in .github/workflows/ci.yml).
+#   Locally:  python3 ./scripts/cogpublic-guard.py [--staged]
+#
+# HISTORY / WHY THE ABOVE LINE MATTERS: from 2026-04-14 until 2026-09-01 this
+# file's header claimed it was "used by `cog plan upstream` / `cog apply
+# upstream` to sanitize pushes." That command was never implemented, nothing
+# else referenced this file, and no repo carried an active git hook — so the
+# guards below were declared and never executed. Three instances of the exact
+# patterns listed here reached public repos in that window (mod3 #138/#142,
+# cogos #588, mod3 #146). Keep this pointer accurate: a guard that names a
+# non-existent enforcer reads like coverage during review and stops anyone
+# from looking twice.
 
 version: 1
 
