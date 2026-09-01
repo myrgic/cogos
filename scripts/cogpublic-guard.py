@@ -178,33 +178,38 @@ def excluded(path: str, patterns: list[str]) -> bool:
 
 
 def decode_scannable(raw: bytes) -> str:
-    """Decode bytes into text the guards can match against.
+    """Decode bytes into every text form a guard might need to match.
 
-    DEFECT FIXED (review round 3): content was read with
-    `read_text(errors="ignore")`, i.e. UTF-8 only. A UTF-16 file stores ASCII
-    as alternating NUL bytes, so `/Users/slowbro` decodes to `/\\x00U\\x00s...`
-    under UTF-8 and every guard misses it — reproduced: a UTF-16 file holding
-    the operator home path scanned clean while the identical UTF-8 file was
-    caught. Undetected-leak-by-encoding.
+    Returns all plausible decodings joined, not a single "best guess". Picking
+    one encoding is what made the first version of this function wrong twice.
 
-    UTF-16 is detected by BOM, or by a high NUL density in the head of the
-    file (UTF-16 without a BOM). Everything else decodes as UTF-8 with
-    replacement, which is lossy but never silently drops a match, since the
-    ASCII a guard cares about survives.
+    DEFECT FIXED (review round 3): content was read `read_text(errors="ignore")`,
+    i.e. UTF-8 only. UTF-16 stores ASCII as alternating NUL bytes, so
+    `/Users/slowbro` decoded to garbage and every guard missed it.
+
+    DEFECT FIXED (round 4, found by running the review's own attack list after
+    the reviewer died mid-run): the first fix tried UTF-16 variants in order and
+    took the first that did not raise. UTF-16-LE *never* raises on
+    little-endian-ish bytes, so a UTF-16-**BE** file without a BOM decoded to
+    CJK mojibake and scanned clean — and UTF-32 (whose BOM starts with the
+    UTF-16 BOM bytes) was misdecoded the same way. Both reproduced: leak on
+    disk, exit 0.
+
+    A decoder that must GUESS will guess wrong. So decode under every candidate
+    and search the union: a false extra decoding costs at worst a spurious
+    finding a human resolves, while a missed one publishes a leak.
     """
-    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-        try:
-            return raw.decode("utf-16")
-        except (UnicodeDecodeError, LookupError):
-            pass
+    parts = [raw.decode("utf-8", errors="replace")]
     head = raw[:4096]
-    if head and head.count(b"\x00") > len(head) // 4:
-        for enc in ("utf-16-le", "utf-16-be"):
+    # Wide encodings only matter when NULs are actually present; skip the work
+    # (and the mojibake) for ordinary text.
+    if head.count(0):
+        for enc in ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"):
             try:
-                return raw.decode(enc)
-            except (UnicodeDecodeError, LookupError):
+                parts.append(raw.decode(enc, errors="replace"))
+            except (UnicodeDecodeError, LookupError, ValueError):
                 continue
-    return raw.decode("utf-8", errors="replace")
+    return "\n".join(parts)
 
 
 def read_blob(mode: str, path: str, root: Path) -> str | None:
