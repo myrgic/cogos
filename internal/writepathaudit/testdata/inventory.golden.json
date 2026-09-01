@@ -387,7 +387,7 @@
     },
     {
       "file": "internal/engine/boot_node_root_grant.go",
-      "line": 292,
+      "line": 275,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "persistNodeRootGrant",
@@ -399,7 +399,7 @@
     },
     {
       "file": "internal/engine/boot_node_root_grant.go",
-      "line": 296,
+      "line": 279,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "persistNodeRootGrant",
@@ -411,7 +411,7 @@
     },
     {
       "file": "internal/engine/boot_node_root_grant.go",
-      "line": 299,
+      "line": 282,
       "column": 12,
       "primitive": "os.Rename",
       "func": "persistNodeRootGrant",
@@ -420,18 +420,6 @@
       "resolved": true,
       "subsystem": "internal:engine",
       "raw": "path"
-    },
-    {
-      "file": "internal/engine/build_tags.go",
-      "line": 50,
-      "column": 14,
-      "primitive": "sql.Open(sqlite3)",
-      "func": "func literal (line 49)",
-      "pattern": ":memory:",
-      "category": "unanchored",
-      "resolved": true,
-      "subsystem": "internal:engine",
-      "raw": "\":memory:\""
     },
     {
       "file": "internal/engine/bus_consumers.go",
@@ -1119,7 +1107,7 @@
     },
     {
       "file": "internal/engine/mcp_stubs.go",
-      "line": 108,
+      "line": 103,
       "column": 13,
       "primitive": "sql.Open(sqlite3)",
       "func": "searchMemoryFTSDriftRepair",
@@ -1131,7 +1119,7 @@
     },
     {
       "file": "internal/engine/mcp_stubs.go",
-      "line": 215,
+      "line": 210,
       "column": 13,
       "primitive": "sql.Open(sqlite3)",
       "func": "searchMemoryFTS",
@@ -1143,7 +1131,7 @@
     },
     {
       "file": "internal/engine/mcp_stubs.go",
-      "line": 643,
+      "line": 641,
       "column": 9,
       "primitive": "engine.AppendEvent(bucket)",
       "func": "EmitLedgerEvent",
@@ -1155,7 +1143,7 @@
     },
     {
       "file": "internal/engine/mcp_stubs.go",
-      "line": 666,
+      "line": 664,
       "column": 13,
       "primitive": "sql.Open(sqlite3)",
       "func": "buildMemoryIndexFromDB",
@@ -1551,7 +1539,7 @@
     },
     {
       "file": "internal/engine/serve.go",
-      "line": 1192,
+      "line": 1172,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",
@@ -1623,7 +1611,7 @@
     },
     {
       "file": "internal/engine/serve_identity_grants.go",
-      "line": 725,
+      "line": 723,
       "column": 9,
       "primitive": "engine.AppendEvent(bucket)",
       "func": "(*IdentityGrantRegistry).appendExtendEventLocked",
@@ -1635,7 +1623,7 @@
     },
     {
       "file": "internal/engine/serve_identity_grants.go",
-      "line": 782,
+      "line": 780,
       "column": 9,
       "primitive": "engine.AppendEvent(bucket)",
       "func": "(*IdentityGrantRegistry).appendGrantEventLocked",
@@ -1647,7 +1635,7 @@
     },
     {
       "file": "internal/engine/serve_identity_grants.go",
-      "line": 825,
+      "line": 823,
       "column": 9,
       "primitive": "engine.AppendEvent(bucket)",
       "func": "(*IdentityGrantRegistry).appendSupersessionEventLocked",
@@ -1995,10 +1983,22 @@
     },
     {
       "file": "internal/providers/site/site.go",
-      "line": 805,
+      "line": 836,
+      "column": 12,
+      "primitive": "os.WriteFile",
+      "func": "gateArtifact",
+      "pattern": "\u003cTempDir\u003e/.cogpublic",
+      "category": "elsewhere",
+      "resolved": true,
+      "subsystem": "provider:site",
+      "raw": "stagedCfg"
+    },
+    {
+      "file": "internal/providers/site/site.go",
+      "line": 907,
       "column": 11,
       "primitive": "os.MkdirAll",
-      "func": "func literal (line 795)",
+      "func": "func literal (line 897)",
       "pattern": "{dst}/\u003ccall:filepath.Rel\u003e",
       "category": "dynamic",
       "resolved": false,
@@ -2007,7 +2007,7 @@
     },
     {
       "file": "internal/providers/site/site.go",
-      "line": 817,
+      "line": 919,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "copyFile",
@@ -2019,7 +2019,7 @@
     },
     {
       "file": "internal/providers/site/site.go",
-      "line": 820,
+      "line": 922,
       "column": 14,
       "primitive": "os.OpenFile",
       "func": "copyFile",
@@ -2031,7 +2031,7 @@
     },
     {
       "file": "internal/providers/site/site.go",
-      "line": 825,
+      "line": 927,
       "column": 11,
       "primitive": "io.Copy",
       "func": "copyFile",
@@ -2235,7 +2235,7 @@
     },
     {
       "file": "internal/testkernel/testkernel.go",
-      "line": 557,
+      "line": 562,
       "column": 13,
       "primitive": "os.MkdirAll",
       "func": "makeMinimalWorkspace",
@@ -2247,7 +2247,7 @@
     },
     {
       "file": "internal/testkernel/testkernel.go",
-      "line": 564,
+      "line": 569,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "makeMinimalWorkspace",
@@ -2259,7 +2259,7 @@
     },
     {
       "file": "internal/testkernel/testkernel.go",
-      "line": 569,
+      "line": 574,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "makeMinimalWorkspace",
@@ -2862,8 +2862,8 @@
     "total": 238,
     "cog": 97,
     "home": 2,
-    "elsewhere": 13,
-    "unanchored": 85,
+    "elsewhere": 14,
+    "unanchored": 84,
     "dynamic": 41,
     "by_primitive": {
       "engine.AppendEvent(bucket)": 5,
@@ -2875,8 +2875,8 @@
       "os.OpenFile": 27,
       "os.Rename": 33,
       "os.Symlink": 1,
-      "os.WriteFile": 64,
-      "sql.Open(sqlite3)": 8
+      "os.WriteFile": 65,
+      "sql.Open(sqlite3)": 7
     }
   },
   "subprocess_sites": [
@@ -3192,17 +3192,7 @@
     },
     {
       "file": "internal/engine/provider_claudecode.go",
-      "line": 70,
-      "column": 9,
-      "func": "func literal (line 69)",
-      "subsystem": "internal:engine",
-      "raw": "exec.CommandContext(ctx, binary, \"auth\", \"status\", \"--json\")",
-      "dir": "{home}",
-      "dir_known": true
-    },
-    {
-      "file": "internal/engine/provider_claudecode.go",
-      "line": 200,
+      "line": 136,
       "column": 9,
       "func": "(*ClaudeCodeProvider).Ping",
       "subsystem": "internal:engine",
@@ -3242,17 +3232,7 @@
     },
     {
       "file": "internal/engine/provider_codex.go",
-      "line": 56,
-      "column": 9,
-      "func": "func literal (line 55)",
-      "subsystem": "internal:engine",
-      "raw": "exec.CommandContext(ctx, binary, \"login\", \"status\")",
-      "dir": "{home}",
-      "dir_known": true
-    },
-    {
-      "file": "internal/engine/provider_codex.go",
-      "line": 204,
+      "line": 147,
       "column": 9,
       "func": "(*CodexProvider).Ping",
       "subsystem": "internal:engine",
@@ -3322,7 +3302,7 @@
     },
     {
       "file": "internal/engine/provider_pi.go",
-      "line": 209,
+      "line": 122,
       "column": 9,
       "func": "(*PiProvider).Ping",
       "subsystem": "internal:engine",
@@ -3542,7 +3522,17 @@
     },
     {
       "file": "internal/providers/site/site.go",
-      "line": 785,
+      "line": 851,
+      "column": 10,
+      "func": "gateArtifact",
+      "subsystem": "provider:site",
+      "raw": "exec.CommandContext(ctx, \"python3\", args...)",
+      "dir": "\u003cTempDir\u003e",
+      "dir_known": true
+    },
+    {
+      "file": "internal/providers/site/site.go",
+      "line": 887,
       "column": 9,
       "func": "gitRun",
       "subsystem": "provider:site",
