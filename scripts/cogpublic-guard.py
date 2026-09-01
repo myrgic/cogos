@@ -162,6 +162,18 @@ def scan(root: Path, mode: str) -> int:
     if mode == "staged":
         files = [f for f in sh("git", "diff", "--cached", "--name-only",
                                "--diff-filter=ACM").splitlines() if f]
+    elif mode == "tree":
+        # Every file on disk, git or not. For BUILD ARTIFACTS: a generated
+        # deploy tree is `git init` + `git add .` with nothing committed, so
+        # `git ls-files` returns empty and a HEAD scan would examine zero
+        # files. Found by the positive control in
+        # internal/providers/site/gate_artifact_test.go — the clean-artifact
+        # case failed, which is exactly what a positive control is for.
+        files = [
+            str(p.relative_to(root))
+            for p in root.rglob("*")
+            if p.is_file() and ".git/" not in str(p.relative_to(root))
+        ]
     else:
         files = [f for f in sh("git", "ls-files").splitlines() if f]
 
@@ -201,7 +213,7 @@ def scan(root: Path, mode: str) -> int:
     # legitimate (nothing staged touches tracked content); at HEAD it means the
     # excludes swallowed the repo or git listed nothing, and reporting "OK" for
     # that is the silent-green failure this tool exists to prevent.
-    if scanned == 0 and mode != "staged":
+    if scanned == 0 and mode != "staged":  # tree/head: nothing scanned == cannot run
         print("GUARD CANNOT RUN: scanned 0 files at HEAD — check `exclude:` "
               "patterns and that this is a git worktree", file=sys.stderr)
         return 2
@@ -274,13 +286,17 @@ def self_test(root: Path) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--staged", action="store_true")
+    ap.add_argument("--tree", action="store_true",
+                    help="scan every file on disk, not just git-tracked ones "
+                         "(for build artifacts with nothing committed yet)")
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--root", default=".")
     a = ap.parse_args()
     root = Path(a.root).resolve()
     if a.self_test:
         return self_test(root)
-    return scan(root, "staged" if a.staged else "head")
+    mode = "staged" if a.staged else ("tree" if a.tree else "head")
+    return scan(root, mode)
 
 
 if __name__ == "__main__":

@@ -766,6 +766,23 @@ func (g *ghPagesStrategy) Deploy(ctx context.Context, app siteCRD, artifactDir s
 	if err := gitRun(ctx, tmpDir, "add", "."); err != nil {
 		return fmt.Errorf("Deploy: git add: %w", err)
 	}
+	// Public-release gate on the GENERATED artifact, not the source.
+	//
+	// This is the only point in the pipeline that can catch a build-time leak.
+	// `siteBuild` runs `bash build.sh` on the operator's machine, so anything
+	// the build embeds from its environment — $HOME, `pwd`, tool output, env
+	// vars — lands in the artifact having never existed in the `sites` repo.
+	// A gate on `sites` cannot see it, and CI on the deploy target cannot stop
+	// it: Pages publishes from `main` the instant this force-push lands, so a
+	// check there is post-hoc by construction.
+	//
+	// This is the mod3 #146 shape exactly — a leak in a generated form that no
+	// reviewer reads as a path — and the "machine-managed, therefore exempt"
+	// assumption is wrong the same way `cog plan upstream` was: the exemption
+	// covered the one path that emits content no human reviews.
+	if err := gateArtifact(ctx, tmpDir); err != nil {
+		return fmt.Errorf("Deploy: public release gate: %w", err)
+	}
 	msg := fmt.Sprintf("deploy: %s @ %s", app.Spec.Domain, sourceSHA)
 	if err := gitRun(ctx, tmpDir, "-c", "user.email=cog@myrgic.io",
 		"-c", "user.name=CogOS", "commit", "-m", msg); err != nil {
@@ -779,6 +796,91 @@ func (g *ghPagesStrategy) Deploy(ctx context.Context, app siteCRD, artifactDir s
 		return fmt.Errorf("Deploy: git push: %w", err)
 	}
 	return nil
+}
+
+// gateArtifact runs the public-release content gate over a built deploy
+// artifact immediately before it is force-pushed to a public repository.
+//
+// FAILS CLOSED. Every failure mode — guard missing, python missing, config
+// missing, unreadable, non-zero exit — aborts the deploy. The whole point of
+// the incident that produced this gate (a .cogpublic that declared guards
+// nothing executed for four and a half months) is that a check which cannot
+// run must never be mistaken for a check that passed. A skipped gate here
+// publishes to the open internet with no second chance: the target is a Pages
+// repo, so `main` is live the moment the push lands.
+//
+// The gate scans the artifact's working tree rather than git-tracked files,
+// because at this point the artifact is a fresh `git init` + `git add .` and
+// every file in it is about to become public.
+func gateArtifact(ctx context.Context, artifactDir string) error {
+	root, err := repoRootForGuard()
+	if err != nil {
+		return fmt.Errorf("locate guard: %w", err)
+	}
+	guard := filepath.Join(root, "scripts", "cogpublic-guard.py")
+	cfg := filepath.Join(root, ".cogpublic")
+	for _, p := range []string{guard, cfg} {
+		if _, statErr := os.Stat(p); statErr != nil {
+			return fmt.Errorf("required file missing (%s): %w", p, statErr)
+		}
+	}
+
+	// The artifact has no .cogpublic of its own; supply the kernel repo's
+	// policy by copying it in, scanning, then removing it so the published
+	// tree is unchanged.
+	stagedCfg := filepath.Join(artifactDir, ".cogpublic")
+	policy, err := os.ReadFile(cfg)
+	if err != nil {
+		return fmt.Errorf("read policy: %w", err)
+	}
+	if err := os.WriteFile(stagedCfg, policy, 0o644); err != nil {
+		return fmt.Errorf("stage policy: %w", err)
+	}
+	defer os.Remove(stagedCfg)
+
+	// Self-test first: a ruleset that stopped parsing must fail loudly rather
+	// than scan against zero patterns and report clean.
+	//
+	// --tree, not the default HEAD scan: the artifact is `git init` + `git add`
+	// with nothing committed, so `git ls-files` is empty and a HEAD scan would
+	// examine zero files. Caught by this package's own positive control.
+	for _, args := range [][]string{
+		{guard, "--root", artifactDir, "--self-test"},
+		{guard, "--root", artifactDir, "--tree"},
+	} {
+		cmd := exec.CommandContext(ctx, "python3", args...)
+		cmd.Dir = artifactDir
+		out, runErr := cmd.CombinedOutput()
+		if runErr != nil {
+			return fmt.Errorf("BLOCKED — refusing to publish %s:\n%s",
+				artifactDir, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}
+
+// repoRootForGuard resolves the cogos checkout holding the guard and policy.
+// COGOS_REPO_ROOT wins when set (containers, CI); otherwise walk up from this
+// source file's own directory.
+func repoRootForGuard() (string, error) {
+	if v := os.Getenv("COGOS_REPO_ROOT"); v != "" {
+		return v, nil
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if _, statErr := os.Stat(filepath.Join(dir, ".cogpublic")); statErr == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("no .cogpublic found walking up from working directory; " +
+				"set COGOS_REPO_ROOT to the cogos checkout")
+		}
+		dir = parent
+	}
 }
 
 func gitRun(ctx context.Context, dir string, args ...string) error {
