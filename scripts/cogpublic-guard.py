@@ -48,43 +48,80 @@ def sh(*args, **kw) -> str:
     return subprocess.run(args, capture_output=True, text=True, **kw).stdout
 
 
-def load_guards(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
-    """Parse content_guards + allow/deny from .cogpublic.
+def parse_value(raw: str) -> str:
+    """Extract a scalar YAML value, quote-aware.
+
+    DEFECT FIXED (review of #19): the previous implementation was
+    `raw.strip().strip("\\"'")`, which silently compiled an inline comment into
+    the regex. `pattern: "/Users/slowbro"  # operator home` became the pattern
+    `/Users/slowbro"  # operator home`, matching nothing — the scan reported
+    clean AND the self-test passed (probe==pattern matches tautologically).
+    A guard silently degraded to matching nothing, on the exact pattern family
+    that caused the incident this tool exists to prevent.
+
+    Quoted values are read to their closing quote and everything after is
+    discarded. Unquoted values are truncated at ` #`. A `#` inside quotes is
+    preserved, since it is legal inside a regex character class.
+    """
+    s = raw.strip()
+    if s and s[0] in "\"'":
+        q = s[0]
+        end = s.find(q, 1)
+        if end == -1:
+            raise ValueError(f"unterminated quote in value: {raw!r}")
+        return s[1:end]
+    # Unquoted: a comment must be preceded by whitespace to count as one.
+    m = re.search(r"\s#", s)
+    return (s[:m.start()] if m else s).strip()
+
+
+def load_guards(root: Path) -> tuple[list[tuple[str, str, str]], list[str]]:
+    """Parse content_guards + exclude from .cogpublic.
 
     Deliberately a small hand parser rather than a PyYAML dependency: this must
     run in a bare pre-commit hook and in CI before any install step, and a
     guard that fails to import is a guard that does not run.
+
+    Returns (guards, excludes) where each guard is (pattern, description, probe).
+    `probe` is an optional known-dirty string the self-test asserts against.
     """
     path = root / CONFIG
     if not path.exists():
         raise FileNotFoundError(f"{CONFIG} not found in {root}")
 
-    guards: list[tuple[str, str]] = []
+    guards: list[tuple[str, str, str]] = []
     excludes: list[str] = []
     section = None
-    pending: str | None = None
+    pending: dict | None = None
+
+    def flush():
+        nonlocal pending
+        if pending:
+            guards.append((pending["pattern"], pending.get("description", ""),
+                           pending.get("probe", "")))
+            pending = None
 
     for raw in path.read_text().splitlines():
         line = raw.rstrip()
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         if not line.startswith((" ", "\t", "-")):
+            flush()
             section = line.split(":")[0].strip()
             continue
         stripped = line.strip()
         if section == "content_guards":
             if stripped.startswith("- pattern:"):
-                if pending:
-                    guards.append((pending, ""))
-                pending = stripped.split("pattern:", 1)[1].strip().strip("\"'")
-            elif stripped.startswith("description:") and pending:
-                guards.append((pending, stripped.split("description:", 1)[1].strip().strip("\"'")))
-                pending = None
+                flush()
+                pending = {"pattern": parse_value(stripped.split("pattern:", 1)[1])}
+            elif pending is not None:
+                for key in ("description", "probe"):
+                    if stripped.startswith(f"{key}:"):
+                        pending[key] = parse_value(stripped.split(f"{key}:", 1)[1])
         elif section in ("exclude", "deny"):
             if stripped.startswith("- "):
-                excludes.append(stripped[2:].strip().strip("\"'"))
-    if pending:
-        guards.append((pending, ""))
+                excludes.append(parse_value(stripped[2:]))
+    flush()
     return guards, excludes
 
 
@@ -96,18 +133,26 @@ def excluded(path: str, patterns: list[str]) -> bool:
     return False
 
 
-# Files whose PURPOSE is to carry the patterns: the config itself, and tests
-# asserting the guard works. Skipping these is not a loophole — a scanner that
-# flags its own ruleset produces noise that trains people to ignore it.
-SELF_REFERENTIAL = re.compile(
-    r"(^|/)\.cogpublic$|(^|/)cogpublic_guard\.py$|_guard_test\.|_names_test\.go$|sanitize_fixture\.py$"
-)
+# The config itself is skipped: it necessarily contains every pattern, and a
+# scanner that flags its own ruleset produces noise that trains people to
+# ignore it.
+#
+# DEFECT FIXED (review of #19): this was previously a FILENAME regex that also
+# excluded `sanitize_fixture.py`, `*_names_test.go`, and `*_guard_test.*`.
+# Filenames are contributor-controllable, so a real leak was bypassable by
+# naming the file `sanitize_fixture.py` — reproduced: exit 0 with the leak
+# present, while identical content in `ordinary.py` exited 1. Exclusion by
+# filename is not a security property. Only the config path is skipped now;
+# anything else that legitimately carries a pattern must be listed explicitly
+# in that repo's `exclude:`, which is a reviewable declaration rather than an
+# invisible convention.
+SELF_REFERENTIAL = re.compile(r"(^|/)\.cogpublic$")
 
 
 def scan(root: Path, mode: str) -> int:
     try:
         guards, excludes = load_guards(root)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"GUARD CANNOT RUN: {e}", file=sys.stderr)
         return 2
     if not guards:
@@ -120,7 +165,7 @@ def scan(root: Path, mode: str) -> int:
     else:
         files = [f for f in sh("git", "ls-files").splitlines() if f]
 
-    compiled = [(re.compile(p), p, d) for p, d in guards]
+    compiled = [(re.compile(p), p, d) for p, d, _ in guards]
     violations = []
     scanned = 0
 
@@ -131,24 +176,35 @@ def scan(root: Path, mode: str) -> int:
         if not fp.is_file():
             continue
         try:
-            body = fp.read_text(errors="ignore")
+            content = fp.read_text(errors="ignore")
         except Exception:
             continue
         scanned += 1
+        # Report EVERY guard a file trips, not just the first. Breaking on the
+        # first match hid co-located findings: a file with both a home path and
+        # a token showed one line, so fixing it looked sufficient.
         for rx, pat, desc in compiled:
-            m = rx.search(body)
+            m = rx.search(content)
             if m:
-                line = body[:m.start()].count("\n") + 1
+                line = content[:m.start()].count("\n") + 1
                 violations.append(f"{f}:{line}: {desc or pat}")
-                break
 
     if violations:
         print("PUBLIC RELEASE GATE — BLOCKED", file=sys.stderr)
         for v in sorted(violations):
             print(f"  {v}", file=sys.stderr)
-        print(f"\n{len(violations)} file(s) match a .cogpublic content guard.",
+        print(f"\n{len(violations)} finding(s) match a .cogpublic content guard.",
               file=sys.stderr)
         return 1
+
+    # A scan that examined nothing is not a pass. In `staged` mode zero files is
+    # legitimate (nothing staged touches tracked content); at HEAD it means the
+    # excludes swallowed the repo or git listed nothing, and reporting "OK" for
+    # that is the silent-green failure this tool exists to prevent.
+    if scanned == 0 and mode != "staged":
+        print("GUARD CANNOT RUN: scanned 0 files at HEAD — check `exclude:` "
+              "patterns and that this is a git worktree", file=sys.stderr)
+        return 2
 
     print(f"public release gate OK ({scanned} files, {len(guards)} guards)")
     return 0
@@ -157,40 +213,61 @@ def scan(root: Path, mode: str) -> int:
 def self_test(root: Path) -> int:
     """Prove the detector fires. A guard that has only ever said 'clean' has
     not been tested — which is precisely how the declared-but-unimplemented
-    .cogpublic passed as coverage for four months."""
+    .cogpublic passed as coverage for four months.
+
+    DEFECT FIXED (review of #19): this previously printed "every synthesizable
+    guard matches a known-dirty probe" while SILENTLY SKIPPING every pattern
+    containing a regex metacharacter — i.e. all the token guards
+    (`sk-…`, `ghp_…`, `xoxb-…`). It could report OK having tested nothing, and
+    the reader could not tell. Untested guards are now reported explicitly and
+    a repo may supply its own `probe:` to convert one into a tested guard.
+    """
     try:
         guards, _ = load_guards(root)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"SELF-TEST FAILED: {e}", file=sys.stderr)
         return 2
     if not guards:
         print("SELF-TEST FAILED: zero guards parsed", file=sys.stderr)
         return 2
 
-    import tempfile
-    fails = []
-    for pat, desc in guards:
-        # Build a string that MUST match this pattern.
-        probe = {
-            r"/Users/slowbro": "/Users/slowbro/x",
-            r"-Users-slowbro-": "-Users-slowbro-x",
-        }.get(pat)
-        if probe is None:
-            if not any(c in pat for c in ".*+[](){}\\|^$?"):
-                probe = pat                      # literal
-            else:
-                continue                          # regex probe not synthesizable
-        if not re.search(pat, probe):
-            fails.append(f"pattern {pat!r} did not match its own probe {probe!r}")
+    # Built-in probes for the org baseline patterns. A repo can override or
+    # extend by adding `probe:` beside any guard in its own .cogpublic.
+    BUILTIN = {
+        r"sk-[a-zA-Z0-9]{20,}": "sk-" + "a" * 24,
+        r"ghp_[a-zA-Z0-9]{20,}": "ghp_" + "b" * 24,
+        r"xoxb-[a-zA-Z0-9]+": "xoxb-abc123",
+        r"@gmail\.com|@yahoo\.com|@hotmail\.com": "someone@gmail.com",
+    }
 
+    fails, tested, untested = [], [], []
     print(f"self-test: {len(guards)} guards parsed from {CONFIG}")
-    for pat, desc in guards:
-        print(f"  - {pat}  ({desc})")
+
+    for pat, desc, declared_probe in guards:
+        probe = declared_probe or BUILTIN.get(pat)
+        if probe is None and not any(c in pat for c in ".*+[](){}\\|^$?"):
+            probe = pat + "X"          # literal pattern: any superstring matches
+        if probe is None:
+            untested.append((pat, desc))
+            print(f"  - {pat}  ({desc})  [UNTESTED — add `probe:` to test it]")
+            continue
+        if re.search(pat, probe):
+            tested.append(pat)
+            print(f"  - {pat}  ({desc})  [tested]")
+        else:
+            fails.append(f"pattern {pat!r} did not match its probe {probe!r}")
+            print(f"  - {pat}  ({desc})  [FAILED]")
+
     if fails:
         for f in fails:
             print(f"  FAIL: {f}", file=sys.stderr)
         return 1
-    print("self-test OK — every synthesizable guard matches a known-dirty probe")
+
+    print(f"self-test OK — {len(tested)} guard(s) verified against a "
+          f"known-dirty probe, {len(untested)} untested")
+    if untested:
+        print("  untested guards are NOT proven to fire; add a `probe:` line "
+              "beside each to close the gap")
     return 0
 
 

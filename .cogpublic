@@ -96,6 +96,19 @@ content_guards:
   - pattern: '@gmail\.com|@yahoo\.com|@hotmail\.com'
     description: "Personal email address (git author emails exempt)"
 
+# Paths the content scan skips.
+#
+# The guard executor is here BY EXPLICIT DECLARATION, not by an invisible rule.
+# Review of #19 found the previous implementation excluded files by FILENAME
+# (`sanitize_fixture.py`, `*_names_test.go`), which meant a real leak could be
+# hidden simply by naming the file that way — reproduced: exit 0 with the leak
+# present, exit 1 for identical content under an ordinary name. Filename
+# exclusion is not a security property. The script legitimately contains probe
+# strings for every guard it tests, so it is listed here where a reviewer sees
+# it in the diff.
+exclude:
+  - scripts/cogpublic-guard.py
+
 # Post-push structural checks
 post_guards:
   - command: "go build ./..."
