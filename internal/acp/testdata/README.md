@@ -190,12 +190,53 @@ actually emitted, not a synthesized approximation). This has been flagged
 by review; retained as-is pending operator ruling on whether the local
 paths/username should be redacted.
 
-## Redaction note (2026-08-28, operator-ruled)
+## Sanitization (2026-08-31, supersedes the 2026-08-28 redaction note)
 
-Fixtures are redacted for operator privacy (public repo): username -> `operator`,
-machine name -> `examplenode`, applied uniformly across paths and captured hook
-context. Frame structure, types, ordering, and all protocol-relevant bytes are
-untouched; remaining runtime values (kernel version, timings) are non-identifying.
-This redaction defines the canonical fixture shape: future captures should be
-recorded on a sanitized environment or redacted with the same mapping before
-commit. Unredacted originals exist only in the capturing session's local history.
+**These fixtures are synthesized, not merely redacted, and only their frame
+shape is real.**
+
+The 2026-08-28 note claimed a username/machine-name substitution left
+"remaining runtime values ... non-identifying." **That claim was false.** After
+it landed, all four fixtures still carried the operator's entire private status
+board inside a `SessionStart` hook payload (project state, ~148 task ids, two
+real personal names), the full `system.init` MCP/plugin inventory naming which
+third-party accounts were connected, local plugin-cache paths, and an IPC
+socket path — in a public repository. A substring denylist cannot be verified,
+so it was trusted instead of checked.
+
+`sanitize_fixture.py` replaces that approach:
+
+- **`system.init` is rebuilt from an allowlist.** Only protocol-relevant scalars
+  survive (`type`, `subtype`, `session_id`, `model`, `claude_code_version`,
+  `permissionMode`, capability flags…). Inventory fields are replaced with
+  shape-preserving synthetic values; `messaging_socket_path` is dropped. A new
+  upstream field is excluded *by default* — the failure mode is a missing field,
+  never an unnoticed leak.
+- **`system.hook_response` payloads are synthesized**, never edited: the real
+  `additionalContext` is discarded wholesale and replaced with
+  `<status_board redacted-for-fixture />`, preserving only `hookEventName`.
+- **A post-condition is asserted mechanically.** `--verify` scans for 11
+  forbidden patterns and exits non-zero on any hit. CI runs it on every PR
+  (`ACP fixture hygiene gate`).
+
+**What is still real, and load-bearing:** frame `type`, `subtype`, ordering,
+count, and JSON validity. Every L1 finding is reproducible from these fixtures
+— `rate_limit_event` present, `stream_event` 0→22 under
+`--include-partial-messages`, hook frames 3→7 under `--include-hook-events`.
+Payload interiors are read by no test, which is what makes aggressive synthesis
+safe.
+
+**Regenerating after a fresh capture:**
+
+```sh
+python3 internal/acp/testdata/sanitize_fixture.py --in-place
+python3 internal/acp/testdata/sanitize_fixture.py --verify   # must exit 0
+go test ./internal/acp/ -run TestFrameCensus -v               # shape unchanged
+```
+
+The sanitizer refuses to write if frame type/subtype/order/count would change,
+so privacy can never be bought by silently degrading the corpus.
+
+**Historical note:** unsanitized blobs existed on this branch in commits
+`a1d919e`, `aa09c58`, `aa34a09`, `bb2e4d2`, `f9feb7d` before the history
+rewrite. Treat anything recorded from those SHAs as disclosed.
