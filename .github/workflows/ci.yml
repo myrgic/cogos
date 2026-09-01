@@ -185,20 +185,21 @@ jobs:
       - name: Public release gate — scan
         run: python3 ./scripts/cogpublic-guard.py
 
-      # Fixture hygiene gate: the golden stream-json corpus in
-      # internal/acp/testdata/ is captured from a LIVE workstation, so a raw
-      # capture embeds whatever that machine held — hook payloads (which on
-      # this substrate carry a private status board), the operator's MCP and
-      # plugin inventory, home-directory paths, an IPC socket path. PR #588
-      # shipped exactly that to this public repo behind a substring-denylist
-      # redaction whose commit message and README both CLAIMED completeness
-      # and were believed. A denylist redaction cannot be verified; the
-      # sanitizer's allowlist synthesis can, and this step is what makes the
-      # property checked rather than remembered. It also refuses to pass if
-      # sanitizing would change frame type/subtype/order/count, so privacy
-      # can never be bought by silently degrading the corpus.
-      - name: ACP fixture hygiene gate
-        run: python3 internal/acp/testdata/sanitize_fixture.py --verify
+      # Fixture hygiene: see the `fixture-hygiene` job below, which calls the
+      # org-level reusable module. Kept out of `lint` so the gate reports as
+      # its own required check rather than hiding inside a lint failure.
+
+  fixture-hygiene:
+    # Org CI/CD module — myrgic/.github. The rule lives in one place so every
+    # repo that records live-machine traffic into testdata inherits it instead
+    # of re-deriving it after its own incident. Origin: PR #588 shipped a
+    # private status board, an MCP/plugin inventory, plugin-cache paths and an
+    # IPC socket path to this PUBLIC repo behind a substring-denylist redaction
+    # that CLAIMED completeness and was believed for three days. A denylist
+    # cannot be verified; the allowlist sanitizer named below can.
+    uses: myrgic/.github/.github/workflows/fixture-hygiene.yml@main
+    with:
+      sanitizer: internal/acp/testdata/sanitize_fixture.py
 
   e2e:
     runs-on: ubuntu-latest
