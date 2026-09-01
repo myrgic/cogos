@@ -108,6 +108,12 @@ content_guards:
 # it in the diff.
 exclude:
   - scripts/cogpublic-guard.py
+  # Asserts the gate BLOCKS a build-time-injected home path, so it must contain
+  # one. Declared here rather than skipped by a filename rule — the filename
+  # exclusion this replaced was itself the HIGH-severity bypass found in
+  # myrgic/.github#19 review. An exclusion that a reviewer can see in the diff
+  # is a different thing from one baked into the scanner.
+  - internal/providers/site/gate_artifact_test.go
 
 # Post-push structural checks
 post_guards:

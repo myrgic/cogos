@@ -169,11 +169,23 @@ def scan(root: Path, mode: str) -> int:
         # files. Found by the positive control in
         # internal/providers/site/gate_artifact_test.go — the clean-artifact
         # case failed, which is exactly what a positive control is for.
-        files = [
-            str(p.relative_to(root))
-            for p in root.rglob("*")
-            if p.is_file() and ".git/" not in str(p.relative_to(root))
-        ]
+        #
+        # `.git/` and `.release-gate/` are skipped structurally, by path
+        # component rather than substring. Unlike `git ls-files`, a filesystem
+        # walk SEES the reusable workflow's own checkout, and the guard script
+        # in it legitimately contains a probe string for every pattern — so a
+        # --tree scan in CI would block on the scanner itself. Verified
+        # 2026-09-01: it reported `.release-gate/scripts/cogpublic-guard.py:18`
+        # and exited 1 against an otherwise clean tree.
+        skip_dirs = {".git", ".release-gate"}
+        files = []
+        for p in root.rglob("*"):
+            if not p.is_file() or p.is_symlink():
+                continue
+            rel = p.relative_to(root)
+            if skip_dirs & set(rel.parts):
+                continue
+            files.append(str(rel))
     else:
         files = [f for f in sh("git", "ls-files").splitlines() if f]
 
