@@ -125,12 +125,80 @@ def load_guards(root: Path) -> tuple[list[tuple[str, str, str]], list[str]]:
     return guards, excludes
 
 
+def glob_to_regex(pat: str) -> re.Pattern:
+    """Translate a glob to a regex where `*` does NOT cross a path separator.
+
+    DEFECT FIXED (review of #19, MEDIUM-3): `excluded()` used fnmatch, whose
+    `*` matches `/` too. `exclude: "docs/*"` therefore swallowed
+    `docs/deep/secret.md` — and because other files still scanned, the count
+    stayed nonzero and the zero-files exit-2 check never fired. Silent partial
+    coverage: the dangerous middle case, worse than excluding everything,
+    because nothing looks wrong.
+
+    `*` matches within one segment, `**` spans segments, `?` is one non-slash
+    character. A trailing `/` or bare directory name implies its whole subtree.
+    """
+    out, i = [], 0
+    while i < len(pat):
+        ch = pat[i]
+        if ch == "*":
+            if pat[i:i + 2] == "**":
+                out.append(".*")
+                i += 2
+                if pat[i:i + 1] == "/":
+                    i += 1
+                continue
+            out.append("[^/]*")
+        elif ch == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(ch))
+        i += 1
+    body = "".join(out)
+    # Only a BARE directory name implies its subtree ("vendor" -> vendor/**).
+    # A pattern containing a wildcard means exactly what it says: "docs/*" is
+    # one level, NOT docs/deep/secret.md. An earlier attempt at this fix
+    # appended the subtree suffix unconditionally and silently re-created the
+    # very bug it was fixing — caught by re-running the reviewer's own
+    # reproduction in a clean room instead of trusting the patch.
+    if pat.endswith("/"):
+        body += ".*"
+    elif not any(c in pat for c in "*?"):
+        body += "(?:/.*)?"
+    return re.compile(f"^{body}$")
+
+
 def excluded(path: str, patterns: list[str]) -> bool:
-    from fnmatch import fnmatch
     for p in patterns:
-        if fnmatch(path, p) or fnmatch(path, p.rstrip("/*") + "/*"):
+        if not p:
+            continue
+        if glob_to_regex(p).match(path):
             return True
     return False
+
+
+def read_blob(mode: str, path: str, root: Path) -> str | None:
+    """Return the content the gate must judge, for this mode.
+
+    DEFECT FIXED (review of #19, HIGH-2): `--staged` listed staged FILENAMES
+    but read WORKTREE content. Staging a leak and then scrubbing the working
+    copy produced exit 0 while the dirty blob committed anyway — the exact
+    bypass a pre-commit gate exists to stop. Staged mode now reads the staged
+    blob via `git show :path`, which is what actually gets committed.
+    """
+    if mode == "staged":
+        proc = subprocess.run(["git", "show", f":{path}"],
+                              capture_output=True, cwd=str(root))
+        if proc.returncode != 0:
+            return None
+        return proc.stdout.decode("utf-8", errors="ignore")
+    fp = root / path
+    if not fp.is_file():
+        return None
+    try:
+        return fp.read_text(errors="ignore")
+    except Exception:
+        return None
 
 
 # The config itself is skipped: it necessarily contains every pattern, and a
@@ -159,9 +227,15 @@ def scan(root: Path, mode: str) -> int:
         print(f"GUARD CANNOT RUN: no content_guards parsed from {CONFIG}", file=sys.stderr)
         return 2
 
+    # DEFECT FIXED (found while verifying the #19 review fixes): `sh()` ran git
+    # in the PROCESS's cwd, ignoring --root entirely. Scanning another repo via
+    # --root therefore listed THIS repo's files — the guard reported a confident
+    # verdict about the wrong tree. It surfaced as mod3 reporting clean while a
+    # known leak sat at tests/test_claude_session_id_binding.py:462.
+    # Silent wrong-target is the worst class this tool has: it looks like a pass.
     if mode == "staged":
-        files = [f for f in sh("git", "diff", "--cached", "--name-only",
-                               "--diff-filter=ACM").splitlines() if f]
+        files = [f for f in sh("git", "-C", str(root), "diff", "--cached",
+                               "--name-only", "--diff-filter=ACM").splitlines() if f]
     elif mode == "tree":
         # Every file on disk, git or not. For BUILD ARTIFACTS: a generated
         # deploy tree is `git init` + `git add .` with nothing committed, so
@@ -187,21 +261,26 @@ def scan(root: Path, mode: str) -> int:
                 continue
             files.append(str(rel))
     else:
-        files = [f for f in sh("git", "ls-files").splitlines() if f]
+        files = [f for f in sh("git", "-C", str(root), "ls-files").splitlines() if f]
 
-    compiled = [(re.compile(p), p, d) for p, d, _ in guards]
+    # Compile up front: an invalid pattern must be a loud "cannot run", not an
+    # uncaught traceback mid-scan. (Review of #19, MEDIUM-4.)
+    compiled = []
+    for pat, desc, _ in guards:
+        try:
+            compiled.append((re.compile(pat), pat, desc))
+        except re.error as e:
+            print(f"GUARD CANNOT RUN: invalid regex {pat!r} in {CONFIG}: {e}",
+                  file=sys.stderr)
+            return 2
     violations = []
     scanned = 0
 
     for f in files:
         if excluded(f, excludes) or SELF_REFERENTIAL.search(f):
             continue
-        fp = root / f
-        if not fp.is_file():
-            continue
-        try:
-            content = fp.read_text(errors="ignore")
-        except Exception:
+        content = read_blob(mode, f, root)
+        if content is None:
             continue
         scanned += 1
         # Report EVERY guard a file trips, not just the first. Breaking on the
@@ -271,13 +350,25 @@ def self_test(root: Path) -> int:
         probe = declared_probe or BUILTIN.get(pat)
         if probe is None and not any(c in pat for c in ".*+[](){}\\|^$?"):
             probe = pat + "X"          # literal pattern: any superstring matches
+        try:
+            re.compile(pat)
+        except re.error as e:
+            print(f"  - {pat}  ({desc})  [INVALID REGEX]")
+            print(f"SELF-TEST FAILED: invalid regex {pat!r}: {e}", file=sys.stderr)
+            return 2
         if probe is None:
             untested.append((pat, desc))
             print(f"  - {pat}  ({desc})  [UNTESTED — add `probe:` to test it]")
             continue
         if re.search(pat, probe):
             tested.append(pat)
-            print(f"  - {pat}  ({desc})  [tested]")
+            # A DECLARED probe is supplied by the same person who wrote the
+            # pattern, so it proves only that the two are consistent — an
+            # alternation like `broken|harmless` with `probe: harmless` passes
+            # while the real branch is broken (review of #19, MEDIUM-5). Label
+            # the provenance so "N tested" cannot overstate what was proven.
+            origin = "declared probe" if declared_probe else "builtin probe"
+            print(f"  - {pat}  ({desc})  [tested: {origin}]")
         else:
             fails.append(f"pattern {pat!r} did not match its probe {probe!r}")
             print(f"  - {pat}  ({desc})  [FAILED]")
