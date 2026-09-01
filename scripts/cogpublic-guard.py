@@ -177,6 +177,36 @@ def excluded(path: str, patterns: list[str]) -> bool:
     return False
 
 
+def decode_scannable(raw: bytes) -> str:
+    """Decode bytes into text the guards can match against.
+
+    DEFECT FIXED (review round 3): content was read with
+    `read_text(errors="ignore")`, i.e. UTF-8 only. A UTF-16 file stores ASCII
+    as alternating NUL bytes, so `/Users/slowbro` decodes to `/\\x00U\\x00s...`
+    under UTF-8 and every guard misses it — reproduced: a UTF-16 file holding
+    the operator home path scanned clean while the identical UTF-8 file was
+    caught. Undetected-leak-by-encoding.
+
+    UTF-16 is detected by BOM, or by a high NUL density in the head of the
+    file (UTF-16 without a BOM). Everything else decodes as UTF-8 with
+    replacement, which is lossy but never silently drops a match, since the
+    ASCII a guard cares about survives.
+    """
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            return raw.decode("utf-16")
+        except (UnicodeDecodeError, LookupError):
+            pass
+    head = raw[:4096]
+    if head and head.count(b"\x00") > len(head) // 4:
+        for enc in ("utf-16-le", "utf-16-be"):
+            try:
+                return raw.decode(enc)
+            except (UnicodeDecodeError, LookupError):
+                continue
+    return raw.decode("utf-8", errors="replace")
+
+
 def read_blob(mode: str, path: str, root: Path) -> str | None:
     """Return the content the gate must judge, for this mode.
 
@@ -187,34 +217,40 @@ def read_blob(mode: str, path: str, root: Path) -> str | None:
     blob via `git show :path`, which is what actually gets committed.
     """
     if mode == "staged":
-        proc = subprocess.run(["git", "show", f":{path}"],
-                              capture_output=True, cwd=str(root))
+        proc = subprocess.run(["git", "-C", str(root), "show", f":{path}"],
+                              capture_output=True)
         if proc.returncode != 0:
             return None
-        return proc.stdout.decode("utf-8", errors="ignore")
+        return decode_scannable(proc.stdout)
     fp = root / path
     if not fp.is_file():
         return None
     try:
-        return fp.read_text(errors="ignore")
+        return decode_scannable(fp.read_bytes())
     except Exception:
         return None
 
 
-# The config itself is skipped: it necessarily contains every pattern, and a
+# Only the ROOT config is skipped: it necessarily contains every pattern, and a
 # scanner that flags its own ruleset produces noise that trains people to
 # ignore it.
+#
+# DEFECT FIXED (review round 3): this was `(^|/)\.cogpublic$`, whose `(^|/)`
+# matched a `.cogpublic` at ANY depth. A leak parked in `sub/.cogpublic` scanned
+# clean at exit 0 — a filename bypass, the same class as the `sanitize_fixture.py`
+# rule removed in round 1, reintroduced by an over-permissive anchor. Only the
+# repo-root path is exempt now; a nested `.cogpublic` is just a file and is
+# scanned like one.
 #
 # DEFECT FIXED (review of #19): this was previously a FILENAME regex that also
 # excluded `sanitize_fixture.py`, `*_names_test.go`, and `*_guard_test.*`.
 # Filenames are contributor-controllable, so a real leak was bypassable by
-# naming the file `sanitize_fixture.py` — reproduced: exit 0 with the leak
-# present, while identical content in `ordinary.py` exited 1. Exclusion by
-# filename is not a security property. Only the config path is skipped now;
-# anything else that legitimately carries a pattern must be listed explicitly
-# in that repo's `exclude:`, which is a reviewable declaration rather than an
-# invisible convention.
-SELF_REFERENTIAL = re.compile(r"(^|/)\.cogpublic$")
+# naming the file that way — reproduced: exit 0 with the leak present, while
+# identical content in `ordinary.py` exited 1. Exclusion by filename is not a
+# security property. Anything else that legitimately carries a pattern must be
+# listed explicitly in that repo's `exclude:`, which is a reviewable
+# declaration rather than an invisible convention.
+SELF_REFERENTIAL = re.compile(r"^\.cogpublic$")
 
 
 def scan(root: Path, mode: str) -> int:
