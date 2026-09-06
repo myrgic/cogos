@@ -35,7 +35,7 @@ COPY . .
 # Build with CGO for SQLite FTS5 support
 RUN CGO_ENABLED=1 go build \
     -tags "fts5" \
-    -ldflags="-s -w -X github.com/myrgic/cogos/internal/engine.BuildTime=${BUILD_TIME}" \
+    -ldflags="-s -w -X github.com/myrgic/cogos/internal/engine.BuildTime=${BUILD_TIME} -X github.com/myrgic/cogos/internal/engine.BuildTags=fts5" \
     -o /cog ./cmd/cogos
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────

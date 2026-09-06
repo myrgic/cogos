@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -127,4 +130,35 @@ func jsonKeysOf(m map[string]interface{}) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestBuildTags_EveryTaggedBuildPathDeclares — review finding on #608.
+// The Dockerfile passed -tags "fts5" but did not inject
+// -X .../engine.BuildTags=fts5, so every docker-compose.node.yml service
+// would report build_tags.mismatch=true on an image where fts5 genuinely
+// works — a false alarm from the feature built to detect false claims.
+//
+// This test asserts the invariant directly: any build path that passes the
+// fts5 build tag must also declare it via ldflags. Repo-root relative, so a
+// newly added build path fails here rather than in production telemetry.
+func TestBuildTags_EveryTaggedBuildPathDeclares(t *testing.T) {
+	root := "../.."
+	paths := []string{"Dockerfile", "Makefile", ".github/workflows/release.yml"}
+	for _, rel := range paths {
+		b, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		s := string(b)
+		tagged := strings.Contains(s, `-tags "fts5"`) || strings.Contains(s, "-tags fts5") ||
+			strings.Contains(s, "BUILD_TAGS") || strings.Contains(s, "$tagflag")
+		if !tagged {
+			continue
+		}
+		if !strings.Contains(s, "engine.BuildTags") {
+			t.Errorf("%s passes the fts5 build tag but never injects "+
+				"-X github.com/myrgic/cogos/internal/engine.BuildTags — a binary from "+
+				"this path reports build_tags.mismatch=true even when fts5 works", rel)
+		}
+	}
 }
