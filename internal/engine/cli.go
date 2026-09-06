@@ -13,6 +13,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -412,6 +413,34 @@ func runHealthCheckCmd(args []string, defaultWorkspace string, defaultPort int) 
 	if resp.StatusCode != http.StatusOK {
 		fmt.Fprintf(os.Stderr, "unhealthy: status %d\n", resp.StatusCode)
 		os.Exit(1)
+	}
+
+	// A 200 means the daemon answered, not that it is capable. Ledger L01:
+	// every non-Makefile build shipped without -tags fts5, so memory search
+	// silently degraded to an unranked grep while /health stayed green for
+	// weeks. build_tags.fts5 is the runtime probe, not the ldflags claim —
+	// honour it here, or `cog health` keeps certifying a broken binary.
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr == nil {
+		var h struct {
+			BuildTags struct {
+				FTS5     *bool  `json:"fts5"`
+				Declared string `json:"declared"`
+				Mismatch bool   `json:"mismatch"`
+			} `json:"build_tags"`
+		}
+		// A kernel that predates build_tags simply has no such field; absence
+		// is not a failure, a present-and-false probe is.
+		if json.Unmarshal(body, &h) == nil && h.BuildTags.FTS5 != nil && !*h.BuildTags.FTS5 {
+			fmt.Fprintln(os.Stderr, "unhealthy: build_tags.fts5 is false — this binary was built "+
+				"without -tags fts5 (or without CGO), so memory search silently falls back to an "+
+				"unranked substring grep. Rebuild with the Makefile (BUILD_TAGS=fts5).")
+			os.Exit(1)
+		}
+		if h.BuildTags.Mismatch {
+			fmt.Fprintf(os.Stderr, "warning: build_tags mismatch — declared %q but the runtime probe disagrees\n",
+				h.BuildTags.Declared)
+		}
 	}
 	fmt.Println("healthy")
 }

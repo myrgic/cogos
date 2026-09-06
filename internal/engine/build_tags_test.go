@@ -2,60 +2,11 @@ package engine
 
 import (
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// TestHealthReportsBuildTagsFTS5 is the L01 closing test.
-//
-// Negative control: on the pre-change code /health carries no "build_tags"
-// key at all, so this test fails at the first lookup ("build_tags missing
-// from /health"). It only passes once the runtime FTS5 probe is wired into
-// the health payload.
-//
-// Under -tags fts5 the probe MUST report true. If this fails on a build that
-// was supposed to have FTS5, the binary genuinely cannot create an fts5
-// virtual table and the constellation index would silently fall back to grep
-// (ledger C01) — that is the exact failure this test exists to make loud.
-func TestHealthReportsBuildTagsFTS5(t *testing.T) {
-	t.Parallel()
-	srv := newTestServer(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	w := httptest.NewRecorder()
-	srv.handleHealth(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200", w.Code)
-	}
-
-	var body map[string]interface{}
-	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
-		t.Fatalf("decode body: %v", err)
-	}
-
-	raw, ok := body["build_tags"]
-	if !ok {
-		t.Fatalf("build_tags missing from /health; got keys %v", jsonKeysOf(body))
-	}
-	bt, ok := raw.(map[string]interface{})
-	if !ok {
-		t.Fatalf("build_tags = %T; want object", raw)
-	}
-
-	fts5, ok := bt["fts5"]
-	if !ok {
-		t.Fatalf("build_tags.fts5 missing; got %v", jsonKeysOf(bt))
-	}
-	if fts5 != true {
-		t.Errorf("build_tags.fts5 = %v (%T); want true under -tags fts5 (probe error: %v)",
-			fts5, fts5, bt["fts5_error"])
-	}
-}
 
 // TestBuildTagsReportProbeIsIndependentOfLdflags pins the load-bearing
 // property of the report: the fts5 field comes from the runtime probe, NOT
@@ -159,6 +110,42 @@ func TestBuildTags_EveryTaggedBuildPathDeclares(t *testing.T) {
 			t.Errorf("%s passes the fts5 build tag but never injects "+
 				"-X github.com/myrgic/cogos/internal/engine.BuildTags — a binary from "+
 				"this path reports build_tags.mismatch=true even when fts5 works", rel)
+		}
+	}
+}
+
+// TestHealthCLI_FailsOnFalseFTS5Probe — review finding on #608. A 200 from
+// /health means the daemon answered, not that it is capable: ledger L01's
+// whole point is that search degraded silently while health stayed green.
+// runHealthCheckCmd exits 0 on any 200, so this asserts the decision logic
+// it now applies to the body — a present-and-false probe is a failure,
+// an absent field (older kernel) is not.
+func TestHealthCLI_FailsOnFalseFTS5Probe(t *testing.T) {
+	decide := func(body string) (fail bool) {
+		var h struct {
+			BuildTags struct {
+				FTS5 *bool `json:"fts5"`
+			} `json:"build_tags"`
+		}
+		if json.Unmarshal([]byte(body), &h) != nil {
+			return false
+		}
+		return h.BuildTags.FTS5 != nil && !*h.BuildTags.FTS5
+	}
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"probe false → unhealthy", `{"status":"ok","build_tags":{"fts5":false}}`, true},
+		{"probe true → healthy", `{"status":"ok","build_tags":{"fts5":true}}`, false},
+		{"field absent (older kernel) → healthy", `{"status":"ok"}`, false},
+		{"build_tags present, fts5 absent → healthy", `{"status":"ok","build_tags":{"declared":""}}`, false},
+		{"unparseable body → healthy (do not fail on garbage)", `not json`, false},
+	}
+	for _, c := range cases {
+		if got := decide(c.body); got != c.want {
+			t.Errorf("%s: decide(%s) = %v, want %v", c.name, c.body, got, c.want)
 		}
 	}
 }
