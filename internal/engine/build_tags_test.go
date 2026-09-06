@@ -93,7 +93,13 @@ func jsonKeysOf(m map[string]interface{}) []string {
 // newly added build path fails here rather than in production telemetry.
 func TestBuildTags_EveryTaggedBuildPathDeclares(t *testing.T) {
 	root := "../.."
-	paths := []string{"Dockerfile", "Makefile", ".github/workflows/release.yml"}
+	// scripts/setup-dev.sh is here because the reviewer found it as a sibling
+	// instance of exactly this defect: the dev quickstart built a binary a
+	// developer then RUNS, with no tag and no declaration, and the fixed file
+	// set below could not see it. A hardcoded list only covers the paths
+	// someone remembered; discoverShellBuildPaths below closes that.
+	paths := []string{"Dockerfile", "Makefile", ".github/workflows/release.yml", "scripts/setup-dev.sh"}
+	paths = append(paths, discoverShellBuildPaths(t, root)...)
 	for _, rel := range paths {
 		b, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
@@ -140,6 +146,39 @@ func TestBuildTags_UntaggedTargetsDeclareNothing(t *testing.T) {
 				"(mismatch=true on a healthy build): %s", strings.TrimSpace(line))
 		}
 	}
+
+	// Shell build paths, same rule. My first negative control for
+	// scripts/setup-dev.sh PASSED when it should have failed: I removed the
+	// -tags flag and left the BuildTags declaration behind, and nothing
+	// caught it, because the forward test only fires on paths that DO pass
+	// the tag and this converse test only read the Makefile. The over-claim
+	// direction was unguarded for exactly the file the reviewer flagged.
+	for _, rel := range append([]string{filepath.Join("scripts", "setup-dev.sh")},
+		discoverShellBuildPaths(t, "../..")...) {
+		sb, err := os.ReadFile(filepath.Join("..", "..", rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		for _, line := range strings.Split(string(sb), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") || !strings.Contains(line, "go build") {
+				continue
+			}
+			if !strings.Contains(line, "./cmd/cogos") {
+				continue
+			}
+			// The declaration may be assembled into $LDFLAGS above the build
+			// line, so judge the file, not just the line, for declaration —
+			// but judge the actual invocation for the tag.
+			declares := strings.Contains(string(sb), "engine.BuildTags=")
+			tagged := strings.Contains(line, "-tags")
+			if declares && !tagged {
+				t.Errorf("%s builds ./cmd/cogos and declares engine.BuildTags but passes no "+
+					"-tags flag, so the binary claims a module it cannot have "+
+					"(mismatch=true on a healthy build): %s", rel, trimmed)
+			}
+		}
+	}
 }
 
 // TestHealthCLI_FailsOnFalseFTS5Probe — review finding on #608. A 200 from
@@ -177,4 +216,45 @@ func TestHealthCLI_FailsOnFalseFTS5Probe(t *testing.T) {
 			t.Errorf("%s: healthy result carried a message %q", c.name, msg)
 		}
 	}
+}
+
+// discoverShellBuildPaths finds every tracked shell script under scripts/ that
+// builds the cogos command, so the invariant above applies to paths nobody
+// remembered to list.
+//
+// This exists because the hardcoded set missed scripts/setup-dev.sh, and a
+// reviewer caught it rather than a test. The rule this repo keeps relearning:
+// a check that enumerates known instances reports safety only for the ones
+// someone thought of. Enumerate by PROPERTY — "builds ./cmd/cogos" — not by
+// name.
+func discoverShellBuildPaths(t *testing.T, root string) []string {
+	t.Helper()
+	dir := filepath.Join(root, "scripts")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read scripts/: %v", err)
+	}
+	var found []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sh") {
+			continue
+		}
+		rel := filepath.Join("scripts", e.Name())
+		b, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		body := string(b)
+		// Only scripts that actually build the kernel binary. A script that
+		// merely runs `go test` or invokes an already-built cogos is not a
+		// build path and must not be forced to declare build tags.
+		if !strings.Contains(body, "go build") || !strings.Contains(body, "./cmd/cogos") {
+			continue
+		}
+		if rel == filepath.Join("scripts", "setup-dev.sh") {
+			continue // already in the explicit list; don't check it twice
+		}
+		found = append(found, rel)
+	}
+	return found
 }
