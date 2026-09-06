@@ -623,7 +623,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"fingerprint": s.process.Fingerprint(),
 		},
 		"workspace": s.cfg.WorkspaceRoot,
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		// Compile-time feature report. build_tags.fts5 is the RUNTIME probe
+		// (CREATE VIRTUAL TABLE ... USING fts5 on :memory:), not the -ldflags
+		// claim, so a binary built without the module cannot report healthy
+		// FTS5 (ledger L01 / C01). See BuildTagsReport.
+		"build_tags": BuildTagsReport(),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
 	}
 
 	if nh := s.process.NodeHealth(); nh != nil {

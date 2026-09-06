@@ -87,7 +87,11 @@ jobs:
           mkdir -p dist
           VERSION="${GITHUB_REF_NAME}"
           BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          LDFLAGS="-s -w -X github.com/myrgic/cogos/internal/engine.Version=${VERSION} -X github.com/myrgic/cogos/internal/engine.BuildTime=${BUILD_TIME}"
+          # BuildTags mirrors the Makefile's LDFLAGS: /health reports what the
+          # build claimed, cross-checked against a runtime fts5 probe. Keep this
+          # in sync with the Makefile or a release binary reports an empty
+          # claim while the Makefile build reports "fts5" (ledger L01).
+          LDFLAGS="-s -w -X github.com/myrgic/cogos/internal/engine.Version=${VERSION} -X github.com/myrgic/cogos/internal/engine.BuildTime=${BUILD_TIME} -X github.com/myrgic/cogos/internal/engine.BuildTags=${BUILD_TAGS}"
           ext=""
           if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
           output="dist/cogos-${GOOS}-${GOARCH}${ext}"

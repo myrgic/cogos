@@ -39,8 +39,16 @@
 # when git is unavailable, e.g. a source tarball with no .git.
 VERSION ?= $(shell d=$$(git describe --tags --always --dirty 2>/dev/null) && echo "dev-$$d" || echo dev)
 BUILD_TIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS := -s -w -X github.com/myrgic/cogos/internal/engine.BuildTime=$(BUILD_TIME) -X github.com/myrgic/cogos/internal/engine.Version=$(VERSION)
+# BUILD_TAGS is defined BEFORE LDFLAGS on purpose: LDFLAGS injects it into the
+# binary (engine.BuildTags) so `/health` can report what the build claimed it
+# compiled in. Make's := is immediate-expansion, so the order is load-bearing —
+# defining BUILD_TAGS after LDFLAGS would inject an empty string.
+# The injected value is a CLAIM only. /health pairs it with a runtime probe
+# (CREATE VIRTUAL TABLE ... USING fts5) and reports build_tags.fts5 from the
+# probe, so an ldflags/module mismatch surfaces instead of being believed.
+# See internal/engine/build_tags.go and ledger row L01.
 BUILD_TAGS := fts5
+LDFLAGS := -s -w -X github.com/myrgic/cogos/internal/engine.BuildTime=$(BUILD_TIME) -X github.com/myrgic/cogos/internal/engine.Version=$(VERSION) -X github.com/myrgic/cogos/internal/engine.BuildTags=$(BUILD_TAGS)
 BINARY := cog
 GO := go
 
