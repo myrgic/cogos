@@ -8,6 +8,16 @@
 // build asserts the property; the untagged build is covered by
 // TestBuildTags_EveryTaggedBuildPathDeclares and the #604 guard, which fail
 // with the real swallowed error instead.
+//
+// CONSEQUENCE, stated plainly because it is easy to miss: on main today NO
+// workflow passes -tags fts5 (ci.yml:69 is `go test -race -count=1 ./...`;
+// nightly-integration.yml:59 is `-tags integration`). So this file does not
+// compile in CI at all, and the assertion below runs only locally. The tag
+// is added to CI by PR #604, which is not merged yet. Until it lands, this
+// test is real but UNRUN in CI — do not read a green PR as evidence that the
+// runtime probe was exercised. Verified 2026-09-06 by diffing
+// origin/main:.github/workflows/ci.yml against the #604 branch (2 tagged
+// test sites there, 0 on main).
 
 package engine
 
