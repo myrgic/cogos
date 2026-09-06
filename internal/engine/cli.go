@@ -422,27 +422,55 @@ func runHealthCheckCmd(args []string, defaultWorkspace string, defaultPort int) 
 	// honour it here, or `cog health` keeps certifying a broken binary.
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if readErr == nil {
+		fail, msg := healthProbeFailure(body)
+		if fail {
+			fmt.Fprintln(os.Stderr, "unhealthy: "+msg)
+			os.Exit(1)
+		}
+		// NOTE: mismatch lives INSIDE build_tags (build_tags.go:119 builds the
+		// map), not at the top level. Reading it from the root would silently
+		// never fire — the warning would look implemented and do nothing.
 		var h struct {
 			BuildTags struct {
-				FTS5     *bool  `json:"fts5"`
 				Declared string `json:"declared"`
 				Mismatch bool   `json:"mismatch"`
 			} `json:"build_tags"`
 		}
-		// A kernel that predates build_tags simply has no such field; absence
-		// is not a failure, a present-and-false probe is.
-		if json.Unmarshal(body, &h) == nil && h.BuildTags.FTS5 != nil && !*h.BuildTags.FTS5 {
-			fmt.Fprintln(os.Stderr, "unhealthy: build_tags.fts5 is false — this binary was built "+
-				"without -tags fts5 (or without CGO), so memory search silently falls back to an "+
-				"unranked substring grep. Rebuild with the Makefile (BUILD_TAGS=fts5).")
-			os.Exit(1)
-		}
-		if h.BuildTags.Mismatch {
+		if json.Unmarshal(body, &h) == nil && h.BuildTags.Mismatch {
 			fmt.Fprintf(os.Stderr, "warning: build_tags mismatch — declared %q but the runtime probe disagrees\n",
 				h.BuildTags.Declared)
 		}
 	}
 	fmt.Println("healthy")
+}
+
+// healthProbeFailure decides, from the raw /health body alone, whether an
+// otherwise-200 response should fail `cog health`. Kept pure (no HTTP, no
+// os.Exit) so the test can exercise the exact production decision rather than
+// a copy-pasted closure: if cli.go's unmarshal target or failure condition is
+// edited later, this test fails with it. Ledger L01 semantics: a present-and-
+// false fts5 probe is a failure; an absent field (older kernel), build_tags
+// present with no fts5 key, or an unparseable body is NOT — never fail on
+// garbage. The caller (runHealthCheckCmd) owns os.Exit; the warning about a
+// declared-vs-probed mismatch stays in the caller.
+func healthProbeFailure(body []byte) (fail bool, msg string) {
+	var h struct {
+		BuildTags struct {
+			FTS5 *bool `json:"fts5"`
+		} `json:"build_tags"`
+	}
+	// A kernel that predates build_tags simply has no such field; absence
+	// is not a failure, a present-and-false probe is. An unparseable
+	// body returns the zero value (FTS5 == nil) and therefore healthy.
+	if json.Unmarshal(body, &h) != nil || h.BuildTags.FTS5 == nil {
+		return false, ""
+	}
+	if *h.BuildTags.FTS5 {
+		return false, ""
+	}
+	return true, "build_tags.fts5 is false — this binary was built " +
+		"without -tags fts5 (or without CGO), so memory search silently falls back to an " +
+		"unranked substring grep. Rebuild with the Makefile (BUILD_TAGS=fts5)."
 }
 
 func runStartCmd(args []string, defaultWorkspace string, defaultPort int) {

@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,17 +149,11 @@ func TestBuildTags_UntaggedTargetsDeclareNothing(t *testing.T) {
 // it now applies to the body — a present-and-false probe is a failure,
 // an absent field (older kernel) is not.
 func TestHealthCLI_FailsOnFalseFTS5Probe(t *testing.T) {
-	decide := func(body string) (fail bool) {
-		var h struct {
-			BuildTags struct {
-				FTS5 *bool `json:"fts5"`
-			} `json:"build_tags"`
-		}
-		if json.Unmarshal([]byte(body), &h) != nil {
-			return false
-		}
-		return h.BuildTags.FTS5 != nil && !*h.BuildTags.FTS5
-	}
+	// Calls the REAL decision function that runHealthCheckCmd uses, not a
+	// copy. Review finding on #608: this test previously reimplemented the
+	// logic in a local `decide` closure, so editing cli.go would leave the
+	// test green while `cog health` silently stopped failing on a broken
+	// fts5 build. One implementation, tested directly.
 	cases := []struct {
 		name string
 		body string
@@ -173,8 +166,15 @@ func TestHealthCLI_FailsOnFalseFTS5Probe(t *testing.T) {
 		{"unparseable body → healthy (do not fail on garbage)", `not json`, false},
 	}
 	for _, c := range cases {
-		if got := decide(c.body); got != c.want {
-			t.Errorf("%s: decide(%s) = %v, want %v", c.name, c.body, got, c.want)
+		got, msg := healthProbeFailure([]byte(c.body))
+		if got != c.want {
+			t.Errorf("%s: healthProbeFailure(%s) = %v, want %v", c.name, c.body, got, c.want)
+		}
+		if got && msg == "" {
+			t.Errorf("%s: failure returned an empty message; the operator needs the cause", c.name)
+		}
+		if !got && msg != "" {
+			t.Errorf("%s: healthy result carried a message %q", c.name, msg)
 		}
 	}
 }
