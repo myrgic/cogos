@@ -114,6 +114,35 @@ func TestBuildTags_EveryTaggedBuildPathDeclares(t *testing.T) {
 	}
 }
 
+// TestBuildTags_UntaggedTargetsDeclareNothing is the converse, and the review
+// finding that prompted it: the Makefile's Windows targets build
+// CGO_ENABLED=0 with no -tags flag, so they CANNOT provide fts5. When they
+// inherited the shared LDFLAGS they declared fts5 anyway, and /health
+// reported declared=fts5 against a probe correctly saying false — flipping
+// mismatch=true on every Makefile-built Windows binary and inverting the
+// signal this feature exists to give.
+//
+// Over-claiming is the failure mode this whole row (ledger L01) is about, so
+// it gets a test in both directions.
+func TestBuildTags_UntaggedTargetsDeclareNothing(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.Contains(line, "$(GO) build") {
+			continue
+		}
+		declares := strings.Contains(line, "$(LDFLAGS)") && !strings.Contains(line, "$(LDFLAGS_UNTAGGED)")
+		tagged := strings.Contains(line, "$(BUILD_TAGS)") || strings.Contains(line, "-tags")
+		if declares && !tagged {
+			t.Errorf("Makefile build line declares BuildTags via $(LDFLAGS) but passes no "+
+				"build tag, so the binary claims a module it cannot have "+
+				"(mismatch=true on a healthy build): %s", strings.TrimSpace(line))
+		}
+	}
+}
+
 // TestHealthCLI_FailsOnFalseFTS5Probe — review finding on #608. A 200 from
 // /health means the daemon answered, not that it is capable: ledger L01's
 // whole point is that search degraded silently while health stayed green.
