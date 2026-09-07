@@ -1,0 +1,80 @@
+# CogOS Workspace + Kernel — minimal composition
+#
+# Demonstrates the workspace base image (Dockerfile.workspace) handing a
+# freshly-scaffolded /workspace to the existing kernel image (Dockerfile).
+# This is deliberately separate from docker-compose.node.yml (the
+# primary/secondary multi-node testing topology with vaultwarden, gateway,
+# bridge, and tailscale siblings) rather than an addition to it: that file's
+# services already assume an externally-mounted workspace via bind mounts
+# (see its kernel-primary/-secondary volumes), and threading a build-time
+# scaffolded workspace through that topology would touch every node's
+# volume wiring for a concern this file demonstrates on its own in two
+# services. Nothing in docker-compose.node.yml is modified by this file.
+#
+# The pattern: workspace-init builds a workspace image, materializes its
+# scaffolded /workspace into a named volume, and exits; kernel starts only
+# once that has completed successfully and mounts the same volume.
+#
+# Usage:
+#   docker compose -f docker-compose.workspace.yml up --build
+#   docker compose -f docker-compose.workspace.yml down -v
+
+services:
+  # ── Workspace (Dockerfile.workspace) ────────────────────────────────────────
+  # One-shot: copies its scaffolded /workspace into the shared volume, then
+  # exits 0. `cog doctor --workspace /out` (run here, not asserted — see
+  # README's "Workspace base image" section) is the validation step that
+  # pairs with this materialization step.
+  workspace-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.workspace
+      args:
+        WORKSPACE_NAME: ${WORKSPACE_NAME:-compose-workspace}
+        COGOS_PORT: ${COGOS_PORT:-6931}
+    container_name: cogos-workspace-init
+    # Root, not the image's default `cogos` user: a freshly-created named
+    # volume is root-owned until something writes to it, and this container's
+    # only job is to seed that volume, not to run the daemon. The final
+    # chmod makes the tree writable by whatever UID the kernel container's
+    # own `cogos` user resolves to — simpler than coordinating matching UIDs
+    # across two independently-built images. Acceptable for this
+    # demonstration composition; a production distribution layering on this
+    # base should pin UIDs explicitly instead.
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        cp -a /workspace/. /out/
+        chmod -R a+rwX /out
+        echo "workspace materialized into shared volume:"
+        ls -la /out/.cog
+    volumes:
+      - workspace-data:/out
+    labels:
+      com.cogos.managed: "true"
+      com.cogos.service: workspace-init
+
+  # ── Kernel (existing Dockerfile) ─────────────────────────────────────────────
+  kernel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cogos-workspace-kernel
+    ports:
+      - "${COGOS_PORT:-6931}:6931"
+    volumes:
+      - workspace-data:/workspace
+    environment:
+      - COG_WORKSPACE=${WORKSPACE_NAME:-compose-workspace}
+    depends_on:
+      workspace-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    labels:
+      com.cogos.managed: "true"
+      com.cogos.service: kernel
+
+volumes:
+  workspace-data:
