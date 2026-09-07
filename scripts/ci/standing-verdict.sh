@@ -37,9 +37,11 @@ set -euo pipefail
 REPO_FULL="${1:?usage: standing-verdict.sh <owner/repo> <head_sha>}"
 HEAD_SHA="${2:?usage: standing-verdict.sh <owner/repo> <head_sha>}"
 
-# The verdict is embedded as a marker comment in the check-run output. Read
-# both summary and text: the publish step slims the marker into `output.text`
-# on oversized bodies, so checking only one field would miss it there.
+# The verdict is embedded as a marker comment in the check-run output. The
+# publish step only ever writes `output.summary` (including its oversized-body
+# truncation branch) — `output.text` is never set anywhere in this workflow —
+# but both fields are read here defensively in case a future publisher uses
+# `output.text` instead.
 COUNT=$(gh api "repos/$REPO_FULL/commits/$HEAD_SHA/check-runs" \
   --jq '[.check_runs[]
          | select(.name == "cog-review" and .status == "completed")

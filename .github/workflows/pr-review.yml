@@ -223,14 +223,26 @@ jobs:
         run: |
           if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            # failure, NOT neutral: GitHub treats a neutral required check as
-            # PASSING, so neutral here would let PRs merge with no reviewer
-            # configured — fail OPEN. Only an explicit approve may pass.
-            gh api "repos/$REPO_FULL/check-runs" \
-              -f name='cog-review' -f head_sha="$HEAD_SHA" \
-              -f status='completed' -f conclusion='failure' \
-              -f 'output[title]=Reviewer not configured' \
-              -f 'output[summary]=CLAUDE_CODE_OAUTH_TOKEN secret is not set. Mint one with `claude setup-token` and add it as a repo/org secret to enable the AI review gate.'
+            # Missing credentials are INFRA, not a judgement about the code,
+            # so — same as the sandbox-canary and reviewer-error exits — this
+            # must not demote a real verdict that already judged this exact
+            # head. Shared implementation via scripts/ci/standing-verdict.sh.
+            # `|| echo 0` so a helper crash cannot abort this step under the
+            # inherited errexit — that would strand the PR with NO verdict at
+            # all, which is worse than the demotion this guard prevents.
+            STANDING=$(bash scripts/ci/standing-verdict.sh "$REPO_FULL" "$HEAD_SHA" 2>/dev/null || echo 0)
+            if [ "${STANDING:-0}" -gt 0 ]; then
+              echo "::warning::Reviewer credentials missing, but a real verdict already stands on $HEAD_SHA — not demoting it to failure (ledger L24)."
+            else
+              # failure, NOT neutral: GitHub treats a neutral required check as
+              # PASSING, so neutral here would let PRs merge with no reviewer
+              # configured — fail OPEN. Only an explicit approve may pass.
+              gh api "repos/$REPO_FULL/check-runs" \
+                -f name='cog-review' -f head_sha="$HEAD_SHA" \
+                -f status='completed' -f conclusion='failure' \
+                -f 'output[title]=Reviewer not configured' \
+                -f 'output[summary]=CLAUDE_CODE_OAUTH_TOKEN secret is not set. Mint one with `claude setup-token` and add it as a repo/org secret to enable the AI review gate.'
+            fi
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
