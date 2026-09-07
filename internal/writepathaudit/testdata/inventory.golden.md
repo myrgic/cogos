@@ -62,9 +62,9 @@ Total sites: 237  (cog: 97, home: 2, elsewhere: 13, unanchored: 84, dynamic: 41)
 | `<WorkspaceRoot>/.cog/ledger/<call:pathsafe.SanitizeComponent>/events.jsonl` | AppendEvent (`os.OpenFile`) | internal/engine/ledger.go:192 | internal:engine |
 | `dirname(<WorkspaceRoot>/.cog/mem/{path})` | WriteCogDoc (`os.MkdirAll`) | internal/engine/mcp_server.go:1600 | internal:engine |
 | `<WorkspaceRoot>/.cog/mem/{path}` | WriteCogDoc (`os.WriteFile`) | internal/engine/mcp_server.go:1652 | internal:engine |
-| `<WorkspaceRoot>/.cog/.state/constellation.db?mode=ro&_journal_mode=WAL&_busy_timeout=3000` | searchMemoryFTSDriftRepair (`sql.Open(sqlite3)`) | internal/engine/mcp_stubs.go:103 | internal:engine |
-| `<WorkspaceRoot>/.cog/ledger/mcp-client/events.jsonl` | EmitLedgerEvent (`engine.AppendEvent(bucket)`) | internal/engine/mcp_stubs.go:641 | internal:engine |
-| `<WorkspaceRoot>/.cog/.state/constellation.db?mode=ro&_journal_mode=WAL&_busy_timeout=3000` | buildMemoryIndexFromDB (`sql.Open(sqlite3)`) | internal/engine/mcp_stubs.go:664 | internal:engine |
+| `<WorkspaceRoot>/.cog/.state/constellation.db?mode=ro&_journal_mode=WAL&_busy_timeout=3000` | searchMemoryFTSDriftRepair (`sql.Open(sqlite3)`) | internal/engine/mcp_stubs.go:108 | internal:engine |
+| `<WorkspaceRoot>/.cog/ledger/mcp-client/events.jsonl` | EmitLedgerEvent (`engine.AppendEvent(bucket)`) | internal/engine/mcp_stubs.go:643 | internal:engine |
+| `<WorkspaceRoot>/.cog/.state/constellation.db?mode=ro&_journal_mode=WAL&_busy_timeout=3000` | buildMemoryIndexFromDB (`sql.Open(sqlite3)`) | internal/engine/mcp_stubs.go:666 | internal:engine |
 | `<WorkspaceRoot>/.cog/var/observer` | writeConsolidationDoc (`os.MkdirAll`) | internal/engine/observer.go:336 | internal:engine |
 | `<WorkspaceRoot>/.cog/var/observer/<call:fmt.Sprintf>` | writeConsolidationDoc (`os.WriteFile`) | internal/engine/observer.go:381 | internal:engine |
 | `{root}/.cog/mem/semantic/lineage/projections` | (*ProjectionReconciler).LoadConfig (`os.MkdirAll`) | internal/engine/projection_reconciler.go:218 | internal:engine |
@@ -176,7 +176,7 @@ These sites structurally resolved (the shape of the path is known) but the ROOT 
 | `<WorkspaceRoot>/{dir}` | RunInit (`os.MkdirAll`) | internal/engine/init.go:68 | internal:engine |
 | `<WorkspaceRoot>/{f.target}` | RunInit (`os.WriteFile`) | internal/engine/init.go:91 | internal:engine |
 | `{in.OutputPath}` | (*MCPServer).toolMod3SpeakRawBytes (`os.WriteFile`) | internal/engine/mcp_modality_proxy.go:351 | internal:engine |
-| `{dbPath}?mode=ro&_journal_mode=WAL&_busy_timeout=3000` | searchMemoryFTS (`sql.Open(sqlite3)`) | internal/engine/mcp_stubs.go:210 | internal:engine |
+| `{dbPath}?mode=ro&_journal_mode=WAL&_busy_timeout=3000` | searchMemoryFTS (`sql.Open(sqlite3)`) | internal/engine/mcp_stubs.go:215 | internal:engine |
 | `dirname({candidate})` | atomicWriteMemoryFile (`os.CreateTemp`) | internal/engine/memory_sections.go:353 | internal:engine |
 | `{candidate}` | atomicWriteMemoryFile (`os.Rename`) | internal/engine/memory_sections.go:375 | internal:engine |
 | `<call:resolvePath>` | syncJSON (`os.WriteFile`) | internal/engine/node_cmd.go:327 | internal:engine |

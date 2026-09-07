@@ -19,13 +19,13 @@ jobs:
           go-version: '1.25'
 
       - name: Vet
-        run: go vet ./...
+        run: go vet -tags fts5 ./...
 
       - name: Build
-        run: go build -o cogos ./cmd/cogos
+        run: go build -tags fts5 -o cogos ./cmd/cogos
 
       - name: Build (with MCP)
-        run: go build -tags mcpserver -o cogos-mcp ./cmd/cogos
+        run: go build -tags 'fts5 mcpserver' -o cogos-mcp ./cmd/cogos
 
   # Cross-compile the entire module for Windows. The build job above only
   # builds ./cmd/cogos (the daemon), which already cross-compiled cleanly —
@@ -45,7 +45,7 @@ jobs:
         env:
           GOOS: windows
           GOARCH: amd64
-        run: go build ./...
+        run: go build -tags fts5 ./...
 
   test:
     runs-on: ubuntu-latest
@@ -66,7 +66,7 @@ jobs:
         run: timeout 120 sudo apt-get install -y ripgrep
 
       - name: Unit tests
-        run: go test -race -count=1 ./...
+        run: go test -tags fts5 -race -count=1 ./...
 
       # Root `./...` only expands the root module's own packages (verified:
       # `go list ./...` from repo root returns 35 packages, none under
@@ -83,7 +83,7 @@ jobs:
           failed=0
           for mod in $mods; do
             echo "::group::go test $mod/..."
-            if ! (cd "$mod" && go build ./... && go vet ./... && go test -race -count=1 ./...); then
+            if ! (cd "$mod" && go build -tags fts5 ./... && go vet -tags fts5 ./... && go test -tags fts5 -race -count=1 ./...); then
               failed=1
             fi
             echo "::endgroup::"
@@ -160,7 +160,7 @@ jobs:
           go-version: '1.25'
 
       - name: Build binary
-        run: go build -o cogos ./cmd/cogos
+        run: go build -tags fts5 -o cogos ./cmd/cogos
 
       - name: Run E2E tests
         run: COGOS_BIN=./cogos ./scripts/e2e-test.sh

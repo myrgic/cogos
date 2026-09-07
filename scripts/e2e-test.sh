@@ -195,6 +195,68 @@ for tool in cog_get_state cog_search_memory cog_search_conversations cog_list_se
     fi
 done
 
+# Registration is not function. tools/list saw a REGISTERED cog_search_memory
+# throughout ledger L01, while every non-Makefile build shipped without the
+# fts5 tag and multi-word queries silently returned 0 rows via the substring
+# grep fallback. So call the tool — but call it in a way that can actually
+# tell the two apart.
+#
+# Three mechanics matter here; each one was verified against a live daemon,
+# and getting any of them wrong makes this check vacuous:
+#
+#  1. Only *.cog.md files are indexed. mem_watcher (internal/engine/
+#     mem_watcher.go) indexes on a Create/Write event whose target matches
+#     that suffix. A plain .md file is invisible to search.
+#  2. The file must be written AFTER the daemon is up, because indexing is
+#     event-driven. Seeding before boot indexes nothing: the "index built
+#     docs=N" line at startup is a DIFFERENT, in-memory CogDoc index, not the
+#     constellation DB that cog_search_memory reads.
+#  3. The query terms must be SCATTERED, never a contiguous phrase. FTS5
+#     evaluates multi-word queries as an AND over terms and matches
+#     regardless of position; the grep fallback looks for the literal phrase,
+#     finds nothing, and returns a well-formed EMPTY result. A check that
+#     only asserts "no JSON-RPC error" passes straight through the
+#     degradation it is meant to catch.
+#
+# Negative control, run against a live daemon on both builds:
+#   -tags fts5 -> {"count":1,...}   (matches the probe doc)
+#   untagged   -> {"count":0,"results":null}, no error
+cat > "$WORKSPACE/.cog/mem/semantic/e2e-fts5-probe.cog.md" <<'SEED'
+---
+type: insight
+status: active
+confidence: high
+description: e2e fts5 probe document
+---
+
+# e2e fts5 probe
+
+zarquon appears here.
+Some intervening prose so the terms are not adjacent.
+frobnicate appears here, well away from the first term.
+More filler.
+bletcherous appears here, at the end.
+SEED
+
+# Let the watcher pick it up and index it.
+sleep 3
+
+SEARCH_OUT=$(mcp_post '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"cog_search_memory","arguments":{"query":"zarquon frobnicate bletcherous","limit":5}}}')
+if echo "$SEARCH_OUT" | grep -q '"error"'; then
+    echo "  FAIL  cog_search_memory returned an error: $(echo "$SEARCH_OUT" | head -c 200)"
+    fail=$((fail + 1))
+elif echo "$SEARCH_OUT" | grep -q 'e2e-fts5-probe'; then
+    echo "  PASS  cog_search_memory matched a scattered-term query (FTS5 live)"
+    pass=$((pass + 1))
+else
+    echo "  FAIL  cog_search_memory found nothing for a multi-word query whose terms all"
+    echo "        exist in one indexed document. This is the ledger L01 signature: the"
+    echo "        FTS path failed and SearchMemory fell back to an unranked substring"
+    echo "        grep. Check this binary was built with -tags fts5 AND CGO_ENABLED=1."
+    echo "        response: $(echo "$SEARCH_OUT" | head -c 200)"
+    fail=$((fail + 1))
+fi
+
 CALL_OUT=$(mcp_post '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"cog_get_state","arguments":{}}}')
 if echo "$CALL_OUT" | grep -q '"result"' && ! echo "$CALL_OUT" | grep -q '"isError":true'; then
     echo "  PASS  tools/call cog_get_state"

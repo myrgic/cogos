@@ -101,7 +101,7 @@ fi
 BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS="-s -w -X github.com/myrgic/cogos/internal/engine.Version=${VERSION} -X github.com/myrgic/cogos/internal/engine.BuildTime=${BUILD_TIME}"
 
-go build -ldflags="$LDFLAGS" -o cogos ./cmd/cogos
+go build -tags fts5 -ldflags="$LDFLAGS" -o cogos ./cmd/cogos
 
 ok "Built cogos ($VERSION)"
 echo ""

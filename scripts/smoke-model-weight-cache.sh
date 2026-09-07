@@ -70,7 +70,7 @@ sha() { shasum -a 256 "$1" | awk '{print $1}'; }
 
 # ---------------------------------------------------------------------------
 note "1. Build binary"
-go build -o "$COGOS_BIN" ./cmd/cogos
+go build -tags fts5 -o "$COGOS_BIN" ./cmd/cogos
 [ -x "$COGOS_BIN" ] && ok "built $COGOS_BIN" || { bad "build"; exit 1; }
 
 note "2. Init two workspaces + blob stores"

@@ -383,8 +383,8 @@ func TestRound3GateFindings_Fixed(t *testing.T) {
 				if s.Primitive != "sql.Open(sqlite3)" || s.Category != "cog" || !strings.Contains(s.Pattern, "constellation.db") {
 					t.Errorf("db.go:42 = primitive %q category %q pattern %q, want sql.Open(sqlite3) / cog / constellation.db", s.Primitive, s.Category, s.Pattern)
 				}
-				if s, ok := find("internal/engine/mcp_stubs.go", 103); !ok || s.Category != "cog" {
-					t.Errorf("mcp_stubs.go:103 (workspaceRoot-anchored sql.Open) = %+v, want category cog", s)
+				if s, ok := find("internal/engine/mcp_stubs.go", 108); !ok || s.Category != "cog" {
+					t.Errorf("mcp_stubs.go:108 (workspaceRoot-anchored sql.Open) = %+v, want category cog", s)
 				}
 				// store_guard.go:201 and mcp_stubs.go:210 pass an
 				// already-computed dbPath THROUGH one or more further
@@ -552,7 +552,7 @@ func TestRound3GateFindings_Fixed(t *testing.T) {
 				wantBucket("internal/engine/serve_identity_grants.go", 782, "identity-grants")
 				wantBucket("internal/engine/serve_identity_grants.go", 825, "identity-grants")
 				wantBucket("internal/engine/worktree_spawn.go", 273, "worktree-reconciler")
-				wantBucket("internal/engine/mcp_stubs.go", 641, "mcp-client")
+				wantBucket("internal/engine/mcp_stubs.go", 643, "mcp-client")
 
 				// The shared AppendEvent primitive site itself (ledger.go's
 				// one real os.OpenFile call) is unaffected by this — it

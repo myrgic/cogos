@@ -40,7 +40,12 @@ func SearchMemory(workspaceRoot, query string, limit int, sector string) (any, e
 		if ftsErr == nil {
 			return results, nil
 		}
-		// FTS failed (e.g. corrupt DB, schema mismatch) — fall through to grep
+		// FTS failed (e.g. corrupt DB, schema mismatch, or a binary built
+		// without -tags fts5) — fall through to grep, but SAY SO: the grep
+		// path is substring-only, unranked, and returns 0 for any multi-word
+		// query, which is indistinguishable from "no results" to the caller.
+		slog.Warn("memory search: FTS unavailable, falling back to substring grep",
+			"error", ftsErr.Error(), "query", query)
 	}
 
 	return searchMemoryGrep(workspaceRoot, query, limit, sector)
@@ -269,14 +274,11 @@ func searchMemoryFTS(dbPath, workspaceRoot, query string, limit int, sector stri
 		// Derive a cog: URI from the filesystem path (bare form per ADR-067).
 		uri := pathToMemURI(workspaceRoot, path)
 
-		// Normalise BM25 rank to a 0–1 relevance score.
-		// SQLite bm25() returns negative values where closer to 0 = better match.
-		score := math.Abs(rank)
-		if score > 0 {
-			score = 1.0 / (1.0 + score)
-		} else {
-			score = 1.0
-		}
+		// Normalise BM25 rank to a (0,1] relevance score. SQLite FTS5 bm25()
+		// returns NEGATIVE values where MORE NEGATIVE = better match (the
+		// query already does ORDER BY rank ASC for that reason). Map so a
+		// stronger match yields a HIGHER score: 1 - 1/(1+|rank|).
+		score := 1.0 - 1.0/(1.0+math.Abs(rank))
 
 		results = append(results, map[string]any{
 			"uri":   uri,

@@ -1107,7 +1107,7 @@
     },
     {
       "file": "internal/engine/mcp_stubs.go",
-      "line": 103,
+      "line": 108,
       "column": 13,
       "primitive": "sql.Open(sqlite3)",
       "func": "searchMemoryFTSDriftRepair",
@@ -1119,7 +1119,7 @@
     },
     {
       "file": "internal/engine/mcp_stubs.go",
-      "line": 210,
+      "line": 215,
       "column": 13,
       "primitive": "sql.Open(sqlite3)",
       "func": "searchMemoryFTS",
@@ -1131,7 +1131,7 @@
     },
     {
       "file": "internal/engine/mcp_stubs.go",
-      "line": 641,
+      "line": 643,
       "column": 9,
       "primitive": "engine.AppendEvent(bucket)",
       "func": "EmitLedgerEvent",
@@ -1143,7 +1143,7 @@
     },
     {
       "file": "internal/engine/mcp_stubs.go",
-      "line": 664,
+      "line": 666,
       "column": 13,
       "primitive": "sql.Open(sqlite3)",
       "func": "buildMemoryIndexFromDB",
