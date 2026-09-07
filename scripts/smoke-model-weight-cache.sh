@@ -70,7 +70,12 @@ sha() { shasum -a 256 "$1" | awk '{print $1}'; }
 
 # ---------------------------------------------------------------------------
 note "1. Build binary"
-go build -tags fts5 -o "$COGOS_BIN" ./cmd/cogos
+# Declare the tag as well as passing it: a binary built with -tags fts5 but
+# without this -X reports build_tags.mismatch=true even though fts5 works.
+BUILD_TAGS="fts5"
+go build -tags "$BUILD_TAGS" \
+  -ldflags="-X github.com/myrgic/cogos/internal/engine.BuildTags=${BUILD_TAGS}" \
+  -o "$COGOS_BIN" ./cmd/cogos
 [ -x "$COGOS_BIN" ] && ok "built $COGOS_BIN" || { bad "build"; exit 1; }
 
 note "2. Init two workspaces + blob stores"

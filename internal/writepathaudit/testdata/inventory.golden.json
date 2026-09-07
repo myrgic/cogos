@@ -422,6 +422,18 @@
       "raw": "path"
     },
     {
+      "file": "internal/engine/build_tags.go",
+      "line": 50,
+      "column": 14,
+      "primitive": "sql.Open(sqlite3)",
+      "func": "func literal (line 49)",
+      "pattern": ":memory:",
+      "category": "unanchored",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "\":memory:\""
+    },
+    {
       "file": "internal/engine/bus_consumers.go",
       "line": 161,
       "column": 12,
@@ -1539,7 +1551,7 @@
     },
     {
       "file": "internal/engine/serve.go",
-      "line": 1187,
+      "line": 1192,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",
@@ -2847,11 +2859,11 @@
     }
   ],
   "summary": {
-    "total": 237,
+    "total": 238,
     "cog": 97,
     "home": 2,
     "elsewhere": 13,
-    "unanchored": 84,
+    "unanchored": 85,
     "dynamic": 41,
     "by_primitive": {
       "engine.AppendEvent(bucket)": 5,
@@ -2864,7 +2876,7 @@
       "os.Rename": 33,
       "os.Symlink": 1,
       "os.WriteFile": 64,
-      "sql.Open(sqlite3)": 7
+      "sql.Open(sqlite3)": 8
     }
   },
   "subprocess_sites": [

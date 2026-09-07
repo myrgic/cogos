@@ -39,8 +39,26 @@
 # when git is unavailable, e.g. a source tarball with no .git.
 VERSION ?= $(shell d=$$(git describe --tags --always --dirty 2>/dev/null) && echo "dev-$$d" || echo dev)
 BUILD_TIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS := -s -w -X github.com/myrgic/cogos/internal/engine.BuildTime=$(BUILD_TIME) -X github.com/myrgic/cogos/internal/engine.Version=$(VERSION)
+# BUILD_TAGS is defined BEFORE LDFLAGS on purpose: LDFLAGS injects it into the
+# binary (engine.BuildTags) so `/health` can report what the build claimed it
+# compiled in. Make's := is immediate-expansion, so the order is load-bearing —
+# defining BUILD_TAGS after LDFLAGS would inject an empty string.
+# The injected value is a CLAIM only. /health pairs it with a runtime probe
+# (CREATE VIRTUAL TABLE ... USING fts5) and reports build_tags.fts5 from the
+# probe, so an ldflags/module mismatch surfaces instead of being believed.
+# See internal/engine/build_tags.go and ledger row L01.
 BUILD_TAGS := fts5
+# LDFLAGS_BASE carries everything that is true of ANY build. The BuildTags
+# declaration is deliberately NOT in it: a target that cannot honour the tag
+# must not claim it. The Windows targets build CGO_ENABLED=0 with no -tags,
+# so declaring fts5 there would report declared=fts5 against a probe that
+# correctly says false — flipping mismatch=true on every Windows binary and
+# inverting the exact signal this feature exists to give.
+LDFLAGS_BASE := -s -w -X github.com/myrgic/cogos/internal/engine.BuildTime=$(BUILD_TIME) -X github.com/myrgic/cogos/internal/engine.Version=$(VERSION)
+# Tagged builds (CGO on, -tags $(BUILD_TAGS)) declare what they compiled in.
+LDFLAGS := $(LDFLAGS_BASE) -X github.com/myrgic/cogos/internal/engine.BuildTags=$(BUILD_TAGS)
+# Untagged builds declare nothing, so declared="" and mismatch stays false.
+LDFLAGS_UNTAGGED := $(LDFLAGS_BASE)
 BINARY := cog
 GO := go
 
@@ -87,10 +105,10 @@ android-arm64:
 # CGO_ENABLED=0 avoids tree-sitter's CGO path (same reason as the default
 # build target). .exe suffix is required to execute on Windows.
 windows-amd64:
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GO) build -ldflags="$(LDFLAGS)" -o $(BINARY)-windows-amd64.exe ./cmd/cogos/
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GO) build -ldflags="$(LDFLAGS_UNTAGGED)" -o $(BINARY)-windows-amd64.exe ./cmd/cogos/
 
 windows-arm64:
-	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 $(GO) build -ldflags="$(LDFLAGS)" -o $(BINARY)-windows-arm64.exe ./cmd/cogos/
+	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 $(GO) build -ldflags="$(LDFLAGS_UNTAGGED)" -o $(BINARY)-windows-arm64.exe ./cmd/cogos/
 
 INSTALL_DIR := $(HOME)/.cog/bin
 INSTALL_TARGET := $(INSTALL_DIR)/cogos

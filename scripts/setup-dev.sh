@@ -99,9 +99,17 @@ else
     VERSION="dev"
 fi
 BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS="-s -w -X github.com/myrgic/cogos/internal/engine.Version=${VERSION} -X github.com/myrgic/cogos/internal/engine.BuildTime=${BUILD_TIME}"
+# Mirrors the Makefile's convention (BUILD_TAGS + a matching BuildTags
+# injection). This path builds a binary the developer then RUNS, so it must
+# provide fts5 and say so: untagged, memory search silently degrades to an
+# unranked substring grep that returns 0 rows for any multi-word query
+# (ledger L01/C01), and an undeclared build reports mismatch=true on /health
+# even when fts5 works. Bound by TestBuildTags_EveryTaggedBuildPathDeclares
+# and TestBuildTags_UntaggedTargetsDeclareNothing.
+BUILD_TAGS="fts5"
+LDFLAGS="-s -w -X github.com/myrgic/cogos/internal/engine.Version=${VERSION} -X github.com/myrgic/cogos/internal/engine.BuildTime=${BUILD_TIME} -X github.com/myrgic/cogos/internal/engine.BuildTags=${BUILD_TAGS}"
 
-go build -tags fts5 -ldflags="$LDFLAGS" -o cogos ./cmd/cogos
+go build -tags "$BUILD_TAGS" -ldflags="$LDFLAGS" -o cogos ./cmd/cogos
 
 ok "Built cogos ($VERSION)"
 echo ""

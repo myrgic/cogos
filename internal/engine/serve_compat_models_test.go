@@ -666,10 +666,20 @@ func TestOpenAICompatListModelsWithContext_FallsBackToPlainListingOnNonLMStudio(
 func TestOpenAICompatListModelsWithContext_SlowProbeDoesNotStarveFallback(t *testing.T) {
 	t.Parallel()
 
+	// Budget headroom. The property under test is "the capped probe leaves
+	// enough of the shared budget for the fallback", which needs
+	// probeCap + fallbackWait < totalBudget with room to spare. The original
+	// 1200/1000/500 left only ~200ms of slack after the 500ms cap, and this
+	// test is t.Parallel() on shared CI runners — it flaked on two unrelated
+	// branches (#605, #608) with "context deadline exceeded". Scaling the
+	// budget up while keeping the SAME shape (probe sleeps 2x its cap;
+	// fallback needs half the budget) preserves the assertion and its
+	// pre-fix failure: uncapped, the 2000ms probe still starves a 1000ms
+	// fallback inside 2400ms.
 	const (
-		totalBudget  = 1200 * time.Millisecond
-		probeDelay   = 1000 * time.Millisecond
-		fallbackWait = 500 * time.Millisecond
+		totalBudget  = 2400 * time.Millisecond
+		probeDelay   = 2000 * time.Millisecond
+		fallbackWait = 1000 * time.Millisecond
 	)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
