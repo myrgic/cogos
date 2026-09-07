@@ -40,7 +40,12 @@ func probeable(svc ServiceDef) bool {
 		return false
 	}
 	switch svc.Kind.EffectiveKind() {
-	case ServiceKindObserved, ServiceKindExternal:
+	case ServiceKindExternal:
+		// External services are known to the kernel for dependency-graph
+		// purposes only; per the ServiceKind doc comment above, the kernel
+		// never probes them, regardless of whether Health is set.
+		return false
+	case ServiceKindObserved:
 		return svc.Health != ""
 	}
 	return true

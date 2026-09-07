@@ -195,6 +195,7 @@ func TestProbeable_Table(t *testing.T) {
 		{"observed with port no health", ServiceDef{Kind: ServiceKindObserved, Port: 8080}, false},
 		{"observed no port", ServiceDef{Kind: ServiceKindObserved}, false},
 		{"external no port", ServiceDef{Kind: ServiceKindExternal}, false},
+		{"external with port and health", ServiceDef{Kind: ServiceKindExternal, Port: 8080, Health: "/h"}, false},
 		{"unset kind with port", ServiceDef{Port: 8080}, true},
 	}
 	for _, c := range cases {
