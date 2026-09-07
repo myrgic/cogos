@@ -111,7 +111,20 @@ func TestBuildTags_EveryTaggedBuildPathDeclares(t *testing.T) {
 		if !tagged {
 			continue
 		}
-		if !strings.Contains(s, "engine.BuildTags") {
+		// Require a REAL -X injection, not a mention. Dockerfile.e2e carried
+		// the comment "No -X ...engine.BuildTags here", which satisfied a
+		// substring check for "engine.BuildTags" while injecting nothing —
+		// a file documenting that it does NOT do the thing passed the test
+		// asserting it does. Strip comment lines, then look for the flag.
+		var code strings.Builder
+		for _, ln := range strings.Split(s, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(ln), "#") {
+				continue
+			}
+			code.WriteString(ln)
+			code.WriteString("\n")
+		}
+		if !strings.Contains(code.String(), "engine.BuildTags") {
 			t.Errorf("%s passes the fts5 build tag but never injects "+
 				"-X github.com/myrgic/cogos/internal/engine.BuildTags — a binary from "+
 				"this path reports build_tags.mismatch=true even when fts5 works", rel)
@@ -218,23 +231,48 @@ func TestHealthCLI_FailsOnFalseFTS5Probe(t *testing.T) {
 	}
 }
 
-// discoverShellBuildPaths finds every tracked shell script under scripts/ that
-// builds the cogos command, so the invariant above applies to paths nobody
-// remembered to list.
+// discoverShellBuildPaths finds every tracked shell script under scripts/ AND
+// every Dockerfile* at the repo root that builds the cogos command, so the
+// invariant above applies to paths nobody remembered to list.
 //
 // This exists because the hardcoded set missed scripts/setup-dev.sh, and a
 // reviewer caught it rather than a test. The rule this repo keeps relearning:
 // a check that enumerates known instances reports safety only for the ones
 // someone thought of. Enumerate by PROPERTY — "builds ./cmd/cogos" — not by
 // name.
+//
+// It relearned it AGAIN on Dockerfile.e2e: the hardcoded list named
+// "Dockerfile" but not "Dockerfile.e2e", and discovery only walked scripts/,
+// so a genuinely fts5-capable e2e binary reported build_tags.mismatch=true —
+// the exact false alarm this file exists to prevent. Discovery now covers
+// Dockerfile* too, by property rather than by name.
 func discoverShellBuildPaths(t *testing.T, root string) []string {
 	t.Helper()
+	var found []string
+
+	// Dockerfile* at the repo root: same property, different file type.
+	rootEntries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read repo root: %v", err)
+	}
+	for _, e := range rootEntries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "Dockerfile") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(root, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		if strings.Contains(string(b), "./cmd/cogos") {
+			found = append(found, e.Name())
+		}
+	}
+
 	dir := filepath.Join(root, "scripts")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read scripts/: %v", err)
 	}
-	var found []string
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sh") {
 			continue
