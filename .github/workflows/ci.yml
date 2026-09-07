@@ -101,6 +101,17 @@ jobs:
         with:
           version: v2.11
 
+      # Workflow shell parse gate (ledger L24). A workflow can be valid YAML
+      # and still embed shell that cannot parse: this PR's own first push
+      # left an orphaned `fi` in pr-review.yml, YAML validation passed, and
+      # three required checks failed in CI with "syntax error near unexpected
+      # token `fi'". `bash -n` over every run: block catches that class before
+      # it reaches a runner.
+      - name: Workflow shell blocks parse
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 scripts/ci/check-workflow-shell.py
+
       # Shell-hardening gate (ledger L15): every tracked scripts/*.sh file
       # must declare `set -euo pipefail` (or `set -eu` for POSIX sh, which
       # has no pipefail) or carry a documented `# no-pipefail: <reason>`
