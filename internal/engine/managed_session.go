@@ -129,6 +129,7 @@ type ManagedSession struct {
 	sawInit       bool
 	lastHeartbeat time.Time
 	exitErr       error
+	stdinClosed   bool // set once CancelStdinClose has actually closed stdin
 }
 
 // NewManagedSession spawns a fresh session (fresh --session-id) and
@@ -270,6 +271,19 @@ func (ms *ManagedSession) Cancel(mode acp.CancelMode) error {
 	if mode == acp.CancelSIGINT && !sawInit {
 		return ErrCancelBeforeInit
 	}
+	if mode == acp.CancelStdinClose {
+		ms.mu.Lock()
+		already := ms.stdinClosed
+		ms.stdinClosed = true
+		ms.mu.Unlock()
+		if already {
+			// Stdin is already closed (e.g. a prior Cancel(CancelStdinClose)
+			// or a subsequent Detach() got there first). Closing an
+			// already-closed pipe is a caller-visible no-op error from the
+			// OS, not a real failure — treat it as already-satisfied.
+			return nil
+		}
+	}
 	return ms.proc.Cancel(mode)
 }
 
@@ -312,7 +326,19 @@ func (ms *ManagedSession) Detach() error {
 		return nil
 	}
 	ms.state = StateDetached
+	alreadyClosed := ms.stdinClosed
+	ms.stdinClosed = true
 	ms.mu.Unlock()
+
+	if alreadyClosed {
+		// A prior Cancel(CancelStdinClose) already closed stdin (e.g. the
+		// caller cancelled the in-flight turn before calling Detach).
+		// Closing it again would just surface the OS's "already closed"
+		// error despite Detach having done everything it needs to do —
+		// state is now Detached, which is the only externally observable
+		// contract. Skip the redundant close.
+		return nil
+	}
 
 	if err := ms.proc.Cancel(acp.CancelStdinClose); err != nil {
 		return fmt.Errorf("managed session %s: detach: %w", ms.SessionID, err)
