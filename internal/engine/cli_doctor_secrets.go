@@ -123,7 +123,18 @@ type secretFinding struct {
 // names where the secret lives; it is not the secret. Treating these as
 // material produces confident false positives, which is how a security check
 // trains people to ignore it.
-var envIndirectionKeySuffixes = []string{"_env", "_envvar", "_env_var", "_var", "_name", "_file", "_path", "_ref", "_id"}
+//
+// A bare "_id" suffix was tried and reverted (reviewer objection, PR #576):
+// it caused the scanner to skip ANY credential-shaped key ending in "_id"
+// before ever looking at its value — including a HashiCorp Vault AppRole
+// `secret_id`, which IS the credential material, not a pointer to one.
+// "_id" alone is not evidence of indirection (compare "user_id",
+// "request_id" — plain identifiers with no secret-naming semantics), so it
+// is deliberately excluded here. If a future false-positive class needs an
+// "_id"-shaped exemption, scope it narrowly (e.g. only when a sibling
+// "*_env" / reference key exists for the same credential), not as a bare
+// suffix.
+var envIndirectionKeySuffixes = []string{"_env", "_envvar", "_env_var", "_var", "_name", "_file", "_path", "_ref"}
 
 // classifyValue reports whether v is credential MATERIAL (as opposed to a
 // reference or a placeholder). The value is inspected but never retained.
