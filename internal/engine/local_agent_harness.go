@@ -763,6 +763,7 @@ func (c *LocalHarnessController) runCycle(parent context.Context, reason string,
 	}
 
 	model, _, note := resolveDispatchLocalModel(target.Models, c.localModelHint(), DispatchModelE4B)
+	recordPinResolution("assess", c.localModelHint(), model, note)
 	if model == "" {
 		outcome.record.Action = "error"
 		outcome.record.Reason = note
@@ -1579,6 +1580,7 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 					return nil, terr
 				}
 				m, ru, n := resolveDispatchLocalModel(target.Models, c.localModelHint(), req.Model)
+				recordPinResolution("dispatch", c.localModelHint(), m, n)
 				if m == "" {
 					return nil, errors.New(n)
 				}
