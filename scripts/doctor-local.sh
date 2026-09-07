@@ -66,7 +66,12 @@ done
 # negative-control (sentinel query) check silently degrades to grep. Same tag
 # the Makefile, release.yml, and the CI doctor job use.
 echo "== building cogos (-tags fts5) =="
-if ! (cd "$REPO_ROOT" && go build -tags fts5 -o "$BIN" ./cmd/cogos); then
+# Declare the tag as well as passing it: a binary built with -tags fts5 but
+# without this -X reports build_tags.mismatch=true even though fts5 works.
+BUILD_TAGS="fts5"
+if ! (cd "$REPO_ROOT" && go build -tags "$BUILD_TAGS" \
+        -ldflags="-X github.com/myrgic/cogos/internal/engine.BuildTags=${BUILD_TAGS}" \
+        -o "$BIN" ./cmd/cogos); then
   echo "doctor-local: build FAILED — cannot run doctor against an unbuilt tree" >&2
   exit 2
 fi
