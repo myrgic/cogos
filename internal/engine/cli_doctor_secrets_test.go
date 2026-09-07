@@ -342,3 +342,47 @@ func TestClassifyValue_EnvVarNamesAreNotMaterial(t *testing.T) {
 		}
 	}
 }
+
+// Regression (reviewer objection on PR #576): the fix for the
+// access_token_env false-positive class overshot by including a bare "_id"
+// suffix in envIndirectionKeySuffixes. That caused the scanner to skip ANY
+// credential-shaped key ending in "_id" before ever inspecting its value —
+// including a HashiCorp Vault AppRole `secret_id`, which IS the credential,
+// not a pointer to one. A bare "_id" suffix is not evidence of indirection
+// (compare "user_id", "request_id" — plain identifiers) and must not be used
+// to skip classification. This is exactly the silent-miss failure mode this
+// doctor group exists to close.
+func TestIsEnvIndirectionKey_BareIdSuffixIsNotIndirection(t *testing.T) {
+	// secret_id (and other credential-shaped "_id" keys) must NOT be treated
+	// as env indirection — the key is credential-shaped and its value must
+	// still be classified.
+	for _, k := range []string{"secret_id", "SECRET_ID", "client_secret_id", "vault_secret_id"} {
+		if isEnvIndirectionKey(k) {
+			t.Errorf("isEnvIndirectionKey(%q) = true; want false — a bare _id suffix must not exempt a credential-shaped key from scanning", k)
+		}
+	}
+}
+
+// End-to-end: a committed Vault AppRole secret_id with real-looking material
+// must be reported as a finding, not silently skipped.
+func TestScanFileForSecrets_VaultAppRoleSecretIdIsDetected(t *testing.T) {
+	dir := t.TempDir()
+	p := writeSecretFile(t, dir, "approle.yaml", strings.Join([]string{
+		"role_id: 9b5b3d8a-1c2e-4f5a-9d6e-7a8b9c0d1e2f",
+		"secret_id: " + canarySecret,
+	}, "\n"))
+
+	fs, err := scanFileForSecrets(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range fs {
+		if f.key == "secret_id" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("secret_id carrying real credential material was not detected (findings: %+v); a bare _id suffix exclusion silently misses committed Vault AppRole secrets", fs)
+	}
+}
