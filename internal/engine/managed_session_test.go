@@ -164,6 +164,43 @@ func isErrSessionNotLive(err error) bool {
 	return false
 }
 
+// TestManagedSession_Detach_AfterPriorCancelStdinClose_IsIdempotent covers
+// the gap the cog-review bot flagged: Detach() must be idempotent even
+// when a prior Cancel(CancelStdinClose) already closed stdin. Detach()
+// correctly sets state to Detached either way, but before the fix it also
+// tried to close the (already-closed) stdin pipe a second time and
+// surfaced that as a spurious "detach" error.
+func TestManagedSession_Detach_AfterPriorCancelStdinClose_IsIdempotent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	ms, err := NewManagedSession(ctx, "fake-session-detach-idem", ManagedSessionOpts{ClaudePath: fakeClaudePath(t)})
+	if err != nil {
+		t.Fatalf("NewManagedSession: %v", err)
+	}
+	drainInBackground(ms)
+	waitForState(t, ms, StateLive, 2*time.Second)
+
+	// Caller cancels the in-flight turn gracefully first...
+	if err := ms.Cancel(acp.CancelStdinClose); err != nil {
+		t.Fatalf("Cancel(stdin-close): %v", err)
+	}
+
+	// ...then calls Detach(), which must succeed as a no-op: state should
+	// land on Detached with no spurious error from re-closing stdin.
+	if err := ms.Detach(); err != nil {
+		t.Fatalf("Detach() after prior Cancel(CancelStdinClose) should be idempotent, got error: %v", err)
+	}
+	if got := ms.State(); got != StateDetached {
+		t.Fatalf("state after Detach() = %s, want %s", got, StateDetached)
+	}
+
+	// A further Detach() call remains idempotent too.
+	if err := ms.Detach(); err != nil {
+		t.Fatalf("third detach should also be a no-op, got: %v", err)
+	}
+}
+
 func TestManagedSessionRegistry_New_IsIdempotentForLiveSessions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

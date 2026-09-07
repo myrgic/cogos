@@ -141,12 +141,40 @@ def sanitize_frame(fr: dict):
     return walk_scrub(fr)
 
 
+def reconstruct_stream_deltas(frames: list[dict]) -> dict[tuple, str]:
+    """Rebuild the full text an SDK consumer would see for each streamed
+    content block, by concatenating input_json_delta / text_delta
+    partial_json fragments in order, keyed by (session_id, index).
+
+    A per-line regex is blind to a leaked path that a real capture split
+    across two or more stream-delta frames (e.g. "...spike-acp-l1" in one
+    frame and "/go.mod" in the next). Reassembling before scanning closes
+    that gap.
+    """
+    streams: dict[tuple, list[str]] = {}
+    for fr in frames:
+        if fr.get("type") != "stream_event":
+            continue
+        ev = fr.get("event") or {}
+        if ev.get("type") != "content_block_delta":
+            continue
+        delta = ev.get("delta") or {}
+        frag = delta.get("partial_json")
+        if frag is None:
+            frag = delta.get("text")
+        if frag is None:
+            continue
+        key = (fr.get("session_id"), ev.get("index"))
+        streams.setdefault(key, []).append(frag)
+    return {k: "".join(v) for k, v in streams.items()}
+
+
 def process(path: Path, in_place: bool) -> list[str]:
     """Returns list of violations (empty == clean)."""
     lines = [l for l in path.read_text().splitlines() if l.strip()]
     out_lines, before = [], []
-    for i, line in enumerate(lines, 1):
-        fr = json.loads(line)
+    raw_frames = [json.loads(line) for line in lines]
+    for fr in raw_frames:
         before.append((fr.get("type"), fr.get("subtype")))
         out_lines.append(json.dumps(sanitize_frame(fr), separators=(",", ":")))
 
@@ -160,6 +188,7 @@ def process(path: Path, in_place: bool) -> list[str]:
     if in_place:
         path.write_text("\n".join(out_lines) + "\n")
 
+    out_frames = [json.loads(l) for l in out_lines] if in_place else raw_frames
     body = "\n".join(out_lines) if in_place else path.read_text()
     violations = []
     for rx, label in FORBIDDEN:
@@ -167,6 +196,20 @@ def process(path: Path, in_place: bool) -> list[str]:
             ctx = body[max(0, m.start() - 40): m.start() + 60].replace("\n", " ")
             violations.append(f"{path.name}: {label}: …{ctx}…")
             break  # one report per pattern per file
+
+    # Cross-frame check: scan reassembled stream-delta payloads too, so a
+    # path/secret split across a delta boundary can't hide from the
+    # per-line regex above.
+    reassembled = reconstruct_stream_deltas(out_frames)
+    for key, text in reassembled.items():
+        for rx, label in FORBIDDEN:
+            for m in rx.finditer(text):
+                ctx = text[max(0, m.start() - 40): m.start() + 60].replace("\n", " ")
+                violations.append(
+                    f"{path.name}: {label} (split across stream-delta "
+                    f"boundary, session/index={key}): …{ctx}…")
+                break
+
     return violations
 
 
