@@ -17,8 +17,33 @@ type NodeHealth struct {
 // ServiceHealth is the probed state of a single service.
 type ServiceHealth struct {
 	Port   int       `json:"port"`
-	Status string    `json:"status"` // healthy, degraded, down
+	Status string    `json:"status"` // healthy, degraded, down, unknown
 	At     time.Time `json:"probed_at"`
+}
+
+// probeable reports whether an HTTP health probe is meaningful for svc.
+//
+// The prober speaks exactly one dialect: GET http://localhost:<port><health>.
+// A service that has no port, or an observed/external service that declares no
+// health path, cannot answer in that dialect. Probing it anyway produces a
+// guaranteed connection failure against http://localhost:0/..., which the
+// prober would then report as "down" forever — a service that is running
+// perfectly, painted permanently red.
+//
+// That is worse than reporting nothing. A tile that is always red trains the
+// operator to stop reading the health surface, which is precisely the
+// silent-dashboard failure this codebase has already been bitten by. So an
+// unprobeable service is reported "unknown" — an honest absence of evidence —
+// and never "down", which is a positive claim of failure we have not earned.
+func probeable(svc ServiceDef) bool {
+	if svc.Port == 0 {
+		return false
+	}
+	switch svc.Kind.EffectiveKind() {
+	case ServiceKindObserved, ServiceKindExternal:
+		return svc.Health != ""
+	}
+	return true
 }
 
 // NewNodeHealth returns an empty NodeHealth.
@@ -42,7 +67,15 @@ func (nh *NodeHealth) Probe(manifest *NodeManifest, selfPort int) {
 	count := 0
 
 	for name, svc := range manifest.Services {
-		if svc.Port == selfPort {
+		if svc.Port != 0 && svc.Port == selfPort {
+			continue
+		}
+		// Unprobeable services never get an HTTP attempt, so they can never
+		// be reported "down" by a probe that was never going to succeed.
+		if !probeable(svc) {
+			nh.mu.Lock()
+			nh.services[name] = ServiceHealth{Port: svc.Port, Status: "unknown", At: now}
+			nh.mu.Unlock()
 			continue
 		}
 		count++

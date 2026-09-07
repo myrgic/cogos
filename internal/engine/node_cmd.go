@@ -79,6 +79,10 @@ func runNodeStatus(args []string, workspace string) {
 				healthStr = "\033[32m" + health + "\033[0m"
 			case "degraded":
 				healthStr = "\033[33m" + health + "\033[0m"
+			case "unknown":
+				// Dim, not red: we have no evidence, which is not the same
+				// as evidence of failure.
+				healthStr = "\033[90m" + health + "\033[0m"
 			default:
 				healthStr = "\033[31m" + health + "\033[0m"
 			}
@@ -97,6 +101,12 @@ func probeService(svc ServiceDef) (health, pid, uptime string) {
 	health = "down"
 	pid = "-"
 	uptime = "-"
+
+	// Same contract as NodeHealth.Probe: a service we cannot speak HTTP to is
+	// "unknown", never "down". See probeable() in node_probe.go.
+	if !probeable(svc) {
+		return "unknown", pid, uptime
+	}
 
 	url := fmt.Sprintf("http://localhost:%d%s", svc.Port, svc.Health)
 	client := &http.Client{Timeout: 2 * time.Second}
