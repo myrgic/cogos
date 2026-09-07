@@ -75,15 +75,29 @@ def parse_value(raw: str) -> str:
     return (s[:m.start()] if m else s).strip()
 
 
-def load_guards(root: Path) -> tuple[list[tuple[str, str, str]], list[str]]:
-    """Parse content_guards + exclude from .cogpublic.
+def load_guards(root: Path) -> tuple[list[tuple[str, str, str]], list[str], list[str]]:
+    """Parse content_guards + exclude + deny from .cogpublic.
 
     Deliberately a small hand parser rather than a PyYAML dependency: this must
     run in a bare pre-commit hook and in CI before any install step, and a
     guard that fails to import is a guard that does not run.
 
-    Returns (guards, excludes) where each guard is (pattern, description, probe).
-    `probe` is an optional known-dirty string the self-test asserts against.
+    Returns (guards, excludes, denies) where each guard is
+    (pattern, description, probe). `probe` is an optional known-dirty string
+    the self-test asserts against.
+
+    DEFECT FIXED (blocking review of this PR): `exclude:` and `deny:` were
+    folded into the same `excludes` list (`elif section in ('exclude', 'deny')`).
+    `exclude:` means "not part of the leak scan" (e.g. the guard script itself,
+    which legitimately contains probe strings). `deny:` means the opposite:
+    "must never leave the constellation" -- .cog/**, model weights, DBs. Those
+    are the paths MOST likely to carry a real leak, not the least, and this
+    repo already tracks files under .cog/**. Folding deny into excludes
+    silently exempted every deny-listed path from the content scan this PR
+    exists to add -- reproducing, inside the fix, the exact "guard reads like
+    coverage but doesn't fire" failure the PR was written to eliminate. `deny`
+    is now returned separately and MUST NOT be used to skip content scanning;
+    see `excluded()` and `scan()`, which only ever consult `excludes`.
     """
     path = root / CONFIG
     if not path.exists():
@@ -91,6 +105,7 @@ def load_guards(root: Path) -> tuple[list[tuple[str, str, str]], list[str]]:
 
     guards: list[tuple[str, str, str]] = []
     excludes: list[str] = []
+    denies: list[str] = []
     section = None
     pending: dict | None = None
 
@@ -118,11 +133,19 @@ def load_guards(root: Path) -> tuple[list[tuple[str, str, str]], list[str]]:
                 for key in ("description", "probe"):
                     if stripped.startswith(f"{key}:"):
                         pending[key] = parse_value(stripped.split(f"{key}:", 1)[1])
-        elif section in ("exclude", "deny"):
+        elif section == "exclude":
             if stripped.startswith("- "):
                 excludes.append(parse_value(stripped[2:]))
+        elif section == "deny":
+            # Deny-listed paths must NEVER leak. They are intentionally kept
+            # OUT of `excludes` -- see the DEFECT FIXED note above -- so they
+            # remain fully subject to the content-guard scan. `denies` is
+            # exposed for future use (e.g. an actual publish/allow-list
+            # filter) but is never consulted by `excluded()`.
+            if stripped.startswith("- "):
+                denies.append(parse_value(stripped[2:]))
     flush()
-    return guards, excludes
+    return guards, excludes, denies
 
 
 def glob_to_regex(pat: str) -> re.Pattern:
@@ -260,7 +283,7 @@ SELF_REFERENTIAL = re.compile(r"^\.cogpublic$")
 
 def scan(root: Path, mode: str) -> int:
     try:
-        guards, excludes = load_guards(root)
+        guards, excludes, _denies = load_guards(root)
     except (FileNotFoundError, ValueError) as e:
         print(f"GUARD CANNOT RUN: {e}", file=sys.stderr)
         return 2
@@ -367,7 +390,7 @@ def self_test(root: Path) -> int:
     a repo may supply its own `probe:` to convert one into a tested guard.
     """
     try:
-        guards, _ = load_guards(root)
+        guards, _excludes, _denies = load_guards(root)
     except (FileNotFoundError, ValueError) as e:
         print(f"SELF-TEST FAILED: {e}", file=sys.stderr)
         return 2
