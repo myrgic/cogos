@@ -1,23 +1,26 @@
 //go:build fts5
 
 // This file is compiled ONLY under -tags fts5, because the test below hard
-// asserts that the runtime probe succeeds. CI's default `test` job runs
-// untagged (that is precisely the ledger L01 defect: the tag was declared in
-// the Makefile and enforced nowhere), so an unconditional assertion here
-// fails by construction on the very job that proves the point. The tagged
-// build asserts the property; the untagged build is covered by
-// TestBuildTags_EveryTaggedBuildPathDeclares and the #604 guard, which fail
-// with the real swallowed error instead.
+// asserts that the runtime probe succeeds. An unconditional assertion would
+// fail by construction on any untagged build — which is precisely the ledger
+// L01 defect it documents: the tag was declared in the Makefile and enforced
+// nowhere. The tagged build asserts the property; untagged builds are covered
+// by TestBuildTags_EveryTaggedBuildPathDeclares, which fails with the real
+// swallowed error instead.
 //
-// CONSEQUENCE, stated plainly because it is easy to miss: on main today NO
-// workflow passes -tags fts5 (ci.yml:69 is `go test -race -count=1 ./...`;
-// nightly-integration.yml:59 is `-tags integration`). So this file does not
-// compile in CI at all, and the assertion below runs only locally. The tag
-// is added to CI by PR #604, which is not merged yet. Until it lands, this
-// test is real but UNRUN in CI — do not read a green PR as evidence that the
-// runtime probe was exercised. Verified 2026-09-06 by diffing
-// origin/main:.github/workflows/ci.yml against the #604 branch (2 tagged
-// test sites there, 0 on main).
+// STATUS IN CI, as of this commit: #604 is MERGED (it is this branch's merge
+// base), and it added -tags fts5 to every go test invocation in the repo —
+// ci.yml:69, ci.yml:86, and nightly-integration.yml:59 (`-tags "integration
+// fts5"`). There is no untagged test job left, so this file DOES compile and
+// the assertion below DOES run in CI.
+//
+// That is a correction. An earlier version of this header said CI ran
+// untagged, that no workflow passed -tags fts5, and that this test was "real
+// but UNRUN in CI" pending #604. All three statements were true when written
+// and false by the time they were read: #604 merged the same day. A reviewer
+// caught the stale claim, not a test — a comment asserting a fact about
+// another branch has no mechanism to notice when that branch lands. Re-verify
+// against origin/main before trusting any CI claim written here.
 
 package engine
 
