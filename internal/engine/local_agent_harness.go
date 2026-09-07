@@ -1429,6 +1429,7 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 		} else {
 			model = pc.Model
 		}
+		recordPinResolution("dispatch:explicit-provider", pc.Model, model, note)
 		// routeUsed stays empty; ProviderUsed on each slot is the canonical
 		// signal that the named-provider path fired. ServedModel (set from
 		// the provider response's ProviderMeta.Model) is the canonical
@@ -1469,6 +1470,7 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 					req.Provider = mres.PreferProvider
 					note = fmt.Sprintf("model-routing: model=%s -> provider=%s override=%s", req.Model, mres.PreferProvider, mres.ModelOverride)
 					usedModelRoute = true
+					recordPinResolution("dispatch:model-alias", pc.Model, model, note)
 				}
 				// If provider not found or disabled in this node's config: fall
 				// through to process_state_routing / legacy path.
@@ -1509,6 +1511,7 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 						// from the legacy local-LLM probe path.
 						req.Provider = stateProvider
 						usedStateRoute = true
+						recordPinResolution("dispatch:state-routing", pc.Model, model, note)
 					}
 					// If provider not found or disabled: fall through to legacy path silently.
 				}
@@ -1572,6 +1575,7 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 				// provider name in ProviderUsed.
 				req.Provider = hp
 				usedHarnessProvider = true
+				recordPinResolution("dispatch:harness-provider", pc.Model, model, note)
 			}
 			if !usedStateRoute && !usedHarnessProvider {
 				// Path 3: legacy model-enum routing via local-LLM probe.
