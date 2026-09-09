@@ -86,7 +86,7 @@ allow:
 # for the untracked case.
 deny:
   - .cog/run/**
-  - .cog/state/**
+  - .cog/.state/**
   - .cog/ledger/**
   - .cog/blobs/**
   - .cog/vault/**
