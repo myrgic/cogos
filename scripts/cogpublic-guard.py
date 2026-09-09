@@ -32,6 +32,20 @@ USAGE
 
 Exit 0 = clean, 1 = violations found, 2 = the guard itself could not run.
 Exit 2 matters: a guard that cannot run must not look like a guard that passed.
+
+DENY-BY-PATH (review of this PR, blocking): `.cogpublic`'s `deny:` list names
+paths that must never leave the constellation (`.cog/**`, `*.db`, `*.gguf`,
+...), but until this fix `load_guards()` parsed it and every caller discarded
+it (`_denies`) -- only the 7 `content_guards` regexes gated a file, so a
+deny-listed blob whose bytes happened to match none of them (a binary
+`.safetensors`/`.gguf`, a `.cog/state.db` sqlite file) scanned clean and
+published. Every scan mode (`head`/`staged`/`tree`) now also checks each
+file's PATH against the deny globs -- same segment-aware glob syntax as
+`exclude:` (see `glob_to_regex`), independent of and evaluated BEFORE the
+exclude check, so a path that is both excluded and denied is still denied
+(exclude only ever narrows the CONTENT scan; it must never narrow deny). A
+deny hit blocks on the path alone, regardless of content, and names the glob
+that matched.
 """
 from __future__ import annotations
 
@@ -143,8 +157,12 @@ def load_guards(root: Path) -> tuple[list[tuple[str, str, str]], list[str], list
             # Deny-listed paths must NEVER leak. They are intentionally kept
             # OUT of `excludes` -- see the DEFECT FIXED note above -- so they
             # remain fully subject to the content-guard scan. `denies` is
-            # exposed for future use (e.g. an actual publish/allow-list
-            # filter) but is never consulted by `excluded()`.
+            # ALSO consulted directly by `scan()` as an independent
+            # path-based check (see `denied()`): a deny-listed path is a
+            # violation regardless of content and regardless of `exclude:`
+            # (blocking review of this PR -- deny was parsed but nothing
+            # enforced it beyond content_guards, so a deny-listed binary
+            # blob matching none of the 7 regexes scanned clean).
             if stripped.startswith("- "):
                 denies.append(parse_value(stripped[2:]))
     flush()
@@ -201,6 +219,26 @@ def excluded(path: str, patterns: list[str]) -> bool:
         if glob_to_regex(p).match(path):
             return True
     return False
+
+
+def denied(path: str, patterns: list[str]) -> str | None:
+    """Return the first `deny:` glob that matches `path`, or None.
+
+    Same segment-aware glob_to_regex as excluded() -- same syntax, opposite
+    meaning: exclude keeps a path OUT of the content scan; deny means the
+    path must never publish, period. Callers must check this INDEPENDENTLY
+    of, and BEFORE, excluded() -- a path that is both excluded and denied is
+    still denied. Folding deny checks behind an exclude check would
+    reproduce, for path-based enforcement, the exact "declared but silenced"
+    bug the deny/exclude conflation in load_guards() already caused once for
+    content scanning.
+    """
+    for p in patterns:
+        if not p:
+            continue
+        if glob_to_regex(p).match(path):
+            return p
+    return None
 
 
 def decode_scannable(raw: bytes) -> str:
@@ -294,9 +332,29 @@ BUILTIN_PROBES = {
 }
 
 
+def instantiate_deny_pattern(pat: str) -> str:
+    """Build a concrete relative path guaranteed to match a `deny:` glob, for
+    the self-test's own probe (see `_self_test_deny_path_probe`).
+
+    Handles the shapes this repo's own `.cogpublic` actually declares: a
+    directory subtree ("x/**" or "x/*"), an extension glob ("*.gguf" ->
+    "probe.gguf"), and a bare literal path (used as-is). A generic fallback
+    covers any other single/double-star combination a repo might add.
+    """
+    if pat.endswith("/**"):
+        return pat[:-3] + "/probe.txt"
+    if pat.endswith("/*"):
+        return pat[:-2] + "/probe.txt"
+    if pat.startswith("*."):
+        return "probe" + pat[1:]
+    if "*" in pat or "?" in pat:
+        return pat.replace("**", "probe").replace("*", "probe").replace("?", "p")
+    return pat  # literal path already matches itself
+
+
 def scan(root: Path, mode: str) -> int:
     try:
-        guards, excludes, _denies = load_guards(root)
+        guards, excludes, denies = load_guards(root)
     except (FileNotFoundError, ValueError) as e:
         print(f"GUARD CANNOT RUN: {e}", file=sys.stderr)
         return 2
@@ -376,6 +434,16 @@ def scan(root: Path, mode: str) -> int:
     scanned = 0
 
     for f in files:
+        # DENY-BY-PATH (blocking review of this PR): checked independently of,
+        # and BEFORE, the exclude/self-referential skip below. A deny-listed
+        # path is a violation on the path alone, regardless of its content and
+        # regardless of `exclude:` -- exclude only narrows the content scan
+        # that follows; it must never narrow this. See `denied()`.
+        deny_hit = denied(f, denies)
+        if deny_hit is not None:
+            violations.append(
+                f"{f}: DENIED — path matches deny glob {deny_hit!r} "
+                "(blocked regardless of content; exclude: does not override deny)")
         if excluded(f, excludes) or SELF_REFERENTIAL.search(f):
             continue
         content = read_blob(mode, f, root)
@@ -396,6 +464,15 @@ def scan(root: Path, mode: str) -> int:
     # pattern checks as any other scanned content — an unlisted symlink is not
     # a free pass.
     for rel, target in symlinks:
+        # Same deny-by-path check as the regular-file loop above, and for the
+        # same reason: a symlink's own name can match a deny glob (a
+        # `*.gguf` alias into a cache dir, say) independent of whatever its
+        # target text contains.
+        deny_hit = denied(rel, denies)
+        if deny_hit is not None:
+            violations.append(
+                f"{rel}: DENIED — path matches deny glob {deny_hit!r} "
+                "(symlink; blocked regardless of content; exclude: does not override deny)")
         if excluded(rel, excludes) or SELF_REFERENTIAL.search(rel):
             continue
         scanned += 1
@@ -437,7 +514,7 @@ def self_test(root: Path) -> int:
     a repo may supply its own `probe:` to convert one into a tested guard.
     """
     try:
-        guards, _excludes, _denies = load_guards(root)
+        guards, _excludes, denies = load_guards(root)
     except (FileNotFoundError, ValueError) as e:
         print(f"SELF-TEST FAILED: {e}", file=sys.stderr)
         return 2
@@ -488,6 +565,21 @@ def self_test(root: Path) -> int:
     else:
         fails.append(sym_detail)
         print(f"  - symlink target scan (--tree)  [FAILED: {sym_detail}]")
+
+    # Prove deny-by-path fires on clean content and does NOT over-match a
+    # clean control file -- the finding from the blocking review of this PR
+    # (deny: parsed, never enforced beyond content_guards).
+    deny_ok, deny_detail = _self_test_deny_path_probe(root, denies)
+    if deny_ok is None:
+        print(f"  - deny-by-path scan (--tree)  [UNTESTED — {deny_detail}]")
+    elif deny_ok:
+        tested.append("__deny_path__")
+        print(f"  - deny-by-path scan (--tree)  "
+              f"[tested: blocked {deny_detail!r} by path alone with clean "
+              "content; a clean control file still passed]")
+    else:
+        fails.append(deny_detail)
+        print(f"  - deny-by-path scan (--tree)  [FAILED: {deny_detail}]")
 
     if fails:
         for f in fails:
@@ -540,6 +632,57 @@ def _self_test_symlink_probe(root: Path, guards) -> tuple[bool | None, str]:
         return False, (f"expected exit 1 (BLOCKED) scanning a symlink targeting "
                         f"{probe!r}, got exit {rc}")
     return True, probe
+
+
+def _self_test_deny_path_probe(root: Path, denies: list[str]) -> tuple[bool | None, str]:
+    """Prove that a deny-listed PATH is blocked under --tree even when its
+    content matches zero content_guards patterns -- the exact gap named in
+    the blocking review of this PR (`deny:` parsed, never enforced beyond
+    the 7 content_guards regexes).
+
+    Two separate throwaway directories, each holding only this repo's
+    `.cogpublic` plus one file with identical innocuous content:
+      - PROBE: a path instantiated from the first `deny:` glob (e.g.
+        `probe.gguf` for `*.gguf`) -- must exit 1 (BLOCKED) on the path
+        alone.
+      - CONTROL: an ordinary, non-denied path with the SAME content -- must
+        exit 0. Without this half, a deny check that also flagged
+        everything would "pass" this self-test while breaking the tool.
+
+    Returns (True, probe_rel) on success, (False, reason) on a real
+    failure, or (None, reason) when this repo's .cogpublic declares no
+    `deny:` patterns at all -- a gap in the ruleset, not a failure here.
+    """
+    if not denies:
+        return None, "no deny: patterns declared in this repo's .cogpublic"
+    pat = denies[0]
+    probe_rel = instantiate_deny_pattern(pat)
+    clean_content = "clean content, matches no content_guards pattern\n"
+
+    def run_case(rel_path: str) -> int:
+        tmp = Path(tempfile.mkdtemp(prefix="cogpublic-guard-selftest-deny-"))
+        try:
+            shutil.copy(root / CONFIG, tmp / CONFIG)
+            target = tmp / rel_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(clean_content)
+            return scan(tmp, "tree")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    rc_denied = run_case(probe_rel)
+    if rc_denied != 1:
+        return False, (f"expected exit 1 (BLOCKED) scanning {probe_rel!r} "
+                        f"(matches deny glob {pat!r}) with clean content, "
+                        f"got exit {rc_denied}")
+
+    rc_clean = run_case("clean-control.txt")
+    if rc_clean != 0:
+        return False, ("expected exit 0 scanning a clean control file with "
+                        f"no deny/content hits, got exit {rc_clean} "
+                        "(deny check is over-matching)")
+
+    return True, probe_rel
 
 
 def main() -> int:
