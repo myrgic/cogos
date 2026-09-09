@@ -36,9 +36,12 @@ Exit 2 matters: a guard that cannot run must not look like a guard that passed.
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 CONFIG = ".cogpublic"
@@ -280,6 +283,16 @@ def read_blob(mode: str, path: str, root: Path) -> str | None:
 # declaration rather than an invisible convention.
 SELF_REFERENTIAL = re.compile(r"^\.cogpublic$")
 
+# Built-in probes for the org baseline patterns, shared by --self-test's
+# per-pattern check and the symlink-target probe below. A repo can override
+# or extend by adding `probe:` beside any guard in its own .cogpublic.
+BUILTIN_PROBES = {
+    r"sk-[a-zA-Z0-9]{20,}": "sk-" + "a" * 24,
+    r"ghp_[a-zA-Z0-9]{20,}": "ghp_" + "b" * 24,
+    r"xoxb-[a-zA-Z0-9]+": "xoxb-abc123",
+    r"@gmail\.com|@yahoo\.com|@hotmail\.com": "someone@gmail.com",
+}
+
 
 def scan(root: Path, mode: str) -> int:
     try:
@@ -297,6 +310,7 @@ def scan(root: Path, mode: str) -> int:
     # verdict about the wrong tree. It surfaced as mod3 reporting clean while a
     # known leak sat at tests/test_claude_session_id_binding.py:462.
     # Silent wrong-target is the worst class this tool has: it looks like a pass.
+    symlinks: list[tuple[str, str]] = []  # (relpath, target-text); --tree only
     if mode == "staged":
         files = [f for f in sh("git", "-C", str(root), "diff", "--cached",
                                "--name-only", "--diff-filter=ACM").splitlines() if f]
@@ -315,10 +329,31 @@ def scan(root: Path, mode: str) -> int:
         # --tree scan in CI would block on the scanner itself. Verified
         # 2026-09-01: it reported `.release-gate/scripts/cogpublic-guard.py:18`
         # and exited 1 against an otherwise clean tree.
+        #
+        # DEFECT FIXED (found alongside the Dockerfile/COGOS_REPO_ROOT review):
+        # this loop used to `continue` on `p.is_symlink()` before any content
+        # guard ran at all — a symlink whose TARGET path embeds a leak (a
+        # build-cache alias pointing at /Users/<name>/..., say) published
+        # clean with the gate reporting success. `--tree` is the last check
+        # before a build artifact is force-pushed to a public repo, so a
+        # silently-skipped file class there is exactly the failure mode this
+        # tool exists to close. Symlinks are not resolved and read (the target
+        # may not exist, or may point outside the tree); instead the link's
+        # own target text is scanned as content, same as any other string.
         skip_dirs = {".git", ".release-gate"}
         files = []
         for p in root.rglob("*"):
-            if not p.is_file() or p.is_symlink():
+            if p.is_symlink():
+                rel = p.relative_to(root)
+                if skip_dirs & set(rel.parts):
+                    continue
+                try:
+                    target = os.readlink(str(p))
+                except OSError:
+                    continue
+                symlinks.append((str(rel), target))
+                continue
+            if not p.is_file():
                 continue
             rel = p.relative_to(root)
             if skip_dirs & set(rel.parts):
@@ -355,6 +390,18 @@ def scan(root: Path, mode: str) -> int:
             if m:
                 line = content[:m.start()].count("\n") + 1
                 violations.append(f"{f}:{line}: {desc or pat}")
+
+    # Symlink targets (--tree only; see the DEFECT FIXED note above) are text,
+    # not files with lines, but they go through the exact same exclude and
+    # pattern checks as any other scanned content — an unlisted symlink is not
+    # a free pass.
+    for rel, target in symlinks:
+        if excluded(rel, excludes) or SELF_REFERENTIAL.search(rel):
+            continue
+        scanned += 1
+        for rx, pat, desc in compiled:
+            if rx.search(target):
+                violations.append(f"{rel} -> {target!r}: {desc or pat} (symlink target)")
 
     if violations:
         print("PUBLIC RELEASE GATE — BLOCKED", file=sys.stderr)
@@ -398,20 +445,11 @@ def self_test(root: Path) -> int:
         print("SELF-TEST FAILED: zero guards parsed", file=sys.stderr)
         return 2
 
-    # Built-in probes for the org baseline patterns. A repo can override or
-    # extend by adding `probe:` beside any guard in its own .cogpublic.
-    BUILTIN = {
-        r"sk-[a-zA-Z0-9]{20,}": "sk-" + "a" * 24,
-        r"ghp_[a-zA-Z0-9]{20,}": "ghp_" + "b" * 24,
-        r"xoxb-[a-zA-Z0-9]+": "xoxb-abc123",
-        r"@gmail\.com|@yahoo\.com|@hotmail\.com": "someone@gmail.com",
-    }
-
     fails, tested, untested = [], [], []
     print(f"self-test: {len(guards)} guards parsed from {CONFIG}")
 
     for pat, desc, declared_probe in guards:
-        probe = declared_probe or BUILTIN.get(pat)
+        probe = declared_probe or BUILTIN_PROBES.get(pat)
         if probe is None and not any(c in pat for c in ".*+[](){}\\|^$?"):
             probe = pat + "X"          # literal pattern: any superstring matches
         try:
@@ -437,6 +475,20 @@ def self_test(root: Path) -> int:
             fails.append(f"pattern {pat!r} did not match its probe {probe!r}")
             print(f"  - {pat}  ({desc})  [FAILED]")
 
+    # Prove the --tree symlink fix actually fires, rather than trusting the
+    # code path un-exercised — the exact "declared but never proven" failure
+    # this whole tool exists to close, now for symlink targets specifically.
+    sym_ok, sym_detail = _self_test_symlink_probe(root, guards)
+    if sym_ok is None:
+        print(f"  - symlink target scan (--tree)  [UNTESTED — {sym_detail}]")
+    elif sym_ok:
+        tested.append("__symlink_target__")
+        print(f"  - symlink target scan (--tree)  "
+              f"[tested: caught {sym_detail!r} via a symlink's target text]")
+    else:
+        fails.append(sym_detail)
+        print(f"  - symlink target scan (--tree)  [FAILED: {sym_detail}]")
+
     if fails:
         for f in fails:
             print(f"  FAIL: {f}", file=sys.stderr)
@@ -448,6 +500,46 @@ def self_test(root: Path) -> int:
         print("  untested guards are NOT proven to fire; add a `probe:` line "
               "beside each to close the gap")
     return 0
+
+
+def _self_test_symlink_probe(root: Path, guards) -> tuple[bool | None, str]:
+    """Prove that a symlink whose TARGET text embeds a guarded pattern is
+    caught by `--tree` scanning rather than silently skipped.
+
+    Builds a throwaway directory containing only this repo's `.cogpublic` (so
+    `scan()` has a real ruleset to load) and one symlink whose target string
+    is a known-dirty probe for the first testable guard. Runs an actual
+    `scan(..., "tree")` against it and requires exit 1 (BLOCKED) — a guard
+    that cannot demonstrate this is not proven to have the fix at all.
+
+    Returns (True, probe) on success, (False, reason) on a real failure, or
+    (None, reason) when no guard in this repo's .cogpublic is testable (no
+    declared or builtin probe and no literal pattern) — that is a gap in the
+    ruleset's own probes, not a failure of this check.
+    """
+    probe = None
+    for pat, _desc, declared_probe in guards:
+        candidate = declared_probe or BUILTIN_PROBES.get(pat)
+        if candidate is None and not any(c in pat for c in ".*+[](){}\\|^$?"):
+            candidate = pat + "X"
+        if candidate:
+            probe = candidate
+            break
+    if probe is None:
+        return None, "no testable content_guard available to build a symlink probe"
+
+    tmp = Path(tempfile.mkdtemp(prefix="cogpublic-guard-selftest-"))
+    try:
+        shutil.copy(root / CONFIG, tmp / CONFIG)
+        os.symlink(probe, str(tmp / "leaked-alias"))
+        rc = scan(tmp, "tree")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if rc != 1:
+        return False, (f"expected exit 1 (BLOCKED) scanning a symlink targeting "
+                        f"{probe!r}, got exit {rc}")
+    return True, probe
 
 
 def main() -> int:
