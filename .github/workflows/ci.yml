@@ -173,6 +173,15 @@ jobs:
       - name: Public release gate — self-test
         run: python3 ./scripts/cogpublic-guard.py --self-test
 
+      # Negative control for the exclude/deny conflation bug fixed in this same
+      # PR (load_guards() used to fold `deny:` into `excludes`, silently
+      # exempting deny-listed paths like .cog/** from the content scan). This
+      # test was written to catch a regression of exactly that bug and was not
+      # wired into CI, so a future regression would go undetected. Runs right
+      # after self-test so a broken guard fails loudly before the real scan.
+      - name: Public release gate — deny/exclude regression test
+        run: python3 ./scripts/test_cogpublic_deny_scanned.py
+
       - name: Public release gate — scan
         run: python3 ./scripts/cogpublic-guard.py
 
