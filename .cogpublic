@@ -66,8 +66,34 @@ allow:
   - autoresearch-foveated/results.tsv
 
 # Paths that NEVER leave the constellation
+#
+# NARROWED 2026-09-09 (review of this PR): a blanket `.cog/**` deny caught
+# four files this repo tracks and ships on purpose --
+#   .cog/config/node/manifest.yaml
+#   .cog/config/observatory.yaml
+#   .cog/mem/semantic/insights/deterministic-review-pipeline-for-cogdoc-authoring.cog.md
+#   .cog/mem/working/proposals/deterministic-review-pipeline-implementation-plan-2026-05-14.cog.md
+# -- reference config examples and proposal cogdocs, not runtime state. Per
+# the operator's ruling ("if those files are being caught by a policy and
+# shouldn't be, then let's narrow the policy"), the deny list below names
+# only the subtrees that hold node-local runtime/private state and must
+# never leave a node, aligned with what .gitignore already ignores under
+# `.cog/` (`.cog/.state/`, `.cog/ledger/`, `.cog/blobs/`, `.cog/mem/episodic/`)
+# plus the other canonical live-state subtrees a node writes at runtime.
+# `.cog/config/**`, `.cog/mem/semantic/**`, and `.cog/mem/working/**` are
+# deliberately NOT denied -- they carry tracked reference/proposal content,
+# not live state, even though `.gitignore` also ignores `.cog/mem/working/`
+# for the untracked case.
 deny:
-  - .cog/**
+  - .cog/run/**
+  - .cog/state/**
+  - .cog/ledger/**
+  - .cog/blobs/**
+  - .cog/vault/**
+  - .cog/cache/**
+  - .cog/identity/**
+  - .cog/status/**
+  - .cog/mem/episodic/**
   - "*.db"
   - "*.sqlite"
   - "*.pt"
