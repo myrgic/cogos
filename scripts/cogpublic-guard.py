@@ -40,12 +40,39 @@ it (`_denies`) -- only the 7 `content_guards` regexes gated a file, so a
 deny-listed blob whose bytes happened to match none of them (a binary
 `.safetensors`/`.gguf`, a `.cog/state.db` sqlite file) scanned clean and
 published. Every scan mode (`head`/`staged`/`tree`) now also checks each
-file's PATH against the deny globs -- same segment-aware glob syntax as
-`exclude:` (see `glob_to_regex`), independent of and evaluated BEFORE the
+file's PATH against the deny globs, independent of and evaluated BEFORE the
 exclude check, so a path that is both excluded and denied is still denied
 (exclude only ever narrows the CONTENT scan; it must never narrow deny). A
 deny hit blocks on the path alone, regardless of content, and names the glob
 that matched.
+
+DENY GLOB SEMANTICS (round 2 of the same review -- the round-1 fix above
+shipped `denied()` reusing `glob_to_regex()` verbatim, which made the six
+extension-only entries -- `*.db`/`*.sqlite`/`*.pt`/`*.onnx`/`*.safetensors`/
+`*.gguf` -- compile to a single-segment, ROOT-ONLY match: a stray
+`pkg/foo/testdata/weights.gguf` was silently NOT denied, and the self-test
+never caught it because it only ever probed `denies[0]`, a directory glob
+that already worked). A `deny:` glob is now one of exactly three classes,
+each documented at its matching function (`denied()`, `instantiate_deny_pattern()`):
+
+  1. No `/`, has a wildcard (e.g. `*.gguf`, `*.db`)
+     -> matches the file's BASENAME, at ANY depth. This is the class the
+     round-1 fix missed: an extension deny must catch the file wherever it
+     lands, not only at the repo root, because content scanning cannot see
+     inside a binary blob to catch it a second way.
+  2. Contains a `/` (e.g. `.cog/run/**`, `autoresearch-foveated/eval-details.json`)
+     -> matches from the REPO ROOT with the existing segment-aware rules
+     unchanged: `**` crosses path segments, `*` does not. Same as `exclude:`.
+  3. No `/`, no wildcard (a bare literal, e.g. `vendor`)
+     -> denies its own whole subtree from the repo root (unchanged from
+     before this fix; `glob_to_regex()`'s literal-implies-subtree suffix
+     already gave this correctly).
+
+`exclude:` semantics (`glob_to_regex()`, `excluded()`) are UNCHANGED by this
+fix -- only `denied()` gained the extra basename-at-any-depth branch, via a
+deny-specific compile step (`deny_glob_to_regex()`), because `exclude:`'s
+existing single-segment-only meaning for a slash-free wildcard glob is
+correct for excludes and must not be touched.
 """
 from __future__ import annotations
 
@@ -221,22 +248,56 @@ def excluded(path: str, patterns: list[str]) -> bool:
     return False
 
 
+def deny_glob_to_regex(pat: str) -> re.Pattern:
+    """Deny-specific compile step -- see the DENY GLOB SEMANTICS note at the
+    top of this file for the three classes. Only class 1 (no `/`, has a
+    wildcard) diverges from `glob_to_regex()`; classes 2 and 3 are that
+    function unchanged, so `exclude:` semantics are untouched by this.
+
+    DEFECT FIXED (round 2 of the blocking review of this PR): the round-1
+    fix had `denied()` call `glob_to_regex()` verbatim, same as `excluded()`.
+    For a slash-free wildcard pattern like `*.gguf`, `glob_to_regex()`
+    correctly treats `*` as single-segment (that is right for `exclude:`,
+    e.g. `docs/*`) -- but for a `deny:` extension glob there IS no other
+    segment to specify; the pattern names an extension, not a location, and
+    the file can land at any depth. Compiling it the `exclude:` way anchors
+    the match to the repo root, so `pkg/foo/testdata/weights.gguf` -- the
+    realistic case for a stray model weight -- was silently never denied.
+    """
+    if "/" not in pat and any(c in pat for c in "*?"):
+        out = []
+        for ch in pat:
+            if ch == "*":
+                out.append("[^/]*")
+            elif ch == "?":
+                out.append("[^/]")
+            else:
+                out.append(re.escape(ch))
+        return re.compile(f"^{''.join(out)}$")
+    return glob_to_regex(pat)
+
+
 def denied(path: str, patterns: list[str]) -> str | None:
     """Return the first `deny:` glob that matches `path`, or None.
 
-    Same segment-aware glob_to_regex as excluded() -- same syntax, opposite
-    meaning: exclude keeps a path OUT of the content scan; deny means the
-    path must never publish, period. Callers must check this INDEPENDENTLY
-    of, and BEFORE, excluded() -- a path that is both excluded and denied is
-    still denied. Folding deny checks behind an exclude check would
-    reproduce, for path-based enforcement, the exact "declared but silenced"
-    bug the deny/exclude conflation in load_guards() already caused once for
-    content scanning.
+    Deny means the path must never publish, period. Callers must check this
+    INDEPENDENTLY of, and BEFORE, excluded() -- a path that is both excluded
+    and denied is still denied. Folding deny checks behind an exclude check
+    would reproduce, for path-based enforcement, the exact "declared but
+    silenced" bug the deny/exclude conflation in load_guards() already
+    caused once for content scanning.
+
+    Uses `deny_glob_to_regex()`, NOT `glob_to_regex()` directly (that was
+    round 1's mistake -- see `deny_glob_to_regex()`'s docstring): a
+    slash-free wildcard glob (`*.gguf`) is matched against the path's
+    BASENAME so it fires at any depth, not just at the repo root; every
+    other deny glob shape matches the full path exactly as `exclude:` does.
     """
     for p in patterns:
         if not p:
             continue
-        if glob_to_regex(p).match(path):
+        target = path.rsplit("/", 1)[-1] if ("/" not in p and any(c in p for c in "*?")) else path
+        if deny_glob_to_regex(p).match(target):
             return p
     return None
 
@@ -336,20 +397,37 @@ def instantiate_deny_pattern(pat: str) -> str:
     """Build a concrete relative path guaranteed to match a `deny:` glob, for
     the self-test's own probe (see `_self_test_deny_path_probe`).
 
-    Handles the shapes this repo's own `.cogpublic` actually declares: a
-    directory subtree ("x/**" or "x/*"), an extension glob ("*.gguf" ->
-    "probe.gguf"), and a bare literal path (used as-is). A generic fallback
-    covers any other single/double-star combination a repo might add.
+    Handles the three classes documented at DENY GLOB SEMANTICS (top of
+    file) / `denied()`, and deliberately NESTS the probe wherever the class
+    claims to match at depth -- a root-level probe would pass even under
+    the round-1 bug this self-test exists to catch a second time:
+
+      - "x/**"        -> "x/sub/probe.txt"      -- ** must cross MORE THAN
+                          one segment, not just the one level a lazier probe
+                          ("x/probe.txt") would also satisfy under a buggy
+                          single-segment "**".
+      - "*.ext"        -> "nested/dir/probe.ext" -- slash-free wildcard glob:
+                          basename match at ANY depth. This is exactly the
+                          class the round-1 fix left broken (root-only
+                          match) while the self-test kept reporting OK.
+      - bare literal   -> the literal path itself, unchanged -- it denies
+                          its own subtree from the repo root, not a
+                          basename anywhere, so nesting it would test the
+                          wrong thing (a path that literal was never meant
+                          to match).
+
+    A generic fallback covers any other single/double-star combination a
+    repo might add.
     """
     if pat.endswith("/**"):
-        return pat[:-3] + "/probe.txt"
+        return pat[:-3] + "/sub/probe.txt"
     if pat.endswith("/*"):
         return pat[:-2] + "/probe.txt"
-    if pat.startswith("*."):
-        return "probe" + pat[1:]
+    if "/" not in pat and any(c in pat for c in "*?"):
+        return "nested/dir/" + pat.replace("*", "probe").replace("?", "p")
     if "*" in pat or "?" in pat:
         return pat.replace("**", "probe").replace("*", "probe").replace("?", "p")
-    return pat  # literal path already matches itself
+    return pat  # bare literal path already matches itself (own subtree)
 
 
 def scan(root: Path, mode: str) -> int:
@@ -566,17 +644,18 @@ def self_test(root: Path) -> int:
         fails.append(sym_detail)
         print(f"  - symlink target scan (--tree)  [FAILED: {sym_detail}]")
 
-    # Prove deny-by-path fires on clean content and does NOT over-match a
-    # clean control file -- the finding from the blocking review of this PR
-    # (deny: parsed, never enforced beyond content_guards).
+    # Prove deny-by-path fires on clean content, for EVERY deny glob class
+    # declared -- not just denies[0] -- and does NOT over-match a nested
+    # clean control file. denies[0]-only was the round-2 finding from the
+    # blocking review of this PR: it happened to be a directory glob that
+    # already worked, so the self-test reported OK while the slash-free
+    # extension-glob branch (*.gguf et al.) was still root-only and broken.
     deny_ok, deny_detail = _self_test_deny_path_probe(root, denies)
     if deny_ok is None:
         print(f"  - deny-by-path scan (--tree)  [UNTESTED — {deny_detail}]")
     elif deny_ok:
         tested.append("__deny_path__")
-        print(f"  - deny-by-path scan (--tree)  "
-              f"[tested: blocked {deny_detail!r} by path alone with clean "
-              "content; a clean control file still passed]")
+        print(f"  - deny-by-path scan (--tree)  [tested: {deny_detail}]")
     else:
         fails.append(deny_detail)
         print(f"  - deny-by-path scan (--tree)  [FAILED: {deny_detail}]")
@@ -635,28 +714,38 @@ def _self_test_symlink_probe(root: Path, guards) -> tuple[bool | None, str]:
 
 
 def _self_test_deny_path_probe(root: Path, denies: list[str]) -> tuple[bool | None, str]:
-    """Prove that a deny-listed PATH is blocked under --tree even when its
-    content matches zero content_guards patterns -- the exact gap named in
-    the blocking review of this PR (`deny:` parsed, never enforced beyond
-    the 7 content_guards regexes).
+    """Prove that EVERY `deny:` glob CLASS declared in this repo's
+    `.cogpublic` is blocked under --tree by path alone, even when content
+    matches zero content_guards patterns.
 
-    Two separate throwaway directories, each holding only this repo's
-    `.cogpublic` plus one file with identical innocuous content:
-      - PROBE: a path instantiated from the first `deny:` glob (e.g.
-        `probe.gguf` for `*.gguf`) -- must exit 1 (BLOCKED) on the path
-        alone.
-      - CONTROL: an ordinary, non-denied path with the SAME content -- must
-        exit 0. Without this half, a deny check that also flagged
-        everything would "pass" this self-test while breaking the tool.
+    Round 1 (blocking review of this PR): `deny:` was parsed and every
+    caller discarded it -- only the 7 content_guards regexes gated a file,
+    so a deny-listed binary blob whose bytes matched none of them scanned
+    clean and published.
 
-    Returns (True, probe_rel) on success, (False, reason) on a real
+    Round 2 (blocking review of the round-1 fix): this self-test probed
+    ONLY `denies[0]` -- a directory glob (`.cog/run/**`) that already
+    worked correctly -- so it never exercised the slash-free extension-glob
+    branch (`*.db`/`*.sqlite`/`*.pt`/`*.onnx`/`*.safetensors`/`*.gguf`),
+    which was ALSO still broken (root-only match via `glob_to_regex()`,
+    never matched a nested path) despite the self-test printing OK. This
+    version probes every single `deny:` entry, not just the first.
+
+    One throwaway directory per `deny:` entry, each holding only this
+    repo's `.cogpublic` plus ONE file at the path `instantiate_deny_pattern`
+    builds for that entry's class (nested wherever the class claims to
+    match at depth -- see its docstring) with clean, innocuous content --
+    must exit 1 (BLOCKED) on the path alone. Plus one more throwaway
+    directory with a NESTED clean control file under an undenied extension
+    -- must exit 0, proving the fix does not over-match every nested file.
+
+    Returns (True, summary) on success, (False, reason) on a real
     failure, or (None, reason) when this repo's .cogpublic declares no
     `deny:` patterns at all -- a gap in the ruleset, not a failure here.
     """
     if not denies:
         return None, "no deny: patterns declared in this repo's .cogpublic"
-    pat = denies[0]
-    probe_rel = instantiate_deny_pattern(pat)
+
     clean_content = "clean content, matches no content_guards pattern\n"
 
     def run_case(rel_path: str) -> int:
@@ -670,19 +759,25 @@ def _self_test_deny_path_probe(root: Path, denies: list[str]) -> tuple[bool | No
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    rc_denied = run_case(probe_rel)
-    if rc_denied != 1:
-        return False, (f"expected exit 1 (BLOCKED) scanning {probe_rel!r} "
-                        f"(matches deny glob {pat!r}) with clean content, "
-                        f"got exit {rc_denied}")
+    probed = []
+    for pat in denies:
+        probe_rel = instantiate_deny_pattern(pat)
+        rc_denied = run_case(probe_rel)
+        if rc_denied != 1:
+            return False, (f"expected exit 1 (BLOCKED) scanning {probe_rel!r} "
+                            f"(matches deny glob {pat!r}) with clean content, "
+                            f"got exit {rc_denied}")
+        probed.append((pat, probe_rel))
 
-    rc_clean = run_case("clean-control.txt")
+    rc_clean = run_case("nested/dir/clean-control.undenied")
     if rc_clean != 0:
-        return False, ("expected exit 0 scanning a clean control file with "
-                        f"no deny/content hits, got exit {rc_clean} "
+        return False, ("expected exit 0 scanning a nested clean control file "
+                        f"under an undenied extension, got exit {rc_clean} "
                         "(deny check is over-matching)")
 
-    return True, probe_rel
+    return True, (f"blocked all {len(probed)} deny glob(s) by path alone with "
+                   f"clean content ({probed!r}); a nested clean control file "
+                   "still passed")
 
 
 def main() -> int:
