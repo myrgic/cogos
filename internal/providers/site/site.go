@@ -815,13 +815,15 @@ func (g *ghPagesStrategy) Deploy(ctx context.Context, app siteCRD, artifactDir s
 func gateArtifact(ctx context.Context, artifactDir string) error {
 	root, err := repoRootForGuard()
 	if err != nil {
-		return fmt.Errorf("locate guard: %w", err)
+		return err
 	}
 	guard := filepath.Join(root, "scripts", "cogpublic-guard.py")
 	cfg := filepath.Join(root, ".cogpublic")
 	for _, p := range []string{guard, cfg} {
 		if _, statErr := os.Stat(p); statErr != nil {
-			return fmt.Errorf("required file missing (%s): %w", p, statErr)
+			return fmt.Errorf("release gate unavailable: %s not found (resolved root %s); "+
+				"set COGOS_REPO_ROOT to a checkout or image path containing "+
+				"scripts/cogpublic-guard.py and .cogpublic: %w", p, root, statErr)
 		}
 	}
 
@@ -852,35 +854,75 @@ func gateArtifact(ctx context.Context, artifactDir string) error {
 		cmd.Dir = artifactDir
 		out, runErr := cmd.CombinedOutput()
 		if runErr != nil {
-			return fmt.Errorf("BLOCKED — refusing to publish %s:\n%s",
-				artifactDir, strings.TrimSpace(string(out)))
+			// exec.ErrNotFound (via *exec.Error) means python3 itself is missing
+			// from the running process's PATH — an environment gap, not a
+			// content violation. The interpreter never started, so `out` is
+			// empty; folding this into the BLOCKED message below would print
+			// an empty, misleading "violation". Name the actual gap instead.
+			if errors.Is(runErr, exec.ErrNotFound) {
+				return fmt.Errorf("release gate unavailable: python3 not found in PATH "+
+					"(resolved repo root %s); install python3 in the runtime image "+
+					"or set COGOS_REPO_ROOT to an environment that has it: %w",
+					root, runErr)
+			}
+			return fmt.Errorf("BLOCKED — refusing to publish %s:\n%s (%v)",
+				artifactDir, strings.TrimSpace(string(out)), runErr)
 		}
 	}
 	return nil
 }
 
-// repoRootForGuard resolves the cogos checkout holding the guard and policy.
-// COGOS_REPO_ROOT wins when set (containers, CI); otherwise walk up from this
-// source file's own directory.
+// compiledInGuardRoot is the path the runtime image's Dockerfile installs
+// scripts/cogpublic-guard.py and .cogpublic at (see the "Release gate" stage
+// in the Dockerfile). It is the last resort repoRootForGuard falls back to
+// when COGOS_REPO_ROOT is unset and no .cogpublic is found by walking up from
+// the working directory — the shape of a container whose cwd is a mounted
+// workspace, not a cogos checkout. The Dockerfile also sets ENV
+// COGOS_REPO_ROOT to this same path, so in practice the env-var branch above
+// is what fires in the shipped image; this constant exists so the gate still
+// resolves correctly if that ENV is ever stripped (e.g. `docker run -e
+// COGOS_REPO_ROOT= ...`) without silently walking into the wrong tree.
+//
+// A var, not a const, so tests can point it at a throwaway directory instead
+// of writing into the real /opt on whatever machine runs `go test`.
+var compiledInGuardRoot = "/opt/cogos-release-gate"
+
+// repoRootForGuard resolves the cogos checkout (or image install path) holding
+// the guard and its policy, in order:
+//  1. COGOS_REPO_ROOT, when set (containers, CI, `docker run`'s own ENV).
+//  2. Walking up from the working directory for a `.cogpublic` — the local
+//     source-checkout case (running `cog` directly out of the repo).
+//  3. compiledInGuardRoot — the fixed path the runtime image installs the
+//     guard at, for a container whose cwd is a mounted workspace rather than
+//     a checkout.
+//
+// Every branch that fails to resolve returns an explicit "release gate
+// unavailable" error naming what is missing: this function is the first line
+// of the fail-closed contract gateArtifact depends on, so a silent wrong
+// answer here is worse than a loud one.
 func repoRootForGuard() (string, error) {
 	if v := os.Getenv("COGOS_REPO_ROOT"); v != "" {
 		return v, nil
 	}
-	dir, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	for {
-		if _, statErr := os.Stat(filepath.Join(dir, ".cogpublic")); statErr == nil {
-			return dir, nil
+	if dir, err := os.Getwd(); err == nil {
+		for d := dir; ; {
+			if _, statErr := os.Stat(filepath.Join(d, ".cogpublic")); statErr == nil {
+				return d, nil
+			}
+			parent := filepath.Dir(d)
+			if parent == d {
+				break
+			}
+			d = parent
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", fmt.Errorf("no .cogpublic found walking up from working directory; " +
-				"set COGOS_REPO_ROOT to the cogos checkout")
-		}
-		dir = parent
 	}
+	if _, statErr := os.Stat(filepath.Join(compiledInGuardRoot, ".cogpublic")); statErr == nil {
+		return compiledInGuardRoot, nil
+	}
+	return "", fmt.Errorf("release gate unavailable: no .cogpublic found walking up from the "+
+		"working directory, and the compiled-in default %s has none either; "+
+		"set COGOS_REPO_ROOT to a checkout or image path containing "+
+		"scripts/cogpublic-guard.py and .cogpublic", compiledInGuardRoot)
 }
 
 func gitRun(ctx context.Context, dir string, args ...string) error {

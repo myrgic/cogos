@@ -146,7 +146,7 @@ Total sites: 239  (cog: 97, home: 2, elsewhere: 14, unanchored: 85, dynamic: 41)
 | `<TempDir>` | (*ghPagesStrategy).Deploy (`os.MkdirTemp`) | internal/providers/site/site.go:741 | provider:site |
 | `<TempDir>/.artifact-sha` | (*ghPagesStrategy).Deploy (`os.WriteFile`) | internal/providers/site/site.go:760 | provider:site |
 | `<TempDir>/CNAME` | (*ghPagesStrategy).Deploy (`os.WriteFile`) | internal/providers/site/site.go:763 | provider:site |
-| `<TempDir>/.cogpublic` | gateArtifact (`os.WriteFile`) | internal/providers/site/site.go:836 | provider:site |
+| `<TempDir>/.cogpublic` | gateArtifact (`os.WriteFile`) | internal/providers/site/site.go:838 | provider:site |
 
 ## UNANCHORED (the honesty margin, part 1: root not positively resolved)
 
@@ -205,9 +205,9 @@ These sites structurally resolved (the shape of the path is known) but the ROOT 
 | `{path}` | writeFileAtomic (`os.Rename`) | internal/eval/mcp_tools.go:453 | internal:eval |
 | `{path}` | bumpPinFile (`os.WriteFile`) | internal/providers/pin/pin.go:717 | provider:pin |
 | `{logPath}` | spawnDetachedUpdater (`os.OpenFile`) | internal/providers/selfupdate/spawn_unix.go:43 | provider:selfupdate |
-| `dirname({dst})` | copyFile (`os.MkdirAll`) | internal/providers/site/site.go:919 | provider:site |
-| `{dst}` | copyFile (`os.OpenFile`) | internal/providers/site/site.go:922 | provider:site |
-| `{dst}` | copyFile (`io.Copy`) | internal/providers/site/site.go:927 | provider:site |
+| `dirname({dst})` | copyFile (`os.MkdirAll`) | internal/providers/site/site.go:961 | provider:site |
+| `{dst}` | copyFile (`os.OpenFile`) | internal/providers/site/site.go:964 | provider:site |
+| `{dst}` | copyFile (`io.Copy`) | internal/providers/site/site.go:969 | provider:site |
 | `{base}` | ensureVitalsGitignore (`os.MkdirAll`) | internal/providers/vitalsretention/store.go:101 | provider:vitalsretention |
 | `{base}/.gitignore` | ensureVitalsGitignore (`os.WriteFile`) | internal/providers/vitalsretention/store.go:113 | provider:vitalsretention |
 | `{base}/<call:sanitizeNodeKey>/raw/{name}` | appendRow (`os.MkdirAll`) | internal/providers/vitalsretention/store.go:122 | provider:vitalsretention |
@@ -278,7 +278,7 @@ These sites write to disk but this tool could not structurally resolve their pat
 | `<expr>.tmp` | (*ProjectionReconciler).ApplyPlan (`os.WriteFile`) | internal/engine/projection_reconciler.go:426 | internal:engine |
 | `<expr>` | (*ProjectionReconciler).ApplyPlan (`os.Rename`) | internal/engine/projection_reconciler.go:436 | internal:engine |
 | `<call:fmt.Sprintf>` | (*rotatingWriter).rotateLocked (`os.Rename`) | internal/engine/rotating_writer.go:130 | internal:engine |
-| `{dst}/<call:filepath.Rel>` | func literal (line 897) (`os.MkdirAll`) | internal/providers/site/site.go:907 | provider:site |
+| `{dst}/<call:filepath.Rel>` | func literal (line 939) (`os.MkdirAll`) | internal/providers/site/site.go:949 | provider:site |
 | `<call:t.TempDir>/projects/cog_lab_package/identities/identity_test.md` | makeMinimalWorkspace (`os.WriteFile`) | internal/testkernel/testkernel.go:564 | internal:testkernel |
 | `{m.nodeDir}/aliases.yaml.tmp.<call:fmt.Sprintf>` | writeFile (`os.WriteFile`) | pkg/alias/alias.go:328 | pkg:alias |
 | `<call:bep.ExpandCertDir>` | runGen (`os.MkdirAll`) | pkg/substrate/bep/cmd/bep-cert/main.go:103 | pkg:substrate |
@@ -362,8 +362,8 @@ Total subprocess sites: 76
 | _(not set — inherits the process's own working directory)_ | `exec.Command(exe, args...)` | internal/providers/selfupdate/spawn_unix.go:65 | provider:selfupdate |
 | `{appDir}` | `exec.CommandContext(ctx, "bash", "build.sh")` | internal/providers/site/site.go:601 | provider:site |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "gh", "api", path)` | internal/providers/site/site.go:655 | provider:site |
-| `<TempDir>` | `exec.CommandContext(ctx, "python3", args...)` | internal/providers/site/site.go:851 | provider:site |
-| `<TempDir>` | `exec.CommandContext(ctx, "git", args...)` | internal/providers/site/site.go:887 | provider:site |
+| `<TempDir>` | `exec.CommandContext(ctx, "python3", args...)` | internal/providers/site/site.go:853 | provider:site |
+| `<TempDir>` | `exec.CommandContext(ctx, "git", args...)` | internal/providers/site/site.go:929 | provider:site |
 | `<WorkspaceRoot>` | `exec.Command("git", args...)` | internal/testkernel/experiment/injectors.go:64 | internal:testkernel |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "claude", args...)` | pkg/cogdoc_review/abstract.go:242 | pkg:cogdoc_review |
 | _(not set — inherits the process's own working directory)_ | `exec.Command(command, args...)` | pkg/modality/wire.go:64 | pkg:modality |

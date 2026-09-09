@@ -65,6 +65,30 @@ func TestGateArtifactAllowsCleanArtifact(t *testing.T) {
 	}
 }
 
+// TestGateArtifactExplainsMissingPython3 covers the shipped-image regression
+// this finding fixes: guard and policy are both present and readable, but the
+// running process has no python3 on PATH (the pre-fix runtime image's exact
+// shape). The interpreter never starts, so CombinedOutput's `out` is empty —
+// folding that into the generic BLOCKED message would print an empty,
+// misleading "content violation" instead of naming the real gap.
+func TestGateArtifactExplainsMissingPython3(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	t.Setenv("COGOS_REPO_ROOT", repoRoot)
+	t.Setenv("PATH", "") // python3 cannot be found regardless of what's installed
+
+	artifact := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(artifact, "index.html"), []byte("clean"), 0o644))
+
+	err := gateArtifact(context.Background(), artifact)
+	if err == nil {
+		t.Fatal("gate PASSED with no python3 reachable; it must fail closed")
+	}
+	if !strings.Contains(err.Error(), "release gate unavailable") ||
+		!strings.Contains(err.Error(), "python3") {
+		t.Fatalf("error must name python3 as the missing piece, got: %v", err)
+	}
+}
+
 // TestGateArtifactFailsClosed: every inability to run must abort the deploy.
 // A check that cannot run must never be mistaken for a check that passed —
 // the whole lesson of the .cogpublic that declared guards nothing executed.
@@ -76,6 +100,87 @@ func TestGateArtifactFailsClosed(t *testing.T) {
 
 	if err := gateArtifact(context.Background(), artifact); err == nil {
 		t.Fatal("gate PASSED with no guard installed; it must fail closed")
+	}
+}
+
+// TestRepoRootForGuardPrefersEnv proves COGOS_REPO_ROOT wins even when the
+// working directory would resolve to something else via the walk-up.
+func TestRepoRootForGuardPrefersEnv(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	t.Setenv("COGOS_REPO_ROOT", repoRoot)
+
+	got, err := repoRootForGuard()
+	if err != nil {
+		t.Fatalf("repoRootForGuard: %v", err)
+	}
+	if got != repoRoot {
+		t.Fatalf("got %q, want %q", got, repoRoot)
+	}
+}
+
+// TestRepoRootForGuardWalksUpWhenEnvUnset is the local-checkout case: no
+// COGOS_REPO_ROOT set, but the working directory sits inside a tree with a
+// .cogpublic above it.
+func TestRepoRootForGuardWalksUpWhenEnvUnset(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	t.Setenv("COGOS_REPO_ROOT", "")
+	t.Chdir(filepath.Join(repoRoot, "internal", "providers", "site"))
+
+	got, err := repoRootForGuard()
+	if err != nil {
+		t.Fatalf("repoRootForGuard: %v", err)
+	}
+	if got != repoRoot {
+		t.Fatalf("got %q, want %q", got, repoRoot)
+	}
+}
+
+// TestRepoRootForGuardFallsBackToCompiledInDefault covers the container shape
+// this finding fixes: cwd is a mounted workspace with no .cogpublic anywhere
+// above it (so the walk-up finds nothing), and COGOS_REPO_ROOT is unset —
+// exactly what happens if it were ever stripped at `docker run` time. The
+// compiled-in default must still resolve when it actually has the guard's
+// policy installed.
+func TestRepoRootForGuardFallsBackToCompiledInDefault(t *testing.T) {
+	t.Setenv("COGOS_REPO_ROOT", "")
+
+	fakeImageRoot := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(fakeImageRoot, ".cogpublic"), []byte("version: 1\n"), 0o644))
+	orig := compiledInGuardRoot
+	compiledInGuardRoot = fakeImageRoot
+	t.Cleanup(func() { compiledInGuardRoot = orig })
+
+	// cwd with nothing above it: a workspace mount, not a checkout.
+	t.Chdir(t.TempDir())
+
+	got, err := repoRootForGuard()
+	if err != nil {
+		t.Fatalf("repoRootForGuard: %v", err)
+	}
+	if got != fakeImageRoot {
+		t.Fatalf("got %q, want the compiled-in default %q", got, fakeImageRoot)
+	}
+}
+
+// TestRepoRootForGuardFailsClosedWhenNothingResolves proves the final error
+// path is explicit about what to do (set COGOS_REPO_ROOT) rather than a bare
+// "not found" — a container that hit this branch has no other way to know.
+func TestRepoRootForGuardFailsClosedWhenNothingResolves(t *testing.T) {
+	t.Setenv("COGOS_REPO_ROOT", "")
+
+	orig := compiledInGuardRoot
+	compiledInGuardRoot = filepath.Join(t.TempDir(), "does-not-exist")
+	t.Cleanup(func() { compiledInGuardRoot = orig })
+
+	t.Chdir(t.TempDir())
+
+	_, err := repoRootForGuard()
+	if err == nil {
+		t.Fatal("repoRootForGuard resolved with no .cogpublic reachable anywhere; it must fail closed")
+	}
+	if !strings.Contains(err.Error(), "release gate unavailable") ||
+		!strings.Contains(err.Error(), "COGOS_REPO_ROOT") {
+		t.Fatalf("error must name the gap and the fix (COGOS_REPO_ROOT), got: %v", err)
 	}
 }
 

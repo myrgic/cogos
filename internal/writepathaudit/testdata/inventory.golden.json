@@ -1995,7 +1995,7 @@
     },
     {
       "file": "internal/providers/site/site.go",
-      "line": 836,
+      "line": 838,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "gateArtifact",
@@ -2007,10 +2007,10 @@
     },
     {
       "file": "internal/providers/site/site.go",
-      "line": 907,
+      "line": 949,
       "column": 11,
       "primitive": "os.MkdirAll",
-      "func": "func literal (line 897)",
+      "func": "func literal (line 939)",
       "pattern": "{dst}/\u003ccall:filepath.Rel\u003e",
       "category": "dynamic",
       "resolved": false,
@@ -2019,7 +2019,7 @@
     },
     {
       "file": "internal/providers/site/site.go",
-      "line": 919,
+      "line": 961,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "copyFile",
@@ -2031,7 +2031,7 @@
     },
     {
       "file": "internal/providers/site/site.go",
-      "line": 922,
+      "line": 964,
       "column": 14,
       "primitive": "os.OpenFile",
       "func": "copyFile",
@@ -2043,7 +2043,7 @@
     },
     {
       "file": "internal/providers/site/site.go",
-      "line": 927,
+      "line": 969,
       "column": 11,
       "primitive": "io.Copy",
       "func": "copyFile",
@@ -3554,7 +3554,7 @@
     },
     {
       "file": "internal/providers/site/site.go",
-      "line": 851,
+      "line": 853,
       "column": 10,
       "func": "gateArtifact",
       "subsystem": "provider:site",
@@ -3564,7 +3564,7 @@
     },
     {
       "file": "internal/providers/site/site.go",
-      "line": 887,
+      "line": 929,
       "column": 9,
       "func": "gitRun",
       "subsystem": "provider:site",
