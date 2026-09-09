@@ -1,9 +1,29 @@
 # .cogpublic — Public release gate for myrgic/cogos
 # Defines what crosses the constellation boundary outward.
-# Used by `cog plan upstream` / `cog apply upstream` to sanitize pushes.
 #
-# Gate 1: private dev → org upstream (myrgic/cogos, direct branch workflow)
-# Gate 2: squash-merge to main
+# ENFORCED BY: scripts/cogpublic-guard.py, run in CI on every PR
+#   ("Public release gate" steps in .github/workflows/ci.yml).
+#   Locally:  python3 ./scripts/cogpublic-guard.py [--staged]
+#
+#   That script enforces exactly three of the sections below — content_guards
+#   (regex scan), exclude (paths the content scan skips), and deny (paths
+#   blocked by name alone) — and nothing else. `version` and `allow` are
+#   read by nobody; they're documentation. An unrecognized section (a
+#   fourth kind, declared here but unparsed) makes the script refuse to
+#   run (exit 2) rather than silently ignore it — see KNOWN_SECTIONS in
+#   scripts/cogpublic-guard.py.
+#
+# HISTORY / WHY THE ABOVE LINE MATTERS: from 2026-04-14 until 2026-09-01 this
+# file's header claimed it was "used by `cog plan upstream` / `cog apply
+# upstream` to sanitize pushes." That command was never implemented, nothing
+# else referenced this file, and no repo carried an active git hook — so the
+# guards below were declared and never executed. Three instances of the exact
+# patterns listed here reached public repos in that window (mod3 #138/#142,
+# cogos #588, mod3 #146). Keep this pointer accurate: a guard that names a
+# non-existent enforcer reads like coverage during review and stops anyone
+# from looking twice. The same defect resurfaced within this very fix as a
+# `post_guards` section this header claimed to enforce but the executor
+# never parsed — see the note at the end of this file where it used to live.
 
 version: 1
 
@@ -56,8 +76,34 @@ allow:
   - autoresearch-foveated/results.tsv
 
 # Paths that NEVER leave the constellation
+#
+# NARROWED 2026-09-09 (review of this PR): a blanket `.cog/**` deny caught
+# four files this repo tracks and ships on purpose --
+#   .cog/config/node/manifest.yaml
+#   .cog/config/observatory.yaml
+#   .cog/mem/semantic/insights/deterministic-review-pipeline-for-cogdoc-authoring.cog.md
+#   .cog/mem/working/proposals/deterministic-review-pipeline-implementation-plan-2026-05-14.cog.md
+# -- reference config examples and proposal cogdocs, not runtime state. Per
+# the operator's ruling ("if those files are being caught by a policy and
+# shouldn't be, then let's narrow the policy"), the deny list below names
+# only the subtrees that hold node-local runtime/private state and must
+# never leave a node, aligned with what .gitignore already ignores under
+# `.cog/` (`.cog/.state/`, `.cog/ledger/`, `.cog/blobs/`, `.cog/mem/episodic/`)
+# plus the other canonical live-state subtrees a node writes at runtime.
+# `.cog/config/**`, `.cog/mem/semantic/**`, and `.cog/mem/working/**` are
+# deliberately NOT denied -- they carry tracked reference/proposal content,
+# not live state, even though `.gitignore` also ignores `.cog/mem/working/`
+# for the untracked case.
 deny:
-  - .cog/**
+  - .cog/run/**
+  - .cog/.state/**
+  - .cog/ledger/**
+  - .cog/blobs/**
+  - .cog/vault/**
+  - .cog/cache/**
+  - .cog/identity/**
+  - .cog/status/**
+  - .cog/mem/episodic/**
   - "*.db"
   - "*.sqlite"
   - "*.pt"
@@ -86,9 +132,35 @@ content_guards:
   - pattern: '@gmail\.com|@yahoo\.com|@hotmail\.com'
     description: "Personal email address (git author emails exempt)"
 
-# Post-push structural checks
-post_guards:
-  - command: "go build ./..."
-    description: "Code compiles"
-  - command: "go vet ./..."
-    description: "Code passes vet"
+# Paths the content scan skips.
+#
+# The guard executor is here BY EXPLICIT DECLARATION, not by an invisible rule.
+# Review of #19 found the previous implementation excluded files by FILENAME
+# (`sanitize_fixture.py`, `*_names_test.go`), which meant a real leak could be
+# hidden simply by naming the file that way — reproduced: exit 0 with the leak
+# present, exit 1 for identical content under an ordinary name. Filename
+# exclusion is not a security property. The script legitimately contains probe
+# strings for every guard it tests, so it is listed here where a reviewer sees
+# it in the diff.
+exclude:
+  - scripts/cogpublic-guard.py
+  # Asserts the gate BLOCKS a build-time-injected home path, so it must contain
+  # one. Declared here rather than skipped by a filename rule — the filename
+  # exclusion this replaced was itself the HIGH-severity bypass found in
+  # myrgic/.github#19 review. An exclusion that a reviewer can see in the diff
+  # is a different thing from one baked into the scanner.
+  - internal/providers/site/gate_artifact_test.go
+
+# NOT a post_guards section (removed 2026-09-09, review of this PR): a
+# `post_guards: [go build ./..., go vet ./...]` list lived here, but
+# scripts/cogpublic-guard.py never had a code path that read it — the exact
+# declared-but-unenforced shape the HISTORY note above describes, this time
+# inside the PR meant to fix that class of defect. `go build ./...` and
+# `go vet ./...` (with the `fts5` build tag) already run as required checks
+# on every push and PR: the "Build" and "Vet" steps of the `build` job in
+# .github/workflows/ci.yml. Re-running them from this script would duplicate
+# an existing gate rather than close a real gap — see the descope note in
+# this PR's description. If a check belongs here, it must be one this
+# script's load_guards() actually parses and scan() actually enforces;
+# anything else is documentation and belongs in a comment, not a section
+# that reads like a guard.

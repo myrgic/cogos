@@ -12,14 +12,14 @@ import (
 // root, and StatePath joined it into a path. This is the regression that
 // motivated the validator, so it gets its own named test.
 func TestValidateInstanceName_RejectsTheLiveCorruption(t *testing.T) {
-	bad := "worktree-reconciler:/Users/slowbro/workspaces/cog"
+	bad := "worktree-reconciler:/Users/example/workspaces/cog"
 	if err := ValidateInstanceName(bad); err == nil {
 		t.Fatalf("ValidateInstanceName(%q) = nil, want error", bad)
 	}
 	// And prove why it mattered: unvalidated, this key escapes its own
 	// directory level inside the config tree.
 	p := StatePath("/ws", bad)
-	if !strings.Contains(p, "/Users/slowbro") {
+	if !strings.Contains(p, "/Users/example") {
 		t.Fatalf("expected the raw path to leak into StatePath, got %q", p)
 	}
 }

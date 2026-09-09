@@ -149,6 +149,9 @@ test: build
 	@echo "=== Unit Tests ==="
 	$(GO) test -tags "$(BUILD_TAGS)" -count=1 ./...
 	@echo ""
+	@echo "=== Public release gate — deny/exclude regression test ==="
+	python3 scripts/test_cogpublic_deny_scanned.py
+	@echo ""
 	@echo "=== Smoke Tests ==="
 	@echo "=== Version Test ==="
 	./$(BINARY) version

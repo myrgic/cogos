@@ -12,8 +12,8 @@ import (
 // into a nested directory tree inside .cog/config.
 func TestWorktreeReconcilerTypeIsASafeRegistryKey(t *testing.T) {
 	for _, root := range []string{
-		"/Users/slowbro/workspaces/cog",
-		`C:\Users\chazm\workspaces\cog`,
+		"/Users/example/workspaces/cog",
+		`C:\Users\example\workspaces\cog`,
 		"/tmp/a b/weird:name",
 		"/",
 	} {
@@ -39,7 +39,7 @@ func TestInstanceSlugDisambiguatesSameBasename(t *testing.T) {
 
 // The key must be stable across calls, or every boot orphans the prior state.
 func TestInstanceSlugIsStable(t *testing.T) {
-	root := "/Users/slowbro/workspaces/cog"
+	root := "/Users/example/workspaces/cog"
 	if a, b := (&WorktreeReconciler{RepoRoot: root}).Type(), (&WorktreeReconciler{RepoRoot: root}).Type(); a != b {
 		t.Fatalf("Type() not stable: %q != %q", a, b)
 	}

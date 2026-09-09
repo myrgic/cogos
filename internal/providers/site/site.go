@@ -3,9 +3,9 @@
 // This package makes SiteProvider and GHPagesStrategy available to the daemon
 // binary (cmd/cogos) which cannot import the workspace-root package main.
 //
-// The types and logic mirror site_*.go in the workspace root. The workspace-root
-// copies remain canonical for the cog CLI; this package is the importable
-// counterpart used by cmd/cogos/providers_wire.go.
+// This is the only implementation of SiteProvider and GHPagesStrategy in this
+// repo — there is no workspace-root site_*.go sibling here — and it is what
+// cmd/cogos/providers_wire.go imports.
 //
 // Registration: importing this package (even as a blank import) triggers init(),
 // which registers "site" with pkg/reconcile. GHPagesStrategy is self-registered
@@ -766,6 +766,23 @@ func (g *ghPagesStrategy) Deploy(ctx context.Context, app siteCRD, artifactDir s
 	if err := gitRun(ctx, tmpDir, "add", "."); err != nil {
 		return fmt.Errorf("Deploy: git add: %w", err)
 	}
+	// Public-release gate on the GENERATED artifact, not the source.
+	//
+	// This is the only point in the pipeline that can catch a build-time leak.
+	// `siteBuild` runs `bash build.sh` on the operator's machine, so anything
+	// the build embeds from its environment — $HOME, `pwd`, tool output, env
+	// vars — lands in the artifact having never existed in the `sites` repo.
+	// A gate on `sites` cannot see it, and CI on the deploy target cannot stop
+	// it: Pages publishes from `main` the instant this force-push lands, so a
+	// check there is post-hoc by construction.
+	//
+	// This is the mod3 #146 shape exactly — a leak in a generated form that no
+	// reviewer reads as a path — and the "machine-managed, therefore exempt"
+	// assumption is wrong the same way `cog plan upstream` was: the exemption
+	// covered the one path that emits content no human reviews.
+	if err := gateArtifact(ctx, tmpDir); err != nil {
+		return fmt.Errorf("Deploy: public release gate: %w", err)
+	}
 	msg := fmt.Sprintf("deploy: %s @ %s", app.Spec.Domain, sourceSHA)
 	if err := gitRun(ctx, tmpDir, "-c", "user.email=cog@myrgic.io",
 		"-c", "user.name=CogOS", "commit", "-m", msg); err != nil {
@@ -779,6 +796,133 @@ func (g *ghPagesStrategy) Deploy(ctx context.Context, app siteCRD, artifactDir s
 		return fmt.Errorf("Deploy: git push: %w", err)
 	}
 	return nil
+}
+
+// gateArtifact runs the public-release content gate over a built deploy
+// artifact immediately before it is force-pushed to a public repository.
+//
+// FAILS CLOSED. Every failure mode — guard missing, python missing, config
+// missing, unreadable, non-zero exit — aborts the deploy. The whole point of
+// the incident that produced this gate (a .cogpublic that declared guards
+// nothing executed for four and a half months) is that a check which cannot
+// run must never be mistaken for a check that passed. A skipped gate here
+// publishes to the open internet with no second chance: the target is a Pages
+// repo, so `main` is live the moment the push lands.
+//
+// The gate scans the artifact's working tree rather than git-tracked files,
+// because at this point the artifact is a fresh `git init` + `git add .` and
+// every file in it is about to become public.
+func gateArtifact(ctx context.Context, artifactDir string) error {
+	root, err := repoRootForGuard()
+	if err != nil {
+		return err
+	}
+	guard := filepath.Join(root, "scripts", "cogpublic-guard.py")
+	cfg := filepath.Join(root, ".cogpublic")
+	for _, p := range []string{guard, cfg} {
+		if _, statErr := os.Stat(p); statErr != nil {
+			return fmt.Errorf("release gate unavailable: %s not found (resolved root %s); "+
+				"set COGOS_REPO_ROOT to a checkout or image path containing "+
+				"scripts/cogpublic-guard.py and .cogpublic: %w", p, root, statErr)
+		}
+	}
+
+	// The artifact has no .cogpublic of its own; supply the kernel repo's
+	// policy by copying it in, scanning, then removing it so the published
+	// tree is unchanged.
+	stagedCfg := filepath.Join(artifactDir, ".cogpublic")
+	policy, err := os.ReadFile(cfg)
+	if err != nil {
+		return fmt.Errorf("read policy: %w", err)
+	}
+	if err := os.WriteFile(stagedCfg, policy, 0o644); err != nil {
+		return fmt.Errorf("stage policy: %w", err)
+	}
+	defer os.Remove(stagedCfg)
+
+	// Self-test first: a ruleset that stopped parsing must fail loudly rather
+	// than scan against zero patterns and report clean.
+	//
+	// --tree, not the default HEAD scan: the artifact is `git init` + `git add`
+	// with nothing committed, so `git ls-files` is empty and a HEAD scan would
+	// examine zero files. Caught by this package's own positive control.
+	for _, args := range [][]string{
+		{guard, "--root", artifactDir, "--self-test"},
+		{guard, "--root", artifactDir, "--tree"},
+	} {
+		cmd := exec.CommandContext(ctx, "python3", args...)
+		cmd.Dir = artifactDir
+		out, runErr := cmd.CombinedOutput()
+		if runErr != nil {
+			// exec.ErrNotFound (via *exec.Error) means python3 itself is missing
+			// from the running process's PATH — an environment gap, not a
+			// content violation. The interpreter never started, so `out` is
+			// empty; folding this into the BLOCKED message below would print
+			// an empty, misleading "violation". Name the actual gap instead.
+			if errors.Is(runErr, exec.ErrNotFound) {
+				return fmt.Errorf("release gate unavailable: python3 not found in PATH "+
+					"(resolved repo root %s); install python3 in the runtime image "+
+					"or set COGOS_REPO_ROOT to an environment that has it: %w",
+					root, runErr)
+			}
+			return fmt.Errorf("BLOCKED — refusing to publish %s:\n%s (%v)",
+				artifactDir, strings.TrimSpace(string(out)), runErr)
+		}
+	}
+	return nil
+}
+
+// compiledInGuardRoot is the path the runtime image's Dockerfile installs
+// scripts/cogpublic-guard.py and .cogpublic at (see the "Release gate" stage
+// in the Dockerfile). It is the last resort repoRootForGuard falls back to
+// when COGOS_REPO_ROOT is unset and no .cogpublic is found by walking up from
+// the working directory — the shape of a container whose cwd is a mounted
+// workspace, not a cogos checkout. The Dockerfile also sets ENV
+// COGOS_REPO_ROOT to this same path, so in practice the env-var branch above
+// is what fires in the shipped image; this constant exists so the gate still
+// resolves correctly if that ENV is ever stripped (e.g. `docker run -e
+// COGOS_REPO_ROOT= ...`) without silently walking into the wrong tree.
+//
+// A var, not a const, so tests can point it at a throwaway directory instead
+// of writing into the real /opt on whatever machine runs `go test`.
+var compiledInGuardRoot = "/opt/cogos-release-gate"
+
+// repoRootForGuard resolves the cogos checkout (or image install path) holding
+// the guard and its policy, in order:
+//  1. COGOS_REPO_ROOT, when set (containers, CI, `docker run`'s own ENV).
+//  2. Walking up from the working directory for a `.cogpublic` — the local
+//     source-checkout case (running `cog` directly out of the repo).
+//  3. compiledInGuardRoot — the fixed path the runtime image installs the
+//     guard at, for a container whose cwd is a mounted workspace rather than
+//     a checkout.
+//
+// Every branch that fails to resolve returns an explicit "release gate
+// unavailable" error naming what is missing: this function is the first line
+// of the fail-closed contract gateArtifact depends on, so a silent wrong
+// answer here is worse than a loud one.
+func repoRootForGuard() (string, error) {
+	if v := os.Getenv("COGOS_REPO_ROOT"); v != "" {
+		return v, nil
+	}
+	if dir, err := os.Getwd(); err == nil {
+		for d := dir; ; {
+			if _, statErr := os.Stat(filepath.Join(d, ".cogpublic")); statErr == nil {
+				return d, nil
+			}
+			parent := filepath.Dir(d)
+			if parent == d {
+				break
+			}
+			d = parent
+		}
+	}
+	if _, statErr := os.Stat(filepath.Join(compiledInGuardRoot, ".cogpublic")); statErr == nil {
+		return compiledInGuardRoot, nil
+	}
+	return "", fmt.Errorf("release gate unavailable: no .cogpublic found walking up from the "+
+		"working directory, and the compiled-in default %s has none either; "+
+		"set COGOS_REPO_ROOT to a checkout or image path containing "+
+		"scripts/cogpublic-guard.py and .cogpublic", compiledInGuardRoot)
 }
 
 func gitRun(ctx context.Context, dir string, args ...string) error {
