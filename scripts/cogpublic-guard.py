@@ -87,6 +87,17 @@ from pathlib import Path
 
 CONFIG = ".cogpublic"
 
+# Every top-level section this script recognizes. `version` and `allow` are
+# read as documentation only (no code path consults them); `content_guards`,
+# `exclude`, and `deny` are the three this script actually enforces -- see
+# `load_guards()`. A `.cogpublic` written for a fourth section this script
+# doesn't know about (e.g. a since-removed `post_guards:`) must not scan
+# clean: that exact shape -- declared, never parsed, and never executed --
+# is why `.cogpublic` went four months looking like coverage while enforcing
+# nothing (see module docstring HISTORY). Add a name here ONLY alongside the
+# parsing code that actually enforces it.
+KNOWN_SECTIONS = {"version", "allow", "content_guards", "exclude", "deny"}
+
 
 def sh(*args, **kw) -> str:
     return subprocess.run(args, capture_output=True, text=True, **kw).stdout
@@ -167,6 +178,13 @@ def load_guards(root: Path) -> tuple[list[tuple[str, str, str]], list[str], list
         if not line.startswith((" ", "\t", "-")):
             flush()
             section = line.split(":")[0].strip()
+            if section not in KNOWN_SECTIONS:
+                raise ValueError(
+                    f"unknown top-level section {section!r} in {CONFIG} -- "
+                    f"this script enforces {sorted(KNOWN_SECTIONS)!r} and "
+                    f"nothing else; a section it doesn't parse is a section "
+                    f"it can't be enforcing"
+                )
             continue
         stripped = line.strip()
         if section == "content_guards":
@@ -660,6 +678,19 @@ def self_test(root: Path) -> int:
         fails.append(deny_detail)
         print(f"  - deny-by-path scan (--tree)  [FAILED: {deny_detail}]")
 
+    # Prove an unknown top-level section (the post_guards shape) makes the
+    # guard refuse to run rather than silently ignoring it.
+    unk_ok, unk_detail = _self_test_unknown_section_probe()
+    if unk_ok is None:
+        print(f"  - unknown top-level section  [UNTESTED — {unk_detail}]")
+    elif unk_ok:
+        tested.append("__unknown_section__")
+        print(f"  - unknown top-level section  "
+              f"[tested: {unk_detail!r} correctly refused to run]")
+    else:
+        fails.append(unk_detail)
+        print(f"  - unknown top-level section  [FAILED: {unk_detail}]")
+
     if fails:
         for f in fails:
             print(f"  FAIL: {f}", file=sys.stderr)
@@ -671,6 +702,33 @@ def self_test(root: Path) -> int:
         print("  untested guards are NOT proven to fire; add a `probe:` line "
               "beside each to close the gap")
     return 0
+
+
+def _self_test_unknown_section_probe() -> tuple[bool | None, str]:
+    """Prove an unrecognized top-level section makes the guard refuse to run
+    (exit 2) rather than silently ignoring it -- the exact failure mode that
+    let a declared, never-parsed `post_guards:` section sit in this repo's
+    own `.cogpublic` looking like coverage (see `KNOWN_SECTIONS`).
+
+    Needs no repo checkout: `load_guards()` raises before `scan()` does any
+    git or file work, so a throwaway two-line fixture is enough.
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="cogpublic-guard-selftest-unknown-"))
+    try:
+        (tmp / CONFIG).write_text(
+            "content_guards:\n"
+            "  - pattern: \"probe-pattern\"\n"
+            "    description: \"self-test fixture\"\n"
+            "bogus_section:\n"
+            "  - this-should-not-parse\n"
+        )
+        rc = scan(tmp, "tree")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if rc != 2:
+        return False, (f"expected exit 2 (GUARD CANNOT RUN) for an "
+                        f"unrecognized top-level section, got exit {rc}")
+    return True, "bogus_section"
 
 
 def _self_test_symlink_probe(root: Path, guards) -> tuple[bool | None, str]:

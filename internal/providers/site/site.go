@@ -3,9 +3,9 @@
 // This package makes SiteProvider and GHPagesStrategy available to the daemon
 // binary (cmd/cogos) which cannot import the workspace-root package main.
 //
-// The types and logic mirror site_*.go in the workspace root. The workspace-root
-// copies remain canonical for the cog CLI; this package is the importable
-// counterpart used by cmd/cogos/providers_wire.go.
+// This is the only implementation of SiteProvider and GHPagesStrategy in this
+// repo — there is no workspace-root site_*.go sibling here — and it is what
+// cmd/cogos/providers_wire.go imports.
 //
 // Registration: importing this package (even as a blank import) triggers init(),
 // which registers "site" with pkg/reconcile. GHPagesStrategy is self-registered

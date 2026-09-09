@@ -5,6 +5,14 @@
 #   ("Public release gate" steps in .github/workflows/ci.yml).
 #   Locally:  python3 ./scripts/cogpublic-guard.py [--staged]
 #
+#   That script enforces exactly three of the sections below — content_guards
+#   (regex scan), exclude (paths the content scan skips), and deny (paths
+#   blocked by name alone) — and nothing else. `version` and `allow` are
+#   read by nobody; they're documentation. An unrecognized section (a
+#   fourth kind, declared here but unparsed) makes the script refuse to
+#   run (exit 2) rather than silently ignore it — see KNOWN_SECTIONS in
+#   scripts/cogpublic-guard.py.
+#
 # HISTORY / WHY THE ABOVE LINE MATTERS: from 2026-04-14 until 2026-09-01 this
 # file's header claimed it was "used by `cog plan upstream` / `cog apply
 # upstream` to sanitize pushes." That command was never implemented, nothing
@@ -13,7 +21,9 @@
 # patterns listed here reached public repos in that window (mod3 #138/#142,
 # cogos #588, mod3 #146). Keep this pointer accurate: a guard that names a
 # non-existent enforcer reads like coverage during review and stops anyone
-# from looking twice.
+# from looking twice. The same defect resurfaced within this very fix as a
+# `post_guards` section this header claimed to enforce but the executor
+# never parsed — see the note at the end of this file where it used to live.
 
 version: 1
 
@@ -141,9 +151,16 @@ exclude:
   # is a different thing from one baked into the scanner.
   - internal/providers/site/gate_artifact_test.go
 
-# Post-push structural checks
-post_guards:
-  - command: "go build ./..."
-    description: "Code compiles"
-  - command: "go vet ./..."
-    description: "Code passes vet"
+# NOT a post_guards section (removed 2026-09-09, review of this PR): a
+# `post_guards: [go build ./..., go vet ./...]` list lived here, but
+# scripts/cogpublic-guard.py never had a code path that read it — the exact
+# declared-but-unenforced shape the HISTORY note above describes, this time
+# inside the PR meant to fix that class of defect. `go build ./...` and
+# `go vet ./...` (with the `fts5` build tag) already run as required checks
+# on every push and PR: the "Build" and "Vet" steps of the `build` job in
+# .github/workflows/ci.yml. Re-running them from this script would duplicate
+# an existing gate rather than close a real gap — see the descope note in
+# this PR's description. If a check belongs here, it must be one this
+# script's load_guards() actually parses and scan() actually enforces;
+# anything else is documentation and belongs in a comment, not a section
+# that reads like a guard.
