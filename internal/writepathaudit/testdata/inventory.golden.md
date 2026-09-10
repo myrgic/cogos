@@ -181,9 +181,9 @@ These sites structurally resolved (the shape of the path is known) but the ROOT 
 | `{dbPath}?mode=ro&_journal_mode=WAL&_busy_timeout=3000` | searchMemoryFTS (`sql.Open(sqlite3)`) | internal/engine/mcp_stubs.go:215 | internal:engine |
 | `dirname({candidate})` | atomicWriteMemoryFile (`os.CreateTemp`) | internal/engine/memory_sections.go:353 | internal:engine |
 | `{candidate}` | atomicWriteMemoryFile (`os.Rename`) | internal/engine/memory_sections.go:375 | internal:engine |
-| `<call:resolvePath>` | syncJSON (`os.WriteFile`) | internal/engine/node_cmd.go:327 | internal:engine |
-| `<call:resolvePath>` | syncSed (`os.WriteFile`) | internal/engine/node_cmd.go:360 | internal:engine |
-| `<call:resolvePath>` | syncPlist (`os.WriteFile`) | internal/engine/node_cmd.go:414 | internal:engine |
+| `<call:resolvePath>` | syncJSON (`os.WriteFile`) | internal/engine/node_cmd.go:337 | internal:engine |
+| `<call:resolvePath>` | syncSed (`os.WriteFile`) | internal/engine/node_cmd.go:370 | internal:engine |
+| `<call:resolvePath>` | syncPlist (`os.WriteFile`) | internal/engine/node_cmd.go:424 | internal:engine |
 | `{dir}` | persistNodeID (`os.MkdirAll`) | internal/engine/node_identity.go:321 | internal:engine |
 | `{dir}/node_id` | persistNodeID (`os.WriteFile`) | internal/engine/node_identity.go:326 | internal:engine |
 | `{dir}/node_id.source` | persistNodeID (`os.WriteFile`) | internal/engine/node_identity.go:335 | internal:engine |
@@ -323,9 +323,9 @@ Total subprocess sites: 76
 | _(not set — inherits the process's own working directory)_ | `exec.Command(player, args...)` | internal/engine/mcp_modality_proxy.go:879 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, rgPath, args...)` | internal/engine/mcp_server.go:3264 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command(cogScript, "memory", "search", query)` | internal/engine/memory.go:21 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port))` | internal/engine/node_cmd.go:122 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("ps", "-o", "etime=", "-p", pid)` | internal/engine/node_cmd.go:134 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("ps", "-o", "comm=", "-p", pid)` | internal/engine/node_cmd.go:183 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port))` | internal/engine/node_cmd.go:132 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("ps", "-o", "etime=", "-p", pid)` | internal/engine/node_cmd.go:144 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("ps", "-o", "comm=", "-p", pid)` | internal/engine/node_cmd.go:193 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "python3", cogblockPath, "parse", sourcePath)` | internal/engine/projection_compiler.go:388 | internal:engine |
 | `{home}` | `exec.CommandContext(ctx, binary, "auth", "status", "--json")` | internal/engine/provider_claudecode.go:70 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, p.cliBinary, "--version")` | internal/engine/provider_claudecode.go:200 | internal:engine |

@@ -1191,7 +1191,7 @@
     },
     {
       "file": "internal/engine/node_cmd.go",
-      "line": 327,
+      "line": 337,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "syncJSON",
@@ -1203,7 +1203,7 @@
     },
     {
       "file": "internal/engine/node_cmd.go",
-      "line": 360,
+      "line": 370,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "syncSed",
@@ -1215,7 +1215,7 @@
     },
     {
       "file": "internal/engine/node_cmd.go",
-      "line": 414,
+      "line": 424,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "syncPlist",
@@ -3164,7 +3164,7 @@
     },
     {
       "file": "internal/engine/node_cmd.go",
-      "line": 122,
+      "line": 132,
       "column": 14,
       "func": "findPIDOnPort",
       "subsystem": "internal:engine",
@@ -3174,7 +3174,7 @@
     },
     {
       "file": "internal/engine/node_cmd.go",
-      "line": 134,
+      "line": 144,
       "column": 14,
       "func": "processUptime",
       "subsystem": "internal:engine",
@@ -3184,7 +3184,7 @@
     },
     {
       "file": "internal/engine/node_cmd.go",
-      "line": 183,
+      "line": 193,
       "column": 14,
       "func": "processName",
       "subsystem": "internal:engine",
