@@ -62,6 +62,24 @@ const (
 	// 600s matches the bridge's default; both are tunable per-call via the
 	// active_within_seconds query param.
 	defaultActiveWithinSeconds = 600
+
+	// sessionReapEndReason is the EndReason recorded for rows ReapStale
+	// force-ends. Emitted on BusSessions as an EvtSessionEnd event so replay
+	// (ReplaySessionRegistry) treats reaped sessions identically to
+	// explicitly-ended ones — no new event type needed.
+	sessionReapEndReason = "ttl_reaper"
+
+	// defaultSessionReapTTL is deliberately much larger than
+	// defaultActiveWithinSeconds (600s) so the reaper never fights normal
+	// heartbeat gaps — it only force-ends rows that have been silent far
+	// longer than any live client's heartbeat cadence. cogos#423 observed
+	// rows going un-reaped for two+ months.
+	defaultSessionReapTTL = 24 * time.Hour
+
+	// defaultSessionReapInterval is the sweep cadence for the background
+	// reaper goroutine started in serve.go, mirroring
+	// BusEventBroker.StartReaper's busSSEReaperInterval pattern.
+	defaultSessionReapInterval = 60 * time.Second
 )
 
 // sessionIDPattern enforces the three-component hyphen-separated lowercase
@@ -335,6 +353,47 @@ func (r *SessionRegistry) ApplyEnd(
 	row.LastSeen = now // treat end as implicit last contact
 	cp := *row
 	return &cp, true, nil
+}
+
+// ReapStale is the TTL reaper for cogos#423: sessions that were never
+// explicitly ended (crash, kill -9, dropped client) otherwise persist with
+// Ended=false forever, since ApplyEnd only ever runs from the explicit
+// POST /v1/sessions/{id}/end path. ReapStale finds every unended row whose
+// LastSeen is older than ttl (relative to now) and force-ends it.
+//
+// Same append-before-mutate invariant as ApplyEnd: for each stale row,
+// appendFn(id) is called first, under the registry lock, so the caller can
+// emit a session.end bus event preserving the bus-is-ground-truth
+// contract. If appendFn errors for a given row, that row is left
+// unmutated and simply retried on the next sweep — one row's append
+// failure must not block reaping the rest of the sweep. Returns the
+// session_ids that were successfully reaped.
+func (r *SessionRegistry) ReapStale(ttl time.Duration, now time.Time, appendFn func(id string) error) []string {
+	if ttl <= 0 {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var reaped []string
+	for id, row := range r.rows {
+		if row.Ended {
+			continue
+		}
+		if row.LastSeen.IsZero() || now.Sub(row.LastSeen) <= ttl {
+			continue
+		}
+		if appendFn != nil {
+			if err := appendFn(id); err != nil {
+				continue
+			}
+		}
+		row.Ended = true
+		row.EndedAt = now
+		row.EndReason = sessionReapEndReason
+		row.LastSeen = now
+		reaped = append(reaped, id)
+	}
+	return reaped
 }
 
 // ─── Handoff registry ────────────────────────────────────────────────────────
