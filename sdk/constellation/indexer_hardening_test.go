@@ -202,6 +202,72 @@ func TestIndexCogdocHashSkipRefreshesMtime(t *testing.T) {
 	}
 }
 
+// TestIndexCogdocFrontmatterChangeInvalidatesRefs is the regression test for
+// the MAJOR hash-scope bug (board #138): indexCogdoc's content-hash skip
+// decision previously hashed doc.Content (body only), so a frontmatter-only
+// edit — refs, tags, title, status, etc. — left the stored content_hash
+// unchanged. That tripped the unchanged-hash early return, which never
+// reaches the DELETE+INSERT of tags/doc_references, so the graph edges went
+// stale forever even though the frontmatter had genuinely changed. After the
+// fix, the hash is computed over the full raw file bytes (frontmatter +
+// body), so a refs-only edit with an identical body must still refresh
+// doc_references.
+func TestIndexCogdocFrontmatterChangeInvalidatesRefs(t *testing.T) {
+	c, cleanup := openTestDB(t)
+	defer cleanup()
+
+	body := "Unchanging body content."
+	path := writeCogdocInWorkspace(t, c,
+		"semantic/refswap.cog.md",
+		"id: refswap-doc\ntype: note\ntitle: Ref Swap\ncreated: 2026-01-01\nrefs:\n  - target-a",
+		body,
+	)
+
+	if err := c.IndexFile(path); err != nil {
+		t.Fatalf("initial IndexFile: %v", err)
+	}
+
+	var target string
+	if err := c.DB().QueryRow(
+		`SELECT target_uri FROM doc_references WHERE source_id = 'refswap-doc'`,
+	).Scan(&target); err != nil {
+		t.Fatalf("read initial doc_references: %v", err)
+	}
+	if target != "target-a" {
+		t.Fatalf("expected initial ref target-a, got %q", target)
+	}
+
+	// Rewrite with an identical body but a changed frontmatter ref (and a new
+	// tag) — the body-only hash used before the fix would not change here.
+	rewritten := "---\nid: refswap-doc\ntype: note\ntitle: Ref Swap\ncreated: 2026-01-01\nrefs:\n  - target-b\ntags:\n  - swapped\n---\n\n" + body
+	if err := os.WriteFile(path, []byte(rewritten), 0644); err != nil {
+		t.Fatalf("rewrite cogdoc: %v", err)
+	}
+
+	if err := c.IndexFile(path); err != nil {
+		t.Fatalf("re-IndexFile after frontmatter change: %v", err)
+	}
+
+	var count int
+	if err := c.DB().QueryRow(
+		`SELECT COUNT(*) FROM doc_references WHERE source_id = 'refswap-doc'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("count doc_references: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 doc_references row after frontmatter change, got %d (stale ref not cleared)", count)
+	}
+
+	if err := c.DB().QueryRow(
+		`SELECT target_uri FROM doc_references WHERE source_id = 'refswap-doc'`,
+	).Scan(&target); err != nil {
+		t.Fatalf("read updated doc_references: %v", err)
+	}
+	if target != "target-b" {
+		t.Fatalf("expected updated ref target-b after frontmatter-only change, got %q (frontmatter edit not detected)", target)
+	}
+}
+
 // TestIndexWorkspacePrunesGhostCogdocs is the regression test for the additive-
 // only reindex path leaving permanent ghost rows: a cogdoc whose file is deleted
 // from disk previously kept its documents/FTS/tags/refs rows forever. After the
