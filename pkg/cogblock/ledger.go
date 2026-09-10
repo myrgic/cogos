@@ -312,8 +312,11 @@ func GetHashAlgorithm(workspaceRoot string) (string, error) {
 			continue
 		}
 
-		alg, found := scanForGenesisAlgorithm(f)
+		alg, found, err := scanForGenesisAlgorithm(f)
 		f.Close()
+		if err != nil {
+			return "", fmt.Errorf("scanning %s for genesis event: %w", eventsFile, err)
+		}
 		if found {
 			return alg, nil
 		}
@@ -323,8 +326,10 @@ func GetHashAlgorithm(workspaceRoot string) (string, error) {
 }
 
 // scanForGenesisAlgorithm reads a JSONL stream looking for a workspace.genesis event
-// and returns its hash_algorithm if found.
-func scanForGenesisAlgorithm(r io.Reader) (string, bool) {
+// and returns its hash_algorithm if found. A non-nil error indicates the scan
+// was aborted (e.g. a line exceeding the scanner's token limit) and the
+// caller must not treat that as "no genesis event present".
+func scanForGenesisAlgorithm(r io.Reader) (string, bool, error) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		var event EventEnvelope
@@ -334,11 +339,14 @@ func scanForGenesisAlgorithm(r io.Reader) (string, bool) {
 
 		if event.HashedPayload.Type == "workspace.genesis" {
 			if alg, ok := event.HashedPayload.Data["hash_algorithm"].(string); ok {
-				return alg, true
+				return alg, true, nil
 			}
 		}
 	}
-	return "", false
+	if err := scanner.Err(); err != nil {
+		return "", false, err
+	}
+	return "", false, nil
 }
 
 // === VERIFICATION ===

@@ -1,6 +1,7 @@
 package cogblock
 
 import (
+	"bufio"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -617,5 +618,61 @@ func TestAppendEvent_SanitizesColonSessionID(t *testing.T) {
 
 	if err := VerifyLedger(tmpDir, sessionID); err != nil {
 		t.Fatalf("VerifyLedger: %v", err)
+	}
+}
+
+// === scanForGenesisAlgorithm ERROR PROPAGATION (cogos#541) ===
+
+// TestScanForGenesisAlgorithm_PropagatesScanError verifies that a scan
+// failure (e.g. a line exceeding bufio's max token size) is surfaced as an
+// error instead of being silently treated as "no genesis event found".
+func TestScanForGenesisAlgorithm_PropagatesScanError(t *testing.T) {
+	// A single line longer than bufio.MaxScanTokenSize forces scanner.Scan()
+	// to fail with bufio.ErrTooLong.
+	oversized := "{\"pad\":\"" + strings.Repeat("x", bufio.MaxScanTokenSize+1) + "\"}\n"
+
+	_, found, err := scanForGenesisAlgorithm(strings.NewReader(oversized))
+	if err == nil {
+		t.Fatalf("scanForGenesisAlgorithm: want non-nil error for oversized line, got nil (found=%v)", found)
+	}
+	if found {
+		t.Fatalf("scanForGenesisAlgorithm: found=true on an aborted scan, want false")
+	}
+}
+
+// TestScanForGenesisAlgorithm_CleanEOFNoError verifies the non-error path is
+// unaffected: a stream with no genesis event still reports found=false, err=nil.
+func TestScanForGenesisAlgorithm_CleanEOFNoError(t *testing.T) {
+	alg, found, err := scanForGenesisAlgorithm(strings.NewReader(`{"hashed_payload":{"type":"tool.call"}}` + "\n"))
+	if err != nil {
+		t.Fatalf("scanForGenesisAlgorithm: unexpected error on clean EOF: %v", err)
+	}
+	if found {
+		t.Fatalf("scanForGenesisAlgorithm: found=true, want false (no genesis event in stream); alg=%q", alg)
+	}
+}
+
+// TestGetHashAlgorithm_PropagatesScanError verifies GetHashAlgorithm does not
+// mask a scan abort as "no workspace.genesis event found" — it must return
+// an error distinguishable from the clean not-found case.
+func TestGetHashAlgorithm_PropagatesScanError(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, ".cog", "ledger", "sess-oversized")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	oversized := "{\"pad\":\"" + strings.Repeat("x", bufio.MaxScanTokenSize+1) + "\"}\n"
+	eventsFile := filepath.Join(sessionDir, "events.jsonl")
+	if err := os.WriteFile(eventsFile, []byte(oversized), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := GetHashAlgorithm(tmpDir)
+	if err == nil {
+		t.Fatalf("GetHashAlgorithm: want error when a session's ledger fails to scan, got nil")
+	}
+	if strings.Contains(err.Error(), "no workspace.genesis event found") {
+		t.Fatalf("GetHashAlgorithm: scan-abort error was masked as not-found: %v", err)
 	}
 }
