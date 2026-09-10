@@ -440,6 +440,7 @@ func RunDoctor(root string, opts DoctorOptions) *DoctorReport {
 	doctorIndexHealth(report, root, opts)
 	doctorStoreLiveness(report, root, opts)
 	doctorContextConstruction(report, root, opts)
+	doctorCredentialHygiene(report, root, opts)
 
 	return report
 }
