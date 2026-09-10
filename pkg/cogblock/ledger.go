@@ -13,10 +13,19 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/myrgic/cogos/pkg/pathsafe"
 )
+
+// appendMu serializes concurrent AppendEvent calls across all sessions.
+// Without it, two concurrent callers can both read the same last event,
+// compute the same seq/prior_hash, and interleave their writes — producing
+// a corrupted or duplicate-seq ledger. Mirrors internal/engine.AppendEvent's
+// appendMu; per-session granularity can be a follow-on if this becomes a
+// contention bottleneck.
+var appendMu sync.Mutex
 
 // === EVENT ENVELOPE ===
 
@@ -187,6 +196,9 @@ func HashEvent(canonicalBytes []byte, algorithm string) (string, error) {
 //
 // The ledger is stored at <workspaceRoot>/.cog/ledger/<sessionID>/events.jsonl.
 func AppendEvent(workspaceRoot, sessionID string, envelope *EventEnvelope) error {
+	appendMu.Lock()
+	defer appendMu.Unlock()
+
 	ledgerDir := filepath.Join(workspaceRoot, ".cog", "ledger", pathsafe.SanitizeComponent(sessionID))
 	eventsFile := filepath.Join(ledgerDir, "events.jsonl")
 
