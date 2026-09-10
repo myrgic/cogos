@@ -325,6 +325,13 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 	_ = ReplayHandoffRegistry(s.busSessions, s.handoffRegistry)
 	_ = ReplayForkRegistry(s.busSessions, s.forkRegistry)
 
+	// cogos#423: TTL reaper for the session registry. Without this, rows
+	// that never get an explicit POST /v1/sessions/{id}/end (crash, kill -9,
+	// dropped client) accumulate with Ended=false forever — confirmed live
+	// with 387 un-reaped rows dating back over a month. Runs for the life of
+	// the process; same shape as BusEventBroker.StartReaper (bus_stream.go).
+	s.startSessionReaper(defaultSessionReapTTL, defaultSessionReapInterval)
+
 	// Resolve the bind address. Default stays 127.0.0.1 (loopback-only);
 	// callers may override via Config.BindAddr to listen on all interfaces
 	// ("0.0.0.0") for pod/LAN/Tailnet deployments.
@@ -467,6 +474,40 @@ func (s *Server) SetConstellationIndexer(c ConstellationIndexer) {
 // engine state.
 func (s *Server) WorkspaceRoot() string {
 	return s.cfg.WorkspaceRoot
+}
+
+// startSessionReaper launches the cogos#423 background sweep: every
+// interval, it force-ends any sessionRegistry row that has gone silent
+// (LastSeen) for longer than ttl, emitting a session.end bus event for each
+// so bus_sessions stays the ground truth (ReplaySessionRegistry replays
+// reaped rows identically to explicitly-ended ones on restart). Runs for
+// the lifetime of the process — there is no server-wide shutdown context to
+// bind to yet (Shutdown() only tears down the HTTP listener), matching the
+// existing precedent of unbound background loops in this file (e.g. the
+// autonomic ticker in process.go).
+func (s *Server) startSessionReaper(ttl, interval time.Duration) {
+	if ttl <= 0 || interval <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			now := time.Now().UTC()
+			reaped := s.sessionRegistry.ReapStale(ttl, now, func(id string) error {
+				_, err := s.busSessions.AppendEvent(BusSessions, EvtSessionEnd, id, map[string]interface{}{
+					"session_id": id,
+					"reason":     sessionReapEndReason,
+					"ended_at":   now.Format(time.RFC3339Nano),
+				})
+				return err
+			})
+			if len(reaped) > 0 {
+				slog.Info("session-reaper: force-ended stale sessions",
+					"count", len(reaped), "ttl", ttl.String())
+			}
+		}
+	}()
 }
 
 // Start begins serving. It blocks until the server stops.
