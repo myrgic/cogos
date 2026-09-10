@@ -587,8 +587,14 @@ func (c *Constellation) indexCogdoc(tx *sql.Tx, path string) error {
 		return err
 	}
 
-	// Compute content hash
-	contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(doc.Content)))
+	// Compute content hash over the full raw file bytes (frontmatter + body),
+	// not just doc.Content (body only). Hashing the body alone let a
+	// frontmatter-only edit (refs, tags, title, status, ...) hit the
+	// unchanged-hash early return below and skip the tags/doc_references
+	// DELETE+INSERT, silently leaving stale graph edges. The stored `content`
+	// column below still uses doc.Content (body only) — only the
+	// staleness-detection hash changed.
+	contentHash := fmt.Sprintf("%x", sha256.Sum256(data))
 
 	// Check if already indexed with same hash
 	var existingHash string
