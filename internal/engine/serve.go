@@ -233,6 +233,7 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 	s.route(mux, "GET /v1/conversation", s.handleConversation)
 	s.route(mux, "GET /v1/manifest", s.handleManifest)
 	s.route(mux, "GET /v1/reconcile/coherence", s.handleReconcileCoherence)
+	s.route(mux, "GET /v1/inference", s.handleInference)
 	s.route(mux, "GET /v1/reconcile/convergence", s.handleReconcileConvergence)
 	s.route(mux, "POST /v1/reconcile/{type}/resume", s.handleReconcileResume)
 	s.route(mux, "GET /v1/kernel/rates", s.handleKernelRates)
