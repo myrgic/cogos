@@ -1596,3 +1596,113 @@ func TestRegisterThenListRoundTrip(t *testing.T) {
 		t.Errorf("peer-awareness did not return anti_echo_mvp note: notes=%v", peerBody.Notes)
 	}
 }
+
+// ─── 27. TestSessionRegistry_ReapStale ───────────────────────────────────────
+//
+// Regression guard for cogos#423: sessions that never get an explicit
+// POST /v1/sessions/{id}/end (crash, kill -9, dropped client) must not
+// persist with Ended=false forever. Exercises SessionRegistry.ReapStale
+// directly against the four cases called out in the issue's fix sketch.
+func TestSessionRegistry_ReapStale(t *testing.T) {
+	t.Parallel()
+
+	const ttl = time.Hour
+	now := time.Now().UTC()
+
+	seed := func(t *testing.T, reg *SessionRegistry, id string, lastSeen time.Time, ended bool) {
+		t.Helper()
+		state := SessionState{
+			SessionID: id, Workspace: "w", Role: "r",
+			RegisteredAt: lastSeen, LastSeen: lastSeen,
+		}
+		if _, _, err := reg.ApplyRegister(state, time.Minute, lastSeen, nil); err != nil {
+			t.Fatalf("seed register %s: %v", id, err)
+		}
+		if ended {
+			if _, _, err := reg.ApplyEnd(id, "test-seed", "", lastSeen, nil); err != nil {
+				t.Fatalf("seed end %s: %v", id, err)
+			}
+		}
+	}
+
+	t.Run("past-TTL row is ended and emits a bus event", func(t *testing.T) {
+		reg := NewSessionRegistry()
+		seed(t, reg, "stale-zombie-a", now.Add(-2*ttl), false)
+
+		var appended []string
+		reaped := reg.ReapStale(ttl, now, func(id string) error {
+			appended = append(appended, id)
+			return nil
+		})
+
+		if len(reaped) != 1 || reaped[0] != "stale-zombie-a" {
+			t.Fatalf("reaped = %v, want [stale-zombie-a]", reaped)
+		}
+		if len(appended) != 1 || appended[0] != "stale-zombie-a" {
+			t.Fatalf("appendFn calls = %v, want one call for stale-zombie-a", appended)
+		}
+		row, ok := reg.Get("stale-zombie-a")
+		if !ok {
+			t.Fatal("row disappeared after reap")
+		}
+		if !row.Ended {
+			t.Error("row.Ended = false, want true after reap")
+		}
+		if row.EndReason != sessionReapEndReason {
+			t.Errorf("row.EndReason = %q, want %q", row.EndReason, sessionReapEndReason)
+		}
+	})
+
+	t.Run("within-TTL row is left untouched", func(t *testing.T) {
+		reg := NewSessionRegistry()
+		seed(t, reg, "fresh-session-b", now.Add(-ttl/2), false)
+
+		reaped := reg.ReapStale(ttl, now, func(string) error {
+			t.Fatal("appendFn should not be called for a fresh row")
+			return nil
+		})
+
+		if len(reaped) != 0 {
+			t.Fatalf("reaped = %v, want none", reaped)
+		}
+		row, _ := reg.Get("fresh-session-b")
+		if row.Ended {
+			t.Error("fresh row was ended by the reaper")
+		}
+	})
+
+	t.Run("already-ended row is skipped", func(t *testing.T) {
+		reg := NewSessionRegistry()
+		seed(t, reg, "already-done-c", now.Add(-2*ttl), true)
+
+		reaped := reg.ReapStale(ttl, now, func(string) error {
+			t.Fatal("appendFn should not be called for an already-ended row")
+			return nil
+		})
+
+		if len(reaped) != 0 {
+			t.Fatalf("reaped = %v, want none (already ended)", reaped)
+		}
+	})
+
+	t.Run("appendFn failure leaves the row unmutated", func(t *testing.T) {
+		reg := NewSessionRegistry()
+		seed(t, reg, "bus-append-fails-d", now.Add(-2*ttl), false)
+		before, _ := reg.Get("bus-append-fails-d")
+
+		appendErr := errors.New("simulated bus append failure")
+		reaped := reg.ReapStale(ttl, now, func(string) error { return appendErr })
+
+		if len(reaped) != 0 {
+			t.Fatalf("reaped = %v, want none on appendFn failure", reaped)
+		}
+		after, _ := reg.Get("bus-append-fails-d")
+		if after.Ended {
+			t.Error("row was ended despite appendFn failure")
+		}
+		if !after.LastSeen.Equal(before.LastSeen) {
+			t.Errorf("LastSeen mutated on appendFn failure: before=%v after=%v",
+				before.LastSeen, after.LastSeen)
+		}
+	})
+}
