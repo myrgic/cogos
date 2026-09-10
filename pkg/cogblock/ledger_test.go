@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -613,6 +614,88 @@ func TestAppendEvent_SanitizesColonSessionID(t *testing.T) {
 	}
 	if last == nil || last.HashedPayload.SessionID != sessionID {
 		t.Fatalf("GetLastEvent round-trip failed: got %+v", last)
+	}
+
+	if err := VerifyLedger(tmpDir, sessionID); err != nil {
+		t.Fatalf("VerifyLedger: %v", err)
+	}
+}
+
+// TestAppendEvent_ConcurrentAppends_NoRace covers myrgic/cogos#542: AppendEvent
+// had no mutex guarding its read-last-event -> compute-seq/prior_hash ->
+// canonicalize -> hash -> append-write sequence, so concurrent callers for the
+// same session could race and produce duplicate or out-of-order Seq values
+// with a broken hash chain. Run with -race to prove the data race is closed;
+// the assertions below prove the ledger itself stays internally consistent
+// under concurrent writers.
+func TestAppendEvent_ConcurrentAppends_NoRace(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionID := "test-session-concurrent"
+
+	const n = 50
+	var wg sync.WaitGroup
+	errCh := make(chan error, n)
+
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			event := NewEventEnvelope("test.event", sessionID)
+			event.WithData("index", idx)
+			if err := AppendEvent(tmpDir, sessionID, event); err != nil {
+				errCh <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	eventsFile := filepath.Join(tmpDir, ".cog", "ledger", sessionID, "events.jsonl")
+	data, err := os.ReadFile(eventsFile)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	lines := splitNonEmpty(string(data))
+	if len(lines) != n {
+		t.Fatalf("expected %d events, got %d", n, len(lines))
+	}
+
+	var events []*EventEnvelope
+	for _, line := range lines {
+		var e EventEnvelope
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		events = append(events, &e)
+	}
+
+	// Seq must be strictly increasing 1..n with no duplicates.
+	seen := make(map[int64]bool, n)
+	for _, e := range events {
+		if seen[e.Metadata.Seq] {
+			t.Fatalf("duplicate Seq=%d in ledger", e.Metadata.Seq)
+		}
+		seen[e.Metadata.Seq] = true
+	}
+	for want := int64(1); want <= int64(n); want++ {
+		if !seen[want] {
+			t.Fatalf("missing Seq=%d in ledger", want)
+		}
+	}
+
+	// Each event's prior_hash must match the actually-preceding line's Hash
+	// (file order == append order, since Seq is derived from file order).
+	var prevHash string
+	for i, e := range events {
+		if e.HashedPayload.PriorHash != prevHash {
+			t.Fatalf("line %d: prior_hash=%q, want %q (preceding line's hash)", i, e.HashedPayload.PriorHash, prevHash)
+		}
+		prevHash = e.Metadata.Hash
 	}
 
 	if err := VerifyLedger(tmpDir, sessionID); err != nil {
