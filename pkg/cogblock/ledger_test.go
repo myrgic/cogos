@@ -54,6 +54,71 @@ func TestCanonicalizeEvent_KeyOrdering(t *testing.T) {
 	}
 }
 
+// TestCanonicalizeEvent_RawMessageSurvivesRoundTrip guards against cogos#614:
+// tool.call arguments are stored as json.RawMessage at write time (the
+// caller's verbatim bytes, in whatever key order the source used). On read,
+// a JSONL line decodes through EventEnvelope's Data map[string]interface{},
+// so the same object becomes a generic map before it is re-canonicalized.
+// Without a json.RawMessage case in canonicalJSON, the write-time hash is
+// taken over the raw, unsorted bytes while the read-time hash is taken over
+// the re-sorted map, so verification fails on a valid chain link. The fix
+// makes canonicalJSON decode json.RawMessage and recurse, so both paths sort
+// the same way.
+func TestCanonicalizeEvent_RawMessageSurvivesRoundTrip(t *testing.T) {
+	event := &EventPayload{
+		Type:      "tool.call",
+		SessionID: "session-123",
+		Timestamp: "2026-01-16T18:30:00Z",
+		Data: map[string]interface{}{
+			// Deliberately out-of-alphabetical-order keys, as a shell tool
+			// call's argument object would arrive from the model verbatim.
+			"arguments": json.RawMessage(`{"zeta":1,"alpha":2}`),
+		},
+	}
+
+	// Write-time canonicalization, straight from the in-memory RawMessage.
+	writeBytes, err := CanonicalizeEvent(event)
+	if err != nil {
+		t.Fatalf("Failed to canonicalize write-side event: %v", err)
+	}
+
+	// Simulate the JSONL write+read cycle: marshal the envelope, then
+	// unmarshal it back through EventEnvelope, whose Data field is
+	// map[string]interface{} — this is what VerifyLedger and
+	// verifyEventAgainstChain do on the read path.
+	envelope := &EventEnvelope{HashedPayload: *event}
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("Failed to marshal envelope: %v", err)
+	}
+
+	var readEnvelope EventEnvelope
+	if err := json.Unmarshal(raw, &readEnvelope); err != nil {
+		t.Fatalf("Failed to unmarshal envelope: %v", err)
+	}
+
+	readBytes, err := CanonicalizeEvent(&readEnvelope.HashedPayload)
+	if err != nil {
+		t.Fatalf("Failed to canonicalize read-side event: %v", err)
+	}
+
+	if string(writeBytes) != string(readBytes) {
+		t.Fatalf("write/read canonical bytes differ (cogos#614 regression):\nwrite: %s\nread:  %s", writeBytes, readBytes)
+	}
+
+	writeHash, err := HashEvent(writeBytes, "sha256")
+	if err != nil {
+		t.Fatalf("Failed to hash write-side bytes: %v", err)
+	}
+	readHash, err := HashEvent(readBytes, "sha256")
+	if err != nil {
+		t.Fatalf("Failed to hash read-side bytes: %v", err)
+	}
+	if writeHash != readHash {
+		t.Fatalf("write/read content hash mismatch (cogos#614 regression): write=%s read=%s", writeHash, readHash)
+	}
+}
+
 func TestCanonicalizeEvent_OptionalFields(t *testing.T) {
 	// Without data
 	event := &EventPayload{

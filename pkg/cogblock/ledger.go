@@ -154,6 +154,18 @@ func canonicalJSON(v interface{}) ([]byte, error) {
 		}
 		return []byte("[" + strings.Join(parts, ",") + "]"), nil
 
+	case json.RawMessage:
+		// Raw JSON captured verbatim at write time (e.g. tool.call arguments)
+		// decodes to map[string]interface{}/[]interface{} on read, which would
+		// otherwise be re-sorted/reprocessed and hash differently than the
+		// verbatim bytes hashed here. Decode and recurse so write-time and
+		// read-time canonicalization agree.
+		var decoded interface{}
+		if err := json.Unmarshal(value, &decoded); err != nil {
+			return nil, err
+		}
+		return canonicalJSON(decoded)
+
 	default:
 		// Primitives: use standard JSON encoding
 		return json.Marshal(v)
