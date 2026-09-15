@@ -719,41 +719,43 @@ func TestDoctorProviderEndpoints_AnthropicUsesXAPIKeyViaProviderPing(t *testing.
 	}
 }
 
-// cog-review #635 round 6: a reachable endpoint that answers non-2xx must
-// FAIL. Ping() on OpenAICompatProvider/OllamaProvider previously returned nil
-// for any status; the fix is in the providers (the coupling), not doctor.
+// cog-review #635 rounds 6+7: a reachable endpoint that answers non-2xx must
+// FAIL for EVERY HTTP-backed provider type doctor can construct. Round 6 fixed
+// openai/ollama; round 7 caught anthropic/claude-oauth still passing on
+// 403/500/502 (they only checked 401). Table-driven so a new provider type
+// that forgets to check status fails here, not in a review round.
 func TestDoctorProviderEndpoints_ConnectedButNon2xxIsFail(t *testing.T) {
-	for _, code := range []int{403, 404, 502} {
-		t.Run(fmt.Sprintf("openai_%d", code), func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(code)
-			}))
-			defer srv.Close()
-			root := t.TempDir()
-			writeProvidersYAML(t, root, srv.URL)
-			g := &DoctorGroup{}
-			doctorProviderEndpoints(g, root, DoctorOptions{})
-			c := findCheckInGroup(t, g, "providers.yaml endpoint: test-openai")
-			if c.Status != StatusFail {
-				t.Fatalf("HTTP %d must be FAIL; got %s %q", code, c.Status, c.Detail)
-			}
-			if !strings.Contains(c.Detail, fmt.Sprintf("HTTP %d", code)) {
-				t.Fatalf("detail must name the status: %q", c.Detail)
-			}
-		})
+	types := []struct {
+		typ   string
+		extra string // yaml lines needed for the provider to construct
+		env   map[string]string
+	}{
+		{typ: "openai"},
+		{typ: "ollama"},
+		{typ: "anthropic", extra: "    api_key_env: DOCTOR_T_ANTHROPIC\n", env: map[string]string{"DOCTOR_T_ANTHROPIC": "sk-x"}},
 	}
-	t.Run("ollama_502", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusBadGateway)
-		}))
-		defer srv.Close()
-		root := t.TempDir()
-		writeProvidersYAMLRaw(t, root, "providers:\n  ol:\n    type: ollama\n    endpoint: "+srv.URL+"\n    enabled: true\n")
-		g := &DoctorGroup{}
-		doctorProviderEndpoints(g, root, DoctorOptions{})
-		c := findCheckInGroup(t, g, "providers.yaml endpoint: ol")
-		if c.Status != StatusFail || !strings.Contains(c.Detail, "HTTP 502") {
-			t.Fatalf("ollama 502 must be FAIL naming the status; got %s %q", c.Status, c.Detail)
+	for _, tc := range types {
+		for _, code := range []int{403, 404, 500, 502} {
+			t.Run(fmt.Sprintf("%s_%d", tc.typ, code), func(t *testing.T) {
+				for k, v := range tc.env {
+					t.Setenv(k, v)
+				}
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(code)
+				}))
+				defer srv.Close()
+				root := t.TempDir()
+				writeProvidersYAMLRaw(t, root, "providers:\n  p:\n    type: "+tc.typ+"\n    endpoint: "+srv.URL+"\n    enabled: true\n"+tc.extra)
+				g := &DoctorGroup{}
+				doctorProviderEndpoints(g, root, DoctorOptions{})
+				c := findCheckInGroup(t, g, "providers.yaml endpoint: p")
+				if c.Status != StatusFail {
+					t.Fatalf("%s HTTP %d must be FAIL; got %s %q", tc.typ, code, c.Status, c.Detail)
+				}
+				if !strings.Contains(c.Detail, fmt.Sprintf("HTTP %d", code)) {
+					t.Fatalf("detail must name the status: %q", c.Detail)
+				}
+			})
 		}
-	})
+	}
 }

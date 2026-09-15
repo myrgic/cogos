@@ -876,6 +876,9 @@ func (p *ClaudeOAuthProvider) Ping(ctx context.Context) (time.Duration, error) {
 	if resp.StatusCode == http.StatusUnauthorized {
 		return 0, fmt.Errorf("claude-oauth: ping: 401 — credential rejected")
 	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("claude-oauth: ping: /v1/models returned HTTP %d", resp.StatusCode)
+	}
 	return time.Since(start), nil
 }
 
