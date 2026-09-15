@@ -139,19 +139,14 @@ const (
 	ErrorFatal InferenceErrorType = "fatal"
 )
 
-// ModelAlias maps short model names to full model IDs.
-var ModelAlias = map[string]string{
-	"sonnet": "claude-sonnet-4-20250514",
-	"opus":   "claude-opus-4-20250514",
-	"haiku":  "claude-haiku-3-20240307",
-}
-
-// ResolveModelAlias returns the full model ID for an alias.
+// ResolveModelAlias previously mapped short names ("sonnet"/"opus"/"haiku")
+// to date-pinned model IDs, but that table went stale (see #632) and nothing
+// re-derived it from a live catalog like internal/engine/resolve.go does.
+// It is now the identity function: the `claude` CLI resolves these aliases
+// itself, and kernel-routed calls go through the kernel's own resolve.go.
+// Kept exported (not renamed/removed) so existing callers keep compiling.
 func ResolveModelAlias(alias string) string {
-	if full, ok := ModelAlias[alias]; ok {
-		return full
-	}
-	return alias // Return as-is if not an alias
+	return alias
 }
 
 // InferenceConfig configures the inference projector.
