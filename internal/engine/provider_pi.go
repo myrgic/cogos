@@ -223,29 +223,16 @@ func (p *PiProvider) probeAvailable(ctx context.Context) bool {
 	if err != nil || path == "" {
 		return false
 	}
-	// Only the local lmstudio backend has a probe target we own. For any other
-	// pi provider (openrouter, etc.) we cannot vouch for the remote's auth
-	// state from here, so binary presence remains the best available signal —
-	// but that is a known limitation, not a claim of verified availability.
-	if p.provider != defaultLocalPiProvider {
-		return true
-	}
-	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if err := piBackendProbe(probeCtx, p.backendURL()); err != nil {
-		slog.Debug("pi: Available: backend probe failed", "backend", p.backendURL(), "err", err)
-		return false
-	}
 
-	// The backend answering does not mean pi itself will accept the
-	// configured --provider: pi maintains its own provider registry
-	// (agent/models.json, the source `pi --list-models` reads) independent
-	// of the engine's defaultLocalPiProvider default. A configured provider
-	// missing from that registry makes every pi invocation fail with
-	// `Error: Unknown provider "..."` even though the backend is healthy —
-	// this was the gap left by PR #417 (see #629). Do not silently repoint
-	// to whatever provider the registry does have; report unavailable and
-	// say why.
+	// pi maintains its own provider registry (agent/models.json, the source
+	// `pi --list-models` reads) independent of any config default the engine
+	// applies. A configured provider missing from that registry makes every
+	// pi invocation fail with `Error: Unknown provider "..."` regardless of
+	// which --provider is configured — this check applies to every provider,
+	// not just the local lmstudio default, otherwise the exact defect class
+	// #629 fixes reopens for any non-default --provider (e.g. "ollama"). Do
+	// not silently repoint to whatever provider the registry does have;
+	// report unavailable and say why. This was the gap left by PR #417.
 	has, registryPath, err := piRegistryHas(p.provider)
 	if err != nil {
 		slog.Warn("pi: could not read provider registry", "provider", p.provider, "registry", registryPath, "err", err)
@@ -253,6 +240,21 @@ func (p *PiProvider) probeAvailable(ctx context.Context) bool {
 	}
 	if !has {
 		slog.Warn("pi: configured --provider not in pi registry", "provider", p.provider, "registry", registryPath, "hint", "pi --list-models")
+		return false
+	}
+
+	// Only the local lmstudio backend has an HTTP probe target we own. For
+	// any other pi provider (openrouter, etc.) we cannot vouch for the
+	// remote's auth/serving state from here, so registry presence plus
+	// binary presence is the best available signal — a known limitation,
+	// not a claim of verified end-to-end availability.
+	if p.provider != defaultLocalPiProvider {
+		return true
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := piBackendProbe(probeCtx, p.backendURL()); err != nil {
+		slog.Debug("pi: Available: backend probe failed", "backend", p.backendURL(), "err", err)
 		return false
 	}
 	return true

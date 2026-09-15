@@ -206,6 +206,7 @@ func TestPiAvailableBinaryPresentBackendUp(t *testing.T) {
 func TestPiAvailableBinaryPresentBackendDown(t *testing.T) {
 	resetPiProbesForTest(t)
 	piOnPath(t)
+	stubPiHomeDir(t, "testdata/pi_home_present")
 	piBackendProbe = func(ctx context.Context, baseURL string) error {
 		return errors.New("connection refused")
 	}
@@ -231,6 +232,7 @@ func TestPiAvailableBinaryAbsent(t *testing.T) {
 func TestPiAvailableProbesDefaultBackendURL(t *testing.T) {
 	resetPiProbesForTest(t)
 	piOnPath(t)
+	stubPiHomeDir(t, "testdata/pi_home_present")
 	var got string
 	piBackendProbe = func(ctx context.Context, baseURL string) error { got = baseURL; return nil }
 
@@ -243,6 +245,7 @@ func TestPiAvailableProbesDefaultBackendURL(t *testing.T) {
 func TestPiAvailableCachesResult(t *testing.T) {
 	resetPiProbesForTest(t)
 	piOnPath(t)
+	stubPiHomeDir(t, "testdata/pi_home_present")
 	calls := 0
 	piBackendProbe = func(ctx context.Context, baseURL string) error { calls++; return nil }
 
@@ -268,7 +271,11 @@ func TestPiAvailableCachesResult(t *testing.T) {
 // #417 already made "lmstudio" a safe default; it did not verify pi's
 // registry actually has an "lmstudio" entry. These tests pin the fix:
 // Available() must confirm the configured --provider exists in the registry,
-// not merely that the backend HTTP probe answers.
+// not merely that the backend HTTP probe answers — and this check must run
+// for EVERY configured --provider, not just the compiled-in local default,
+// otherwise a PiProvider configured for "ollama" (or any non-default
+// provider) reopens the identical defect class untested (caught in review
+// on the first cut of this PR).
 
 func stubPiHomeDir(t *testing.T, dir string) {
 	t.Helper()
@@ -298,6 +305,51 @@ func TestPiAvailable_ProviderPresent(t *testing.T) {
 
 	if !newLocalPi().Available(context.Background()) {
 		t.Fatal("Available must be true when backend is up and the configured --provider exists in pi's registry")
+	}
+}
+
+func piWithProvider(t *testing.T, provider string) *PiProvider {
+	t.Helper()
+	return NewPiProvider("pi", ProviderConfig{
+		Options: map[string]interface{}{"provider": provider},
+	}, nil)
+}
+
+// TestPiAvailable_NonDefaultProviderMissingFromRegistry pins the review
+// finding on the first cut of #629: the registry check must not be gated
+// behind `p.provider == defaultLocalPiProvider`. A PiProvider explicitly
+// configured for a non-default provider (here "ollama", matching this
+// repo's real ~/.pi registry state) that isn't actually in the registry
+// must still report unavailable — with no backend probe involved, since
+// ollama isn't the locally-probed backend.
+func TestPiAvailable_NonDefaultProviderMissingFromRegistry(t *testing.T) {
+	resetPiProbesForTest(t)
+	piOnPath(t)
+	piBackendProbe = func(ctx context.Context, baseURL string) error {
+		t.Fatal("backend probe must not run for a non-default provider")
+		return nil
+	}
+	stubPiHomeDir(t, "testdata/pi_home_missing_ollama")
+
+	if piWithProvider(t, "ollama").Available(context.Background()) {
+		t.Fatal("Available must be false when a non-default configured --provider is missing from pi's registry")
+	}
+}
+
+// TestPiAvailable_NonDefaultProviderPresent confirms a non-default provider
+// that IS registered reports available without requiring the (inapplicable)
+// local HTTP backend probe.
+func TestPiAvailable_NonDefaultProviderPresent(t *testing.T) {
+	resetPiProbesForTest(t)
+	piOnPath(t)
+	piBackendProbe = func(ctx context.Context, baseURL string) error {
+		t.Fatal("backend probe must not run for a non-default provider")
+		return nil
+	}
+	stubPiHomeDir(t, "testdata/pi_home_missing") // has "ollama", lacks "lmstudio"
+
+	if !piWithProvider(t, "ollama").Available(context.Background()) {
+		t.Fatal("Available must be true when a non-default configured --provider is present in pi's registry")
 	}
 }
 
