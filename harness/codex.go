@@ -19,8 +19,17 @@ import (
 )
 
 const (
-	CodexCommand      = "codex"
-	defaultCodexModel = "gpt-5-codex"
+	CodexCommand = "codex"
+	// defaultCodexModel is the fallback model id used when a caller passes
+	// the bare "codex" alias without a specific model. codex-cli's own
+	// catalog (~/.codex/models_cache.json) drifts over time as OpenAI
+	// retires/renames slugs (see myrgic/cogos#627, where CodexProvider's
+	// equivalent hardcoded default had already gone stale); this harness
+	// package is a separate Go module without access to internal/engine's
+	// config.toml/models_cache.json discovery, so the id here needs to be
+	// re-checked against a live models_cache.json periodically rather than
+	// assumed evergreen.
+	defaultCodexModel = "gpt-5.6-terra"
 )
 
 type codexOutputState struct {

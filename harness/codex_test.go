@@ -23,8 +23,8 @@ func TestBuildCodexArgs_DefaultAlias(t *testing.T) {
 	if !strings.Contains(joined, "--json") {
 		t.Fatalf("expected --json mode, got %v", args)
 	}
-	if !strings.Contains(joined, "--model gpt-5-codex") {
-		t.Fatalf("expected codex alias to resolve to gpt-5-codex, got %v", args)
+	if !strings.Contains(joined, "--model gpt-5.6-terra") {
+		t.Fatalf("expected codex alias to resolve to gpt-5.6-terra, got %v", args)
 	}
 }
 
