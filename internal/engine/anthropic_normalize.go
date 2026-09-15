@@ -11,21 +11,22 @@
 // Fixed point witness: validateAnthropicMessages(normalizeAnthropicMessages(x)) == [] for all x.
 //
 // Transform order (fixed, each pass monotone toward legality):
-//   1. I6 thinking-strip + I5 empty-drop (single assistant walk)
-//   2. I3 tool-pairing (per-assistant-run scoped, iterate to local fixpoint)
-//   3. I4 block-order  (stable-partition tool_result-first in each user message)
-//   4. I2 alternation-merge (consecutive same-role)
-//   5. I1 leading-user-drop
-//   6. settle: if any step 2-5 changed the slice, repeat 2-5 (converges in <=2
-//      passes because message count is monotonically non-increasing)
+//  1. I6 thinking-strip + I5 empty-drop (single assistant walk)
+//  2. I3 tool-pairing (per-assistant-run scoped, iterate to local fixpoint)
+//  3. I4 block-order  (stable-partition tool_result-first in each user message)
+//  4. I2 alternation-merge (consecutive same-role)
+//  5. I1 leading-user-drop
+//  6. settle: if any step 2-5 changed the slice, repeat 2-5 (converges in <=2
+//     passes because message count is monotonically non-increasing)
 //
 // Invariants:
-//   I1: messages[0].role == "user"
-//   I2: strict user/assistant alternation (no consecutive same-role)
-//   I3: tool_use/tool_result pairs complete and scoped per assistant run
-//   I4: tool_result blocks lead in any tool-response user message
-//   I5: no empty assistant content
-//   I6: no signed thinking/redacted_thinking blocks on non-final assistant turns (v1)
+//
+//	I1: messages[0].role == "user"
+//	I2: strict user/assistant alternation (no consecutive same-role)
+//	I3: tool_use/tool_result pairs complete and scoped per assistant run
+//	I4: tool_result blocks lead in any tool-response user message
+//	I5: no empty assistant content
+//	I6: no signed thinking/redacted_thinking blocks on non-final assistant turns (v1)
 package engine
 
 import (

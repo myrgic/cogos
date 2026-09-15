@@ -1,8 +1,9 @@
 // bep_dispatch.go — Phase 2 S4: remote harness dispatch over BEP.
 //
 // Adds two message types to the existing BEP channel:
-//   MessageTypeDispatch       (8) — caller sends a DispatchRequest JSON body
-//   MessageTypeDispatchResult (9) — remote sends a DispatchBatchResult JSON body
+//
+//	MessageTypeDispatch       (8) — caller sends a DispatchRequest JSON body
+//	MessageTypeDispatchResult (9) — remote sends a DispatchBatchResult JSON body
 //
 // Correlation: each in-flight dispatch is given a uint32 ID embedded in a thin
 // envelope (dispatchEnvelope). The receive side echoes the same ID back so that
@@ -30,10 +31,10 @@ import (
 // MessageTypeDispatchResult. The ID field correlates request↔result so that
 // concurrent dispatches over a single connection don't mix up their responses.
 type dispatchEnvelope struct {
-	ID      uint32           `json:"id"`
-	Request *DispatchRequest `json:"request,omitempty"` // set on request side
+	ID      uint32               `json:"id"`
+	Request *DispatchRequest     `json:"request,omitempty"` // set on request side
 	Result  *DispatchBatchResult `json:"result,omitempty"`  // set on result side
-	Error   string           `json:"error,omitempty"`   // set on result side for fatal errors
+	Error   string               `json:"error,omitempty"`   // set on result side for fatal errors
 }
 
 // ─── BEPEngine dispatch extensions ──────────────────────────────────────────

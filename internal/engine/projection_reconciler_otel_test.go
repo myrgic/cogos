@@ -80,7 +80,7 @@ func TestSpanDoneWithError(t *testing.T) {
 	ctx := context.Background()
 
 	_, done := StartServiceSpan(ctx, ProjectionLineageChain, 5, "/tmp")
-	done(context.DeadlineExceeded)  // should not panic
+	done(context.DeadlineExceeded) // should not panic
 }
 
 // TestReconcileWithSpan_FullCycle verifies that ReconcileWithSpan runs a

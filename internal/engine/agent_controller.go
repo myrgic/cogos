@@ -9,9 +9,9 @@
 //
 // Design rationale (see Agent T's design spike,
 // cog://mem/semantic/surveys/2026-04-21-consolidation/agent-T-agent-state-design):
-//   * Identities are static YAML (AgentProvider reconciles them; they don't run).
-//   * Sessions are external-client conversational contexts (Agent P's lane).
-//   * Agents are kernel-internal goroutines — the ServeAgent singleton today.
+//   - Identities are static YAML (AgentProvider reconciles them; they don't run).
+//   - Sessions are external-client conversational contexts (Agent P's lane).
+//   - Agents are kernel-internal goroutines — the ServeAgent singleton today.
 //
 // This interface surfaces the agent. It does NOT surface identities or
 // sessions; those are separate APIs.
@@ -46,7 +46,6 @@ type AgentController interface {
 	// the cycle completes (or a 90s deadline elapses). When wait is false,
 	// returns immediately with a trigger receipt.
 	TriggerAgent(ctx context.Context, id string, reason string, wait bool) (*AgentTriggerResult, error)
-
 }
 
 // ErrAgentNotFound is returned by GetAgent/TriggerAgent when no agent
@@ -85,13 +84,13 @@ var ErrAgentInvalidInput = &AgentControllerError{Code: "invalid_input", Message:
 // is a rename, not new state.
 type AgentSummary struct {
 	AgentID     string  `json:"agent_id"`
-	Identity    string  `json:"identity,omitempty"`     // nucleus.Name today ("cog", "sandy", etc.)
-	Alive       bool    `json:"alive"`                  // process is running
-	Running     bool    `json:"running"`                // a cycle is in progress RIGHT NOW
+	Identity    string  `json:"identity,omitempty"` // nucleus.Name today ("cog", "sandy", etc.)
+	Alive       bool    `json:"alive"`              // process is running
+	Running     bool    `json:"running"`            // a cycle is in progress RIGHT NOW
 	UptimeSec   int64   `json:"uptime_sec"`
 	CycleCount  int64   `json:"cycle_count"`
-	LastAction  string  `json:"last_action,omitempty"`  // sleep|observe|propose|execute|escalate|skip|error|""
-	LastCycle   string  `json:"last_cycle,omitempty"`   // RFC3339
+	LastAction  string  `json:"last_action,omitempty"` // sleep|observe|propose|execute|escalate|skip|error|""
+	LastCycle   string  `json:"last_cycle,omitempty"`  // RFC3339
 	LastUrgency float64 `json:"last_urgency"`
 	LastReason  string  `json:"last_reason,omitempty"`
 	LastDurMs   int64   `json:"last_duration_ms"`
@@ -134,14 +133,14 @@ type AgentProposalEntry struct {
 // of linkfeed.AgentInboxSummary so tool/HTTP handlers can pass through
 // without importing linkfeed from internal/engine.
 type AgentInboxSummary struct {
-	RawCount          int                     `json:"raw_count"`
-	EnrichedCount     int                     `json:"enriched_count"`
-	FailedCount       int                     `json:"failed_count"`
-	TotalCount        int                     `json:"total_count"`
-	LastPull          string                  `json:"last_pull,omitempty"`
-	LastPullAgo       string                  `json:"last_pull_ago,omitempty"`
-	NextPullIn        string                  `json:"next_pull_in,omitempty"`
-	RecentEnrichments []AgentInboxEnrichItem  `json:"recent_enrichments,omitempty"`
+	RawCount          int                    `json:"raw_count"`
+	EnrichedCount     int                    `json:"enriched_count"`
+	FailedCount       int                    `json:"failed_count"`
+	TotalCount        int                    `json:"total_count"`
+	LastPull          string                 `json:"last_pull,omitempty"`
+	LastPullAgo       string                 `json:"last_pull_ago,omitempty"`
+	NextPullIn        string                 `json:"next_pull_in,omitempty"`
+	RecentEnrichments []AgentInboxEnrichItem `json:"recent_enrichments,omitempty"`
 }
 
 // AgentInboxEnrichItem is one recent link-enrichment on the inbox.
@@ -155,15 +154,15 @@ type AgentInboxEnrichItem struct {
 // (observation), what it decided (action+reason+urgency+target), how
 // long it took, and what it produced (result).
 type AgentCycleTrace struct {
-	Cycle       int64  `json:"cycle"`
-	Timestamp   string `json:"timestamp"`   // RFC3339
-	DurationMs  int64  `json:"duration_ms"`
-	Action      string `json:"action"`
+	Cycle       int64   `json:"cycle"`
+	Timestamp   string  `json:"timestamp"` // RFC3339
+	DurationMs  int64   `json:"duration_ms"`
+	Action      string  `json:"action"`
 	Urgency     float64 `json:"urgency"`
-	Reason      string `json:"reason"`
-	Target      string `json:"target,omitempty"`
-	Observation string `json:"observation,omitempty"`
-	Result      string `json:"result,omitempty"`
+	Reason      string  `json:"reason"`
+	Target      string  `json:"target,omitempty"`
+	Observation string  `json:"observation,omitempty"`
+	Result      string  `json:"result,omitempty"`
 }
 
 // AgentSnapshot is the full state projection for GET /v1/agents/{id}.
@@ -196,4 +195,3 @@ type AgentTriggerResult struct {
 	DurationMs int64   `json:"duration_ms,omitempty"`
 	TimedOut   bool    `json:"timed_out,omitempty"`
 }
-

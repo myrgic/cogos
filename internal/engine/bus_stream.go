@@ -24,9 +24,9 @@ import (
 
 // Defaults copied verbatim from root so reapers/limits behave identically.
 const (
-	busSSEMaxPerBus       = 25
-	busSSEIdleTimeout     = 2 * time.Minute
-	busSSEReaperInterval  = 30 * time.Second
+	busSSEMaxPerBus      = 25
+	busSSEIdleTimeout    = 2 * time.Minute
+	busSSEReaperInterval = 30 * time.Second
 )
 
 // busSSESubscriber tracks per-connection metadata for liveness detection.

@@ -2994,7 +2994,7 @@
     },
     {
       "file": "internal/engine/cli_doctor_inference.go",
-      "line": 311,
+      "line": 313,
       "column": 10,
       "func": "checkArgvContracts",
       "subsystem": "internal:engine",

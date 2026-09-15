@@ -122,27 +122,27 @@ func TestNucleusSummary(t *testing.T) {
 func TestParseIdentityFrontmatter(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name    string
-		content string
-		wantFM  identityFrontmatter
+		name     string
+		content  string
+		wantFM   identityFrontmatter
 		wantBody string
 	}{
 		{
-			name: "full frontmatter",
-			content: "---\nname: Cog\nrole: guardian\n---\n# Body\n",
-			wantFM:  identityFrontmatter{Name: "Cog", Role: "guardian"},
+			name:     "full frontmatter",
+			content:  "---\nname: Cog\nrole: guardian\n---\n# Body\n",
+			wantFM:   identityFrontmatter{Name: "Cog", Role: "guardian"},
 			wantBody: "# Body\n",
 		},
 		{
-			name:    "no frontmatter",
-			content: "# Just body\n",
-			wantFM:  identityFrontmatter{},
+			name:     "no frontmatter",
+			content:  "# Just body\n",
+			wantFM:   identityFrontmatter{},
 			wantBody: "# Just body\n",
 		},
 		{
-			name:    "empty document",
-			content: "",
-			wantFM:  identityFrontmatter{},
+			name:     "empty document",
+			content:  "",
+			wantFM:   identityFrontmatter{},
 			wantBody: "",
 		},
 	}

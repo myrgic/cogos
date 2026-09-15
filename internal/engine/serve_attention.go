@@ -176,12 +176,15 @@ func (s *Server) handleConstellationFovea(w http.ResponseWriter, r *http.Request
 
 // handleConstellationAdjacent returns nodes "near" a given URI in the attentional field.
 // Nearness is scored by:
+//
 //  1. Co-access within a 5-minute window (from attention log)
+//
 //  2. Path proximity (same directory prefix)
+//
 //  3. Attentional field score
 //
-//	GET /v1/constellation/adjacent?uri=cog://mem/semantic/foo&limit=10
-//	200 → { "uri": "cog://...", "nodes": [...] }
+//     GET /v1/constellation/adjacent?uri=cog://mem/semantic/foo&limit=10
+//     200 → { "uri": "cog://...", "nodes": [...] }
 func (s *Server) handleConstellationAdjacent(w http.ResponseWriter, r *http.Request) {
 	uri := r.URL.Query().Get("uri")
 	if uri == "" {

@@ -8,10 +8,12 @@
 //
 // Four mechanical checks, added as the sixth call in RunDoctor:
 //
-//	(a) providers.yaml endpoints    — every enabled provider's configured
-//	    endpoint actually answers GET <endpoint>/v1/models (or
-//	    options.health_path), and if the listing is OpenAI-shaped, the
-//	    declared model id is actually among the ids served.
+//	(a) providers.yaml endpoints    — every enabled HTTP-backed provider is
+//	    constructed exactly as the router constructs it and asked to probe
+//	    ITSELF via its own Ping() (and ListModels() when it implements
+//	    ModelLister) — so auth scheme, health path, and listing shape are the
+//	    provider's, never doctor's. options.health_path is NOT read by any
+//	    provider today; doctor does not read it either.
 //	(c) provider argv vs installed CLI — each provider's buildArgs()
 //	    contract (provider_codex.go, provider_pi.go,
 //	    provider_claudecode.go) is checked against what the installed CLI's

@@ -14,8 +14,8 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
-	stdhash "hash"
 	"fmt"
+	stdhash "hash"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,7 +34,7 @@ var appendMu sync.Mutex
 // entire ledger file on every append. Populated on first access and updated
 // after each successful append.
 var lastEventCache = struct {
-	mu    sync.RWMutex
+	mu        sync.RWMutex
 	bySession map[string]*EventEnvelope
 }{bySession: make(map[string]*EventEnvelope)}
 

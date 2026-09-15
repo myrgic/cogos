@@ -8,10 +8,10 @@
 // exercise this test; it skips cleanly when unset or the path doesn't exist,
 // same as every other run of this suite including CI.
 // For each length:
-//   1. Convert the raw JSON to []ProviderMessage.
-//   2. Call buildAnthropicRequest to produce an anthropicRequest (exercises normalizer).
-//   3. Assert validateAnthropicMessages(ar.Messages) == [] (clean after normalize).
-//   4. Assert idempotency: a second normalize pass produces identical output.
+//  1. Convert the raw JSON to []ProviderMessage.
+//  2. Call buildAnthropicRequest to produce an anthropicRequest (exercises normalizer).
+//  3. Assert validateAnthropicMessages(ar.Messages) == [] (clean after normalize).
+//  4. Assert idempotency: a second normalize pass produces identical output.
 //
 // RED-GREEN discipline: for lengths where the RAW converted messages violate an
 // invariant, assert the violation BEFORE asserting the normalized output is clean.
@@ -28,10 +28,10 @@ import (
 
 // rawPoisonedMessage is the JSON shape of the poisoned_session.json file.
 type rawPoisonedMessage struct {
-	Role      string     `json:"role"`
-	Content   string     `json:"content"`
-	ToolCallID string    `json:"tool_call_id"`
-	ToolCalls []struct {
+	Role       string `json:"role"`
+	Content    string `json:"content"`
+	ToolCallID string `json:"tool_call_id"`
+	ToolCalls  []struct {
 		ID       string `json:"id"`
 		CallID   string `json:"call_id"`
 		Type     string `json:"type"`

@@ -28,10 +28,10 @@ func makeModel(t *testing.T, authoritative *BlobStore) (modelDir string, shards 
 	t.Helper()
 	modelDir = t.TempDir()
 	files := map[string][]byte{
-		"config.json":               []byte(`{"model_type":"spike","hidden":4096}`),
-		"tokenizer.json":            []byte(`{"vocab":["a","b","c"]}`),
-		"model-00001-of-00002.bin":  make([]byte, 256*1024), // 256KB shard
-		"model-00002-of-00002.bin":  make([]byte, 512*1024), // 512KB shard
+		"config.json":              []byte(`{"model_type":"spike","hidden":4096}`),
+		"tokenizer.json":           []byte(`{"vocab":["a","b","c"]}`),
+		"model-00001-of-00002.bin": make([]byte, 256*1024), // 256KB shard
+		"model-00002-of-00002.bin": make([]byte, 512*1024), // 512KB shard
 	}
 	// Fill shards with non-zero, distinct content so hashes differ.
 	for name, data := range files {

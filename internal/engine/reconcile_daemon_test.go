@@ -445,7 +445,7 @@ func TestReconcileDaemon_TriggerMechanism(t *testing.T) {
 	daemon.Trigger(provider.Type())
 
 	// Wait for the triggered cycle to complete.
-	deadline := time.After(300*time.Millisecond)
+	deadline := time.After(300 * time.Millisecond)
 	for {
 		select {
 		case <-deadline:

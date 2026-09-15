@@ -20,7 +20,7 @@
 //   - Because Health() is non-blocking, it is safe inside buildHealthBlock's
 //     200 ms per-provider timeout.
 //
-// Plist template
+// # Plist template
 //
 // The kernel writes a minimal launchd plist that runs:
 //
@@ -42,7 +42,7 @@
 //	    launchd_label: com.cogos.mlx-gemma        # default: com.cogos.mlx-<name>
 //	    args: []                                  # extra CLI args after model+port
 //
-// Lifetime under launchd
+// # Lifetime under launchd
 //
 // launchd is the supervisor. The kernel only writes the plist and tells launchd
 // to load/unload it. It does NOT keep the process address in memory or attempt
@@ -81,18 +81,18 @@ type MLXSupervisedProvider struct {
 
 	// --- supervision ---
 	supervisor   ServiceSupervisor
-	launchdLabel string    // e.g. "com.cogos.mlx-gemma"
-	plistPath    string    // ~/Library/LaunchAgents/<label>.plist
-	binary       string    // path/name of mlx_lm.server binary
-	modelPath    string    // full model path passed to --model
-	port         int       // port mlx_lm.server should bind
-	extraArgs    []string  // additional CLI args
+	launchdLabel string   // e.g. "com.cogos.mlx-gemma"
+	plistPath    string   // ~/Library/LaunchAgents/<label>.plist
+	binary       string   // path/name of mlx_lm.server binary
+	modelPath    string   // full model path passed to --model
+	port         int      // port mlx_lm.server should bind
+	extraArgs    []string // additional CLI args
 
 	// --- cached health state (updated by Reconcile / Available) ---
-	mu          sync.RWMutex
-	lastStatus  *ServiceStatus
-	lastHTTP    bool          // last /v1/models probe result
-	lastProbed  time.Time
+	mu         sync.RWMutex
+	lastStatus *ServiceStatus
+	lastHTTP   bool // last /v1/models probe result
+	lastProbed time.Time
 
 	// --- reconcile metadata ---
 	workspaceRoot string // injected at daemon boot
@@ -388,10 +388,10 @@ func (p *MLXSupervisedProvider) Health() reconcile.ResourceStatus {
 	// Plist absent — hard missing.
 	if !plistExists {
 		return reconcile.ResourceStatus{
-			Sync:    reconcile.SyncStatusOutOfSync,
-			Health:  reconcile.HealthMissing,
+			Sync:      reconcile.SyncStatusOutOfSync,
+			Health:    reconcile.HealthMissing,
 			Operation: reconcile.OperationIdle,
-			Message: fmt.Sprintf("launchd plist absent at %s", p.plistPath),
+			Message:   fmt.Sprintf("launchd plist absent at %s", p.plistPath),
 		}
 	}
 
@@ -443,12 +443,12 @@ func (p *MLXSupervisedProvider) writePlist() error {
 	args = append(args, p.extraArgs...)
 
 	plist := mlxPlist{
-		Label:                p.launchdLabel,
-		ProgramArguments:     args,
-		RunAtLoad:            true,
-		KeepAlive:            true,
-		StandardOutPath:      p.logPath("stdout"),
-		StandardErrorPath:    p.logPath("stderr"),
+		Label:             p.launchdLabel,
+		ProgramArguments:  args,
+		RunAtLoad:         true,
+		KeepAlive:         true,
+		StandardOutPath:   p.logPath("stdout"),
+		StandardErrorPath: p.logPath("stderr"),
 	}
 
 	data, err := marshalPlist(plist)

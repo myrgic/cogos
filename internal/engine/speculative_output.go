@@ -44,13 +44,13 @@ const BargeinMatchWindowS = 30.0
 // GET /v1/logs/chat-flow?event_type=bargein.event&session_id=X&limit=1.
 // Only fields needed for speculative-output backfill are decoded.
 type mod3BargeinEvent struct {
-	EventType               string  `json:"event_type"`
-	Timestamp               string  `json:"ts"`
-	SessionID               string  `json:"session_id"`
-	TextActuallyPlayed      string  `json:"text_actually_played"`
-	TextSpeculative         string  `json:"text_speculative"`
-	BargeinPositionMs       float64 `json:"bargein_position_ms"`
-	BargeinPositionTextOffset int   `json:"bargein_position_text_offset"`
+	EventType                 string  `json:"event_type"`
+	Timestamp                 string  `json:"ts"`
+	SessionID                 string  `json:"session_id"`
+	TextActuallyPlayed        string  `json:"text_actually_played"`
+	TextSpeculative           string  `json:"text_speculative"`
+	BargeinPositionMs         float64 `json:"bargein_position_ms"`
+	BargeinPositionTextOffset int     `json:"bargein_position_text_offset"`
 }
 
 // fetchRecentBargeinEvent queries mod3's chat-flow log for the most recent

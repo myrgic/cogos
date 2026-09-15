@@ -18,9 +18,11 @@ import (
 const DefaultChunkSize = 2000
 
 // turnHeaderRe matches conversation turn markers in CogDoc format:
-//   ## [user]      ## [assistant]     ## [system]
-//   ## User        ## Assistant       ## System
-//   **User:**      **Assistant:**     **user:**
+//
+//	## [user]      ## [assistant]     ## [system]
+//	## User        ## Assistant       ## System
+//	**User:**      **Assistant:**     **user:**
+//
 // Also matches role markers from ChatGPT JSON exports rendered as markdown.
 var turnHeaderRe = regexp.MustCompile(
 	`(?m)^(?:#{1,3}\s*\[?\s*(?i:user|assistant|system|human|ai)\s*\]?\s*$|` +

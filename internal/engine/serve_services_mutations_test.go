@@ -11,6 +11,7 @@
 //  7. Enable/Disable idempotency — succeed even when double-called.
 //  8. Response shape — success/action/service_name fields always present.
 //  9. Nil manifest — mutation endpoints return 404 (manifest not loaded).
+//
 // 10. Status method — returns live snapshot without side effects.
 // 11. ObserverSupervisor mutations — always ErrNotControllable.
 // 12. supervisorFor routing — managed+controller → controller; observed → observer.
@@ -70,7 +71,8 @@ func defaultStatus(running bool) *ServiceStatus {
 }
 
 func (s *stubSupervisor) Start(_ context.Context, _ string, _ ServiceDef) (*ServiceStatus, error) {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.startCalled = true
 	if s.startErr != nil {
 		return s.startStatus, s.startErr
@@ -82,7 +84,8 @@ func (s *stubSupervisor) Start(_ context.Context, _ string, _ ServiceDef) (*Serv
 }
 
 func (s *stubSupervisor) Stop(_ context.Context, _ string, _ ServiceDef) (*ServiceStatus, error) {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.stopCalled = true
 	if s.stopErr != nil {
 		return s.stopStatus, s.stopErr
@@ -96,7 +99,8 @@ func (s *stubSupervisor) Stop(_ context.Context, _ string, _ ServiceDef) (*Servi
 }
 
 func (s *stubSupervisor) Restart(_ context.Context, _ string, _ ServiceDef) (*ServiceStatus, error) {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.restartCalled = true
 	if s.restartErr != nil {
 		return s.restartStatus, s.restartErr
@@ -108,7 +112,8 @@ func (s *stubSupervisor) Restart(_ context.Context, _ string, _ ServiceDef) (*Se
 }
 
 func (s *stubSupervisor) Enable(_ context.Context, _ string, _ ServiceDef) (*ServiceStatus, error) {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.enableCalled = true
 	if s.enableErr != nil {
 		return s.enableStatus, s.enableErr
@@ -120,7 +125,8 @@ func (s *stubSupervisor) Enable(_ context.Context, _ string, _ ServiceDef) (*Ser
 }
 
 func (s *stubSupervisor) Disable(_ context.Context, _ string, _ ServiceDef) (*ServiceStatus, error) {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.disableCalled = true
 	if s.disableErr != nil {
 		return s.disableStatus, s.disableErr
@@ -132,7 +138,8 @@ func (s *stubSupervisor) Disable(_ context.Context, _ string, _ ServiceDef) (*Se
 }
 
 func (s *stubSupervisor) Status(_ context.Context, _ string, _ ServiceDef) (*ServiceStatus, error) {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.statusCalled = true
 	if s.statusErr != nil {
 		return s.statusResult, s.statusErr

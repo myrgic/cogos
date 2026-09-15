@@ -42,21 +42,21 @@ const (
 // Stored in full in the session sidecar; stored as a truncated preview in
 // the turn.completed ledger event.
 type TurnRecord struct {
-	TurnID     string           `json:"turn_id"`               // UUID minted at turn-start
-	TurnIndex  int              `json:"turn_index"`             // 1-based within session
+	TurnID     string           `json:"turn_id"`    // UUID minted at turn-start
+	TurnIndex  int              `json:"turn_index"` // 1-based within session
 	SessionID  string           `json:"session_id"`
-	Timestamp  time.Time        `json:"timestamp"`              // turn-start, UTC
-	DurationMs int64            `json:"duration_ms,omitempty"`  // turn-end minus turn-start
-	Prompt     string           `json:"prompt"`                 // user message text (full)
-	Response   string           `json:"response"`               // assistant message text (full)
-	ToolCalls  []ToolCallRecord `json:"tool_calls,omitempty"`   // kernel-tool transcript
+	Timestamp  time.Time        `json:"timestamp"`             // turn-start, UTC
+	DurationMs int64            `json:"duration_ms,omitempty"` // turn-end minus turn-start
+	Prompt     string           `json:"prompt"`                // user message text (full)
+	Response   string           `json:"response"`              // assistant message text (full)
+	ToolCalls  []ToolCallRecord `json:"tool_calls,omitempty"`  // kernel-tool transcript
 	Provider   string           `json:"provider,omitempty"`
 	Model      string           `json:"model,omitempty"`
 	Usage      TurnUsage        `json:"usage,omitempty"`
-	BlockID    string           `json:"block_id,omitempty"`     // links to cogblock.ingest
-	Status     string           `json:"status,omitempty"`       // "ok" | "error"
-	Error      string           `json:"error,omitempty"`        // on status="error"
-	LedgerHash string           `json:"ledger_hash,omitempty"`  // turn.completed hash, filled after append
+	BlockID    string           `json:"block_id,omitempty"`    // links to cogblock.ingest
+	Status     string           `json:"status,omitempty"`      // "ok" | "error"
+	Error      string           `json:"error,omitempty"`       // on status="error"
+	LedgerHash string           `json:"ledger_hash,omitempty"` // turn.completed hash, filled after append
 
 	// Speculative-output fields — populated when barge-in interrupted playback
 	// mid-utterance (Slice 4). Response contains what was actually delivered to
@@ -64,9 +64,9 @@ type TurnRecord struct {
 	// played. BargeinPositionMs is the wall-time position into the utterance
 	// where playback stopped; BargeinPositionTextOffset is the character offset
 	// in Response (full text) marking the solidified/speculative boundary.
-	ResponseSpeculative         string  `json:"response_speculative,omitempty"`
-	BargeinPositionMs           float64 `json:"bargein_position_ms,omitempty"`
-	BargeinPositionTextOffset   int     `json:"bargein_position_text_offset,omitempty"`
+	ResponseSpeculative       string  `json:"response_speculative,omitempty"`
+	BargeinPositionMs         float64 `json:"bargein_position_ms,omitempty"`
+	BargeinPositionTextOffset int     `json:"bargein_position_text_offset,omitempty"`
 }
 
 // TurnUsage is a minimal (provider-neutral) token tally for a turn.
@@ -80,22 +80,22 @@ type TurnUsage struct {
 // Populated by the tool loop (tool_loop.go) and threaded back to the
 // handler so it can be stored alongside the prompt/response in the turn.
 type ToolCallRecord struct {
-	ID            string `json:"id,omitempty"`
-	Name          string `json:"name"`
-	Arguments     string `json:"arguments,omitempty"`
-	Result        string `json:"result,omitempty"`
-	DurationMs    int64  `json:"duration_ms,omitempty"`
-	Rejected      bool   `json:"rejected,omitempty"`
-	RejectReason  string `json:"reject_reason,omitempty"`
+	ID           string `json:"id,omitempty"`
+	Name         string `json:"name"`
+	Arguments    string `json:"arguments,omitempty"`
+	Result       string `json:"result,omitempty"`
+	DurationMs   int64  `json:"duration_ms,omitempty"`
+	Rejected     bool   `json:"rejected,omitempty"`
+	RejectReason string `json:"reject_reason,omitempty"`
 }
 
 // turnIndexCache tracks the next turn_index per session in-memory, seeded
 // from the sidecar on first access. Matches the lastEventCache pattern in
 // ledger.go — cheap O(1) increment after the first O(N) scan.
 var turnIndexCache = struct {
-	mu      sync.Mutex
-	next    map[string]int
-	primed  map[string]bool
+	mu     sync.Mutex
+	next   map[string]int
+	primed map[string]bool
 }{
 	next:   make(map[string]int),
 	primed: make(map[string]bool),

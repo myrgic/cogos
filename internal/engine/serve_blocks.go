@@ -8,10 +8,10 @@
 //	POST /v1/blocks/verify     — verify a list of hashes, return missing ones
 //
 // These endpoints enable workspace-to-workspace blob sync:
-//   1. Workspace A gets B's manifest
-//   2. Diffs against local manifest
-//   3. GETs missing blobs by hash
-//   4. Stores them locally
+//  1. Workspace A gets B's manifest
+//  2. Diffs against local manifest
+//  3. GETs missing blobs by hash
+//  4. Stores them locally
 //
 // Content is verified by hash on both read and write — the hash IS the address.
 //

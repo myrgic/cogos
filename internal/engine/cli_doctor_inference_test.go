@@ -6,6 +6,7 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -716,4 +717,43 @@ func TestDoctorProviderEndpoints_AnthropicUsesXAPIKeyViaProviderPing(t *testing.
 	if sawBearer {
 		t.Fatalf("doctor sent Authorization: Bearer to an anthropic endpoint — it is re-implementing auth instead of delegating to the provider")
 	}
+}
+
+// cog-review #635 round 6: a reachable endpoint that answers non-2xx must
+// FAIL. Ping() on OpenAICompatProvider/OllamaProvider previously returned nil
+// for any status; the fix is in the providers (the coupling), not doctor.
+func TestDoctorProviderEndpoints_ConnectedButNon2xxIsFail(t *testing.T) {
+	for _, code := range []int{403, 404, 502} {
+		t.Run(fmt.Sprintf("openai_%d", code), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(code)
+			}))
+			defer srv.Close()
+			root := t.TempDir()
+			writeProvidersYAML(t, root, srv.URL)
+			g := &DoctorGroup{}
+			doctorProviderEndpoints(g, root, DoctorOptions{})
+			c := findCheckInGroup(t, g, "providers.yaml endpoint: test-openai")
+			if c.Status != StatusFail {
+				t.Fatalf("HTTP %d must be FAIL; got %s %q", code, c.Status, c.Detail)
+			}
+			if !strings.Contains(c.Detail, fmt.Sprintf("HTTP %d", code)) {
+				t.Fatalf("detail must name the status: %q", c.Detail)
+			}
+		})
+	}
+	t.Run("ollama_502", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+		}))
+		defer srv.Close()
+		root := t.TempDir()
+		writeProvidersYAMLRaw(t, root, "providers:\n  ol:\n    type: ollama\n    endpoint: "+srv.URL+"\n    enabled: true\n")
+		g := &DoctorGroup{}
+		doctorProviderEndpoints(g, root, DoctorOptions{})
+		c := findCheckInGroup(t, g, "providers.yaml endpoint: ol")
+		if c.Status != StatusFail || !strings.Contains(c.Detail, "HTTP 502") {
+			t.Fatalf("ollama 502 must be FAIL naming the status; got %s %q", c.Status, c.Detail)
+		}
+	})
 }

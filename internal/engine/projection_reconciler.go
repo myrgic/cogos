@@ -482,11 +482,11 @@ func (r *ProjectionReconciler) BuildState(config any, live any, existing *reconc
 
 	for _, node := range nodes {
 		state.Resources = append(state.Resources, reconcile.Resource{
-			Address:     "lineage-node." + node.Frontmatter.ID,
-			Type:        "lineage-node",
-			Mode:        reconcile.ModeManaged,
-			Name:        node.Frontmatter.ID,
-			ExternalID:  node.Path,
+			Address:    "lineage-node." + node.Frontmatter.ID,
+			Type:       "lineage-node",
+			Mode:       reconcile.ModeManaged,
+			Name:       node.Frontmatter.ID,
+			ExternalID: node.Path,
 			Attributes: map[string]any{
 				"tier":                 node.Frontmatter.Tier,
 				"public_exposure_risk": node.Frontmatter.PublicExposureRisk,

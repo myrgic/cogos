@@ -32,7 +32,7 @@ type AgentSyncModel struct {
 	watchDir string
 	stateDir string
 
-	localIndex map[string]*bep.IndexEntry              // filename → entry
+	localIndex map[string]*bep.IndexEntry                  // filename → entry
 	peerIndex  map[bep.DeviceID]map[string]*bep.IndexEntry // per-peer index
 
 	nextRequestID atomic.Int32
