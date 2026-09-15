@@ -354,7 +354,7 @@ func checkArgvContracts(g *DoctorGroup, contracts []cliArgvContract) {
 		helpText := string(out)
 		var missing []string
 		for _, flag := range c.longFlags {
-			if !strings.Contains(helpText, flag) {
+			if !helpAdvertisesFlag(helpText, flag) {
 				missing = append(missing, flag)
 			}
 		}
@@ -368,6 +368,44 @@ func checkArgvContracts(g *DoctorGroup, contracts []cliArgvContract) {
 		g.add("argv vs CLI: "+c.provider, StatusOK,
 			fmt.Sprintf("%s: every buildArgs() flag present in `%s %s --help`", binPath, c.bin, strings.Join(c.subcmd, " ")))
 	}
+}
+
+// helpAdvertisesFlag reports whether --help output lists flag as a flag token,
+// not merely as a substring. A short flag like "-p" is a literal substring of
+// "--dangerously-skip-permissions" and "--provider" (the hyphen before the
+// word), so strings.Contains would report it present after the CLI dropped it —
+// exactly the silent drift this check exists to catch. A flag token is
+// delimited by start/end of text, whitespace, or the punctuation clap/cobra/flag
+// put around flags: , | ( ) [ ] < = /
+func helpAdvertisesFlag(helpText, flag string) bool {
+	for start := 0; ; {
+		i := strings.Index(helpText[start:], flag)
+		if i < 0 {
+			return false
+		}
+		i += start
+		end := i + len(flag)
+		before := byte(' ')
+		if i > 0 {
+			before = helpText[i-1]
+		}
+		after := byte(' ')
+		if end < len(helpText) {
+			after = helpText[end]
+		}
+		if isFlagBoundary(before) && isFlagBoundary(after) {
+			return true
+		}
+		start = i + 1
+	}
+}
+
+func isFlagBoundary(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\r', ',', '|', '(', ')', '[', ']', '<', '=', '/':
+		return true
+	}
+	return false
 }
 
 // resolveCLIBinary resolves name against PATH (via lookPathAll) plus every
@@ -640,7 +678,7 @@ func collectClaudeJSONTargets(home string) []externalClientTarget {
 		return nil
 	}
 	var doc struct {
-		McpServers map[string]claudeJSONMCPEntry            `json:"mcpServers"`
+		McpServers map[string]claudeJSONMCPEntry `json:"mcpServers"`
 		Projects   map[string]struct {
 			McpServers map[string]claudeJSONMCPEntry `json:"mcpServers"`
 		} `json:"projects"`
@@ -849,4 +887,3 @@ func sameHost(a, b string) bool {
 func neturlParseDoctor(raw string) (*neturl.URL, error) {
 	return neturl.Parse(raw)
 }
-

@@ -552,3 +552,30 @@ func readTestdataFixture(t *testing.T, rel string) string {
 	return string(data)
 }
 
+// Negative control for cog-review finding on PR #635: a short flag that is a
+// substring of a sibling long flag must NOT count as advertised. "-p" occurs
+// inside "--dangerously-skip-permissions" (the hyphen before "permissions");
+// naive strings.Contains reported it present after the CLI dropped it.
+func TestHelpAdvertisesFlag_ShortFlagNotSatisfiedBySubstring(t *testing.T) {
+	helpWithoutP := "Usage: claude [OPTIONS]\n  --dangerously-skip-permissions  Skip all prompts\n  --model <MODEL>\n  --provider <NAME>\n"
+	if helpAdvertisesFlag(helpWithoutP, "-p") {
+		t.Fatalf("-p reported present but only occurs inside --dangerously-skip-permissions / --provider")
+	}
+	if !helpAdvertisesFlag(helpWithoutP, "--model") {
+		t.Fatalf("--model should be present")
+	}
+	helpWithP := helpWithoutP + "  -p, --print  Print and exit\n"
+	if !helpAdvertisesFlag(helpWithP, "-p") {
+		t.Fatalf("-p should be present when listed as its own token")
+	}
+	// Forms other CLIs use: "-m, --model", "[-p]", "(-p|--print)", "-p=VAL".
+	for _, h := range []string{"  -m, --model", "usage: x [-p] file", "(-p|--print)", "  -p=VAL  print"} {
+		flag := "-m"
+		if !strings.Contains(h, "-m") {
+			flag = "-p"
+		}
+		if !helpAdvertisesFlag(h, flag) {
+			t.Fatalf("%q should advertise %s", h, flag)
+		}
+	}
+}
