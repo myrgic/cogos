@@ -1110,3 +1110,60 @@ func TestHandleModels_CapabilitiesAbsentOnAliasesWhenProviderDeclaresNone(t *tes
 		t.Errorf("capabilities key must be omitted for every alias/static entry when the frontier provider declares none; body: %s", raw)
 	}
 }
+
+// TestHandleModels_CapabilitiesLocalAlias verifies localAliasCapabilities
+// (review finding on #640: the "local" alias's capability propagation had
+// no dedicated test, unlike frontierCapabilities). Mirrors
+// localAliasContextLength's own coverage: resolves "local" to its target
+// provider (lmstudio-darkstar here) and asserts the alias entry carries
+// that provider's declared capabilities, and that a provider declaring
+// none omits the field on the alias too.
+func TestHandleModels_CapabilitiesLocalAlias(t *testing.T) {
+	t.Parallel()
+
+	t.Run("propagated", func(t *testing.T) {
+		t.Parallel()
+		local := newListerStub("lmstudio-darkstar", true, "gemma-4-26b")
+		local.capabilities.Capabilities = []Capability{CapVision, CapStreaming}
+		router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-darkstar"})
+		router.RegisterProvider(local)
+
+		srv := freshModelsServer(t, router)
+		resp := fetchModels(t, srv)
+		byID := modelIDSet(resp)
+
+		m, ok := byID["local"]
+		if !ok {
+			t.Fatalf("local alias missing; got %v", modelIDKeys(byID))
+		}
+		want := map[string]bool{"vision": true, "streaming": true}
+		if len(m.Capabilities) != len(want) {
+			t.Fatalf("local Capabilities = %v; want %v", m.Capabilities, want)
+		}
+		for _, c := range m.Capabilities {
+			if !want[c] {
+				t.Errorf("local Capabilities has unexpected entry %q (got %v)", c, m.Capabilities)
+			}
+		}
+	})
+
+	t.Run("absent when provider declares none", func(t *testing.T) {
+		t.Parallel()
+		local := newListerStub("lmstudio-darkstar", true, "gemma-4-26b")
+		local.capabilities.Capabilities = nil
+		router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-darkstar"})
+		router.RegisterProvider(local)
+
+		srv := freshModelsServer(t, router)
+		resp := fetchModels(t, srv)
+		byID := modelIDSet(resp)
+
+		m, ok := byID["local"]
+		if !ok {
+			t.Fatalf("local alias missing; got %v", modelIDKeys(byID))
+		}
+		if len(m.Capabilities) != 0 {
+			t.Errorf("local Capabilities = %v; want empty/absent", m.Capabilities)
+		}
+	})
+}
