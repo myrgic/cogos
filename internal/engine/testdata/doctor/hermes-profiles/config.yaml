@@ -1,0 +1,6 @@
+providers:
+  cogos:
+    api_key: test-api-key-value
+    base_url: PLACEHOLDER_KERNEL_URL_V1
+    name: CogOS Kernel (in-band)
+    transport: openai_chat

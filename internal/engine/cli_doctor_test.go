@@ -147,6 +147,18 @@ func TestNegativeControlNeverReportsOKOnEmptyDB(t *testing.T) {
 // they legitimately keep reporting on the real machine regardless of whether
 // the target workspace directory exists; this test does not constrain them.
 func TestDoctorAgainstNonexistentWorkspaceNeverReportsOK(t *testing.T) {
+	// Isolate PATH/HOME so the "inference surface" group's "argv vs CLI"
+	// check (myrgic/cogos#631) can't inject a real, machine-state FAIL
+	// (e.g. genuine codex CLI flag drift on the host running this test)
+	// into this workspace-absence invariant -- that check is intentionally
+	// machine-scoped, same as install integrity/config coherence above it,
+	// and a real CLI-drift FAIL there is correct behavior, just orthogonal
+	// to what this test asserts. t.Setenv (not os.Setenv) per this repo's
+	// own TestNoTestSetsHOMEGlobally rule: process-wide os.Setenv("HOME",
+	// ...) in a test is exactly the 2026-08 ~/.zshrc incident's root cause.
+	t.Setenv("PATH", "/nonexistent-doctor-test-path")
+	t.Setenv("HOME", t.TempDir())
+
 	root := filepath.Join(t.TempDir(), "does-not-exist", "nested")
 	report := RunDoctor(root, DoctorOptions{SkipNetwork: true})
 
@@ -816,10 +828,41 @@ func TestHelperProcessDoctorLint(t *testing.T) {
 	os.Exit(99) // unreached: runDoctorCmd always calls os.Exit itself
 }
 
+// minimalHelperEnv returns the parent's environment minus HOME and PATH,
+// which runDoctorLintHelper below sets explicitly to deterministic,
+// isolated values. Filtering here (rather than just appending overrides
+// after os.Environ()) matters because whichever HOME/PATH entry appears
+// LAST wins when a process reads its environment for a duplicate key on
+// some platforms' exec implementations -- filtering removes the ambiguity
+// instead of relying on override-via-append ordering.
+func minimalHelperEnv() []string {
+	var out []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "HOME=") || strings.HasPrefix(kv, "PATH=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 func runDoctorLintHelper(t *testing.T, scenario, root string) (exitCode int, stdout, stderr string) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcessDoctorLint$", "--", scenario, root)
-	cmd.Env = append(os.Environ(), doctorLintHelperEnv+"=1")
+	// Isolate PATH and HOME from the host running this test: the new
+	// "inference surface" group's "argv vs CLI" check (myrgic/cogos#631)
+	// probes whatever codex/pi/claude binaries are actually installed on
+	// PATH (plus ~/.nvm/versions/node/*/bin) and reports FAIL on real CLI
+	// flag drift -- exactly its job, but it means this end-to-end test's
+	// hardcoded exit-code expectations (deliberately zero FAILs possible
+	// against an empty workspace) would otherwise flip on any host with a
+	// stale/drifted CLI installed, or with no CLI installed at all vs. one
+	// installed with matching flags. A deterministic, PATH-less, HOME-less
+	// subprocess environment makes that check report UNKNOWN ("not found")
+	// on every host, keeping this test about the exit-code contract, not
+	// about the state of this host's node_modules/PATH.
+	isolatedHome := t.TempDir()
+	cmd.Env = append(minimalHelperEnv(), doctorLintHelperEnv+"=1", "HOME="+isolatedHome, "PATH=/nonexistent-doctor-test-path")
 	var outBuf, errBuf strings.Builder
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
