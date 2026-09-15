@@ -73,15 +73,26 @@ func doctorInferenceSurface(report *DoctorReport, root string, opts DoctorOption
 // full BuildRouter machinery (which additionally probes local backends,
 // auto-registers claude-oauth, etc. — more than a read-only doctor check
 // should trigger as a side effect).
-type providersYAMLShape struct {
-	Providers map[string]struct {
-		Type     string                 `yaml:"type"`
-		Endpoint string                 `yaml:"endpoint"`
-		Model    string                 `yaml:"model"`
-		Enabled  *bool                  `yaml:"enabled"`
-		Options  map[string]interface{} `yaml:"options"`
-	} `yaml:"providers"`
+// providerYAMLEntry is one provider block as doctor reads it — the subset of
+// ProviderConfig fields the inference-surface checks need.
+type providerYAMLEntry struct {
+	Type      string                 `yaml:"type"`
+	Endpoint  string                 `yaml:"endpoint"`
+	Model     string                 `yaml:"model"`
+	Enabled   *bool                  `yaml:"enabled"`
+	APIKeyEnv string                 `yaml:"api_key_env"`
+	Options   map[string]interface{} `yaml:"options"`
 }
+
+type providersYAMLShape struct {
+	Providers map[string]providerYAMLEntry `yaml:"providers"`
+}
+
+// cliProviderTypes overload ProviderConfig.Endpoint as a binary PATH, not an
+// HTTP URL (provider_codex.go:156, provider_claudecode.go:88 "abuse Endpoint
+// field for binary path", provider_pi.go:75). Probing them over HTTP would
+// be a spurious FAIL; check (c) validates them via their real CLI instead.
+var cliProviderTypes = map[string]bool{"codex": true, "claude-code": true, "pi": true}
 
 func (p providersYAMLShape) isEnabled(name string) bool {
 	pc := p.Providers[name]
@@ -109,13 +120,7 @@ func loadProvidersYAMLDoctor(root string) (providersYAMLShape, bool, error) {
 		return providersYAMLShape{}, true, fmt.Errorf("parse providers.yaml: %w", err)
 	}
 	if base.Providers == nil {
-		base.Providers = map[string]struct {
-			Type     string                 `yaml:"type"`
-			Endpoint string                 `yaml:"endpoint"`
-			Model    string                 `yaml:"model"`
-			Enabled  *bool                  `yaml:"enabled"`
-			Options  map[string]interface{} `yaml:"options"`
-		}{}
+		base.Providers = map[string]providerYAMLEntry{}
 	}
 
 	localPath := filepath.Join(root, ".cog", "config", "providers.local.yaml")
@@ -141,6 +146,9 @@ func loadProvidersYAMLDoctor(root string) (providersYAMLShape, bool, error) {
 				}
 				if pc.Enabled != nil {
 					merged.Enabled = pc.Enabled
+				}
+				if pc.APIKeyEnv != "" {
+					merged.APIKeyEnv = pc.APIKeyEnv
 				}
 				if pc.Options != nil {
 					merged.Options = pc.Options
@@ -184,9 +192,10 @@ func doctorProviderEndpoints(g *DoctorGroup, root string, opts DoctorOptions) {
 		if !pcfg.isEnabled(name) {
 			continue
 		}
-		if pc.Endpoint == "" {
-			// Subprocess-CLI providers (claude-code, codex) have no HTTP
-			// endpoint to probe — not a finding, just nothing to check here.
+		if pc.Endpoint == "" || cliProviderTypes[pc.Type] {
+			// No HTTP surface: either nothing declared, or a subprocess-CLI
+			// provider whose `endpoint` is a binary path (see cliProviderTypes).
+			// Not a finding; check (c) covers CLI providers.
 			continue
 		}
 		checked++
@@ -209,6 +218,18 @@ func doctorProviderEndpoints(g *DoctorGroup, root string, opts DoctorOptions) {
 			g.add("providers.yaml endpoint: "+name, StatusFail, fmt.Sprintf("bad request for %s: %v", url, rerr))
 			continue
 		}
+		// Mirror OpenAICompatProvider (provider_openai.go:107): the provider
+		// sends Authorization: Bearer $api_key_env; so must the probe, or an
+		// auth-gated endpoint (lmstudio-eclipse) reports a false 401 (#638).
+		authNote := ""
+		if pc.APIKeyEnv != "" {
+			if key := os.Getenv(pc.APIKeyEnv); key != "" {
+				req.Header.Set("Authorization", "Bearer "+key)
+				authNote = fmt.Sprintf(" (auth: $%s, len=%d)", pc.APIKeyEnv, len(key))
+			} else {
+				authNote = fmt.Sprintf(" (auth: $%s UNSET in this environment)", pc.APIKeyEnv)
+			}
+		}
 		resp, herr := http.DefaultClient.Do(req)
 		if herr != nil {
 			cancel()
@@ -220,7 +241,7 @@ func doctorProviderEndpoints(g *DoctorGroup, root string, opts DoctorOptions) {
 		cancel()
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			g.add("providers.yaml endpoint: "+name, StatusFail, fmt.Sprintf("%s: HTTP %d", url, resp.StatusCode))
+			g.add("providers.yaml endpoint: "+name, StatusFail, fmt.Sprintf("%s: HTTP %d%s", url, resp.StatusCode, authNote))
 			continue
 		}
 
@@ -236,14 +257,14 @@ func doctorProviderEndpoints(g *DoctorGroup, root string, opts DoctorOptions) {
 				}
 				if !declaredPresent {
 					g.add("providers.yaml endpoint: "+name, StatusWarn,
-						fmt.Sprintf("%s answered (%d models) but declared model %q is not among them", url, len(listing.Data), pc.Model))
+						fmt.Sprintf("%s answered (%d models) but declared model %q is not among them%s", url, len(listing.Data), pc.Model, authNote))
 					continue
 				}
 			}
-			g.add("providers.yaml endpoint: "+name, StatusOK, fmt.Sprintf("%s answered, %d model(s), declared model present", url, len(listing.Data)))
+			g.add("providers.yaml endpoint: "+name, StatusOK, fmt.Sprintf("%s answered, %d model(s), declared model present%s", url, len(listing.Data), authNote))
 			continue
 		}
-		g.add("providers.yaml endpoint: "+name, StatusOK, fmt.Sprintf("%s answered (non-OpenAI-shaped or empty listing)", url))
+		g.add("providers.yaml endpoint: "+name, StatusOK, fmt.Sprintf("%s answered (non-OpenAI-shaped or empty listing)%s", url, authNote))
 	}
 
 	if checked == 0 {

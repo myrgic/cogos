@@ -179,6 +179,17 @@ func writeProvidersYAML(t *testing.T, root, endpoint string) {
 	}
 }
 
+func writeProvidersYAMLRaw(t *testing.T, root, content string) {
+	t.Helper()
+	cfgDir := filepath.Join(root, ".cog", "config")
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "providers.yaml"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // (c) provider argv vs installed CLI
 // ---------------------------------------------------------------------------
@@ -612,5 +623,61 @@ func TestCliArgvContracts_CoverEveryBuildArgsFlag(t *testing.T) {
 				t.Errorf("%s: buildArgs can emit %s but the derived doctor contract does not include it — a fixture branch is off", prov, f)
 			}
 		}
+	}
+}
+
+// cog-review #635 round 4: `endpoint` is overloaded as a binary PATH for
+// codex/claude-code/pi (provider_codex_test.go:156 uses
+// ProviderConfig{Endpoint: "/opt/codex/bin/codex"}). The HTTP probe must skip
+// those by TYPE, not by empty-endpoint, or it FAILs on a valid config.
+func TestDoctorProviderEndpoints_SkipsCLIProviderWithBinaryPathEndpoint(t *testing.T) {
+	root := t.TempDir()
+	writeProvidersYAMLRaw(t, root, `providers:
+  codex:
+    type: codex
+    endpoint: /opt/codex/bin/codex
+    enabled: true
+  claude-code:
+    type: claude-code
+    endpoint: /usr/local/bin/claude
+`)
+	g := &DoctorGroup{}
+	doctorProviderEndpoints(g, root, DoctorOptions{})
+	for _, c := range g.Checks {
+		if strings.HasPrefix(c.Name, "providers.yaml endpoint: codex") || strings.HasPrefix(c.Name, "providers.yaml endpoint: claude-code") {
+			t.Fatalf("CLI provider with binary-path endpoint must not be HTTP-probed; got %s=%s %q", c.Name, c.Status, c.Detail)
+		}
+	}
+}
+
+// #638: the probe must send Authorization: Bearer $api_key_env exactly as
+// OpenAICompatProvider does, or auth-gated endpoints report a false 401.
+func TestDoctorProviderEndpoints_SendsAPIKeyEnv(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		if gotAuth != "Bearer sekrit" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"m1"}]}`))
+	}))
+	defer srv.Close()
+	t.Setenv("DOCTOR_TEST_LMS_KEY", "sekrit")
+	root := t.TempDir()
+	// Base declares the provider; the LOCAL overlay carries api_key_env — the
+	// shape darkstar actually uses. The overlay merge must carry the field.
+	writeProvidersYAMLRaw(t, root, "providers:\n  lms:\n    type: openai\n    endpoint: "+srv.URL+"\n    model: m1\n")
+	if err := os.WriteFile(filepath.Join(root, ".cog", "config", "providers.local.yaml"), []byte("providers:\n  lms:\n    api_key_env: DOCTOR_TEST_LMS_KEY\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	g := &DoctorGroup{}
+	doctorProviderEndpoints(g, root, DoctorOptions{})
+	c := findCheckInGroup(t, g, "providers.yaml endpoint: lms")
+	if c.Status != StatusOK {
+		t.Fatalf("expected OK with api_key_env sent; got %s %q (server saw Authorization=%q)", c.Status, c.Detail, gotAuth)
+	}
+	if !strings.Contains(c.Detail, "$DOCTOR_TEST_LMS_KEY") || strings.Contains(c.Detail, "sekrit") {
+		t.Fatalf("detail must name the env var and never the value: %q", c.Detail)
 	}
 }
