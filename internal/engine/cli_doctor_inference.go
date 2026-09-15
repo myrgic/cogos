@@ -297,15 +297,23 @@ func argvFlagTokens(args []string) []string {
 	return out
 }
 
-// doctorArgvRequest is a request with every optional field populated so
-// conditional flags (--thinking, --tools, --system-prompt, --effort,
-// --append-system-prompt, --allowedTools, …) are exercised too. Any flag the
-// provider CAN emit must be one the CLI accepts.
+// doctorArgvRequest is a request with every request-gated field populated so
+// conditional flags are exercised. Config-gated flags are turned on by the
+// ProviderConfig in cliArgvContracts. Between the two, every branch of each
+// buildArgs() is live, so the derived contract is the SUPERSET of what any
+// real request can emit — any flag the provider CAN emit must be one the
+// installed CLI accepts. TestCliArgvContracts_CoverEveryBuildArgsFlag pins
+// this by diffing against the flag literals in each provider file.
 func doctorArgvRequest() *CompletionRequest {
+	cost := 1.0
 	return &CompletionRequest{
 		SystemPrompt:  "doctor",
 		Messages:      []ProviderMessage{{Role: "user", Content: "doctor"}},
 		ModelOverride: "doctor-model",
+		Metadata: RequestMetadata{
+			RequestID:  "doctor", // → --no-session-persistence (claude-code)
+			MaxCostUSD: &cost,    // → --max-budget-usd (claude-code)
+		},
 	}
 }
 
@@ -316,11 +324,23 @@ func cliArgvContracts() []cliArgvContract {
 	req := doctorArgvRequest()
 	codex := NewCodexProvider("doctor-codex", ProviderConfig{Model: "doctor-model", Options: map[string]any{"effort": "medium", "sandbox": "read-only"}})
 	pi := NewPiProvider("doctor-pi", ProviderConfig{Model: "doctor-model", Options: map[string]any{"provider": "ollama", "thinking": "medium", "tools": "read"}}, nil)
-	cc := NewClaudeCodeProvider("doctor-claude", ProviderConfig{Model: "sonnet", Options: map[string]any{"effort": "medium"}}, nil)
+	cc := NewClaudeCodeProvider("doctor-claude", ProviderConfig{Model: "sonnet", Options: map[string]any{
+		"effort":           "medium",
+		"mcp_config":       "/dev/null", // → --mcp-config + --strict-mcp-config
+		"allowed_tools":    "Read",      // → --allowedTools
+		"disallowed_tools": "Bash",      // → --disallowedTools
+	}}, nil)
+	// Complete()/Stream() append transport flags AFTER buildArgs() — the
+	// claude-code stream-json trio (provider_claudecode.go Complete+Stream)
+	// and pi's --print → --mode json rewrite (provider_pi.go Stream). Those
+	// are part of the real argv too; a derived contract that stopped at
+	// buildArgs() would miss them (found by TestCliArgvContracts_CoverEveryBuildArgsFlag).
+	ccArgv := append(cc.buildArgs(req), "--output-format", "stream-json", "--verbose", "--include-partial-messages")
+	piArgv := append(pi.buildArgs(req), "--mode", "json")
 	return []cliArgvContract{
 		{provider: "codex", bin: "codex", subcmd: []string{"exec"}, flags: argvFlagTokens(codex.buildArgs(req))},
-		{provider: "pi", bin: "pi", subcmd: nil, flags: argvFlagTokens(pi.buildArgs(req))},
-		{provider: "claude", bin: "claude", subcmd: nil, flags: argvFlagTokens(cc.buildArgs(req))},
+		{provider: "pi", bin: "pi", subcmd: nil, flags: argvFlagTokens(piArgv)},
+		{provider: "claude", bin: "claude", subcmd: nil, flags: argvFlagTokens(ccArgv)},
 	}
 }
 

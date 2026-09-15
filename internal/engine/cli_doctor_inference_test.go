@@ -216,10 +216,10 @@ func TestCheckArgvContracts_OK(t *testing.T) {
 	report := &DoctorReport{}
 	g := report.addGroup("inference surface")
 	checkArgvContracts(g, []cliArgvContract{{
-		provider:  "fake",
-		bin:       "fake-cli-ok",
-		subcmd:    []string{"exec"},
-		flags: []string{"-m", "--config", "--sandbox", "--full-auto", "--skip-git-repo-check", "--json"},
+		provider: "fake",
+		bin:      "fake-cli-ok",
+		subcmd:   []string{"exec"},
+		flags:    []string{"-m", "--config", "--sandbox", "--full-auto", "--skip-git-repo-check", "--json"},
 	}})
 
 	c := findCheckInGroup(t, g, "argv vs CLI: fake")
@@ -240,10 +240,10 @@ func TestCheckArgvContracts_FAIL(t *testing.T) {
 	report := &DoctorReport{}
 	g := report.addGroup("inference surface")
 	checkArgvContracts(g, []cliArgvContract{{
-		provider:  "fake",
-		bin:       "fake-cli-missing-flag",
-		subcmd:    []string{"exec"},
-		flags: []string{"-m", "--config", "--sandbox", "--full-auto", "--skip-git-repo-check", "--json"},
+		provider: "fake",
+		bin:      "fake-cli-missing-flag",
+		subcmd:   []string{"exec"},
+		flags:    []string{"-m", "--config", "--sandbox", "--full-auto", "--skip-git-repo-check", "--json"},
 	}})
 
 	c := findCheckInGroup(t, g, "argv vs CLI: fake")
@@ -576,6 +576,41 @@ func TestHelpAdvertisesFlag_ShortFlagNotSatisfiedBySubstring(t *testing.T) {
 		}
 		if !helpAdvertisesFlag(h, flag) {
 			t.Fatalf("%q should advertise %s", h, flag)
+		}
+	}
+}
+
+// Every "--flag"/"-x" literal in a CLI provider's source that buildArgs can
+// emit must appear in the derived contract. This is the guard cog-review asked
+// for on #635 round 3: the derived contract silently omitted --allowedTools,
+// --mcp-config, --max-budget-usd and --no-session-persistence because the
+// doctor's fixture config/request did not turn those branches on.
+func TestCliArgvContracts_CoverEveryBuildArgsFlag(t *testing.T) {
+	// Flags a provider file mentions that are NOT emitted by buildArgs (probe
+	// or version calls) — excluded explicitly so the test stays honest.
+	notArgv := map[string]bool{"--version": true, "--help": true}
+	want := map[string][]string{
+		"codex": {"-m", "--config", "--sandbox", "--skip-git-repo-check", "--json"},
+		// "--print" is only ever rewritten to "--mode" by Stream(); pi's
+		// buildArgs emits "-p". "--mode" IS sent (Stream) and must be checked.
+		"pi":     {"-p", "--provider", "--model", "--thinking", "--tools", "--system-prompt", "--no-session", "--no-extensions", "--mode"},
+		"claude": {"-p", "--dangerously-skip-permissions", "--model", "--effort", "--append-system-prompt", "--mcp-config", "--strict-mcp-config", "--allowedTools", "--disallowedTools", "--max-budget-usd", "--no-session-persistence", "--output-format", "--verbose", "--include-partial-messages"},
+	}
+	got := map[string]map[string]bool{}
+	for _, c := range cliArgvContracts() {
+		got[c.provider] = map[string]bool{}
+		for _, f := range c.flags {
+			got[c.provider][f] = true
+		}
+	}
+	for prov, flags := range want {
+		for _, f := range flags {
+			if notArgv[f] {
+				continue
+			}
+			if !got[prov][f] {
+				t.Errorf("%s: buildArgs can emit %s but the derived doctor contract does not include it — a fixture branch is off", prov, f)
+			}
 		}
 	}
 }
