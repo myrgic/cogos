@@ -1,2 +1,5 @@
 model = "x"
 model_reasoning_effort = "low"
+
+[projects."/some/other/path"]
+model = "wrong-should-not-match"

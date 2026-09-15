@@ -251,6 +251,20 @@ func TestCodexDefaultModel_MissingFileReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestCodexDefaultModel_IgnoresNestedTableModel guards against the fixture's
+// [projects."..."] table having its own `model = "..."` key (real ~/.codex
+// config.tomls carry one such table per project directory the CLI has been
+// run from) shadowing the top-level default. Only the portion of the file
+// before the first table header should be searched.
+func TestCodexDefaultModel_IgnoresNestedTableModel(t *testing.T) {
+	resetCodexHomeDirForTest(t, "testdata/codex_home_fixture")
+
+	got := codexDefaultModel()
+	if got != "x" {
+		t.Fatalf("codexDefaultModel() = %q, want top-level %q (nested table's model must not shadow it)", got, "x")
+	}
+}
+
 // TestCodexParse_GoldenNDJSON runs the provider's real NDJSON event parser
 // over a golden fixture captured from an actual `codex exec --json` invocation
 // (codex-cli 0.154.0, see internal/engine/testdata/codex_exec_pong.ndjson),

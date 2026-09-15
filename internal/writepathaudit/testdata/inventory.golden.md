@@ -332,8 +332,8 @@ Total subprocess sites: 76
 | _(not set — inherits the process's own working directory)_ | `exec.Command(cmd, "--version")` | internal/engine/provider_claudeoauth.go:224 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "security", "find-generic-password", "-s", "Claude Code-credentials", "-w")` | internal/engine/provider_claudeoauth.go:302 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(runCtx, actuatorPath)` | internal/engine/provider_claudeoauth.go:560 | internal:engine |
-| `{home}` | `exec.CommandContext(ctx, binary, "login", "status")` | internal/engine/provider_codex.go:56 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, binary, "--version")` | internal/engine/provider_codex.go:204 | internal:engine |
+| `{home}` | `exec.CommandContext(ctx, binary, "login", "status")` | internal/engine/provider_codex.go:133 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, binary, "--version")` | internal/engine/provider_codex.go:367 | internal:engine |
 | `{opts.Dir}` | `exec.CommandContext(ctx, binary, args...)` | internal/engine/provider_env.go:44 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(psCtx, p.lmsCLI, "ps", "--json")` | internal/engine/provider_lms_model_state.go:387 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, p.lmsCLI, "unload", model)` | internal/engine/provider_lms_model_state.go:768 | internal:engine |

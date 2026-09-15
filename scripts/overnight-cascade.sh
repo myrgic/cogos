@@ -57,9 +57,9 @@ ollama_generate() {
 
 codex_generate() {
     local prompt="$1"
-    codex exec -m "gpt-5.3-codex-spark" \
+    codex exec -m "gpt-5.6-terra" \
         --config model_reasoning_effort="low" \
-        --sandbox read-only --full-auto --skip-git-repo-check \
+        --sandbox read-only --skip-git-repo-check \
         -C "$COGOS_WORKSPACE" \
         "$prompt" 2>/dev/null
 }

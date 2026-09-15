@@ -3254,9 +3254,9 @@
     },
     {
       "file": "internal/engine/provider_codex.go",
-      "line": 56,
+      "line": 133,
       "column": 9,
-      "func": "func literal (line 55)",
+      "func": "func literal (line 132)",
       "subsystem": "internal:engine",
       "raw": "exec.CommandContext(ctx, binary, \"login\", \"status\")",
       "dir": "{home}",
@@ -3264,7 +3264,7 @@
     },
     {
       "file": "internal/engine/provider_codex.go",
-      "line": 204,
+      "line": 367,
       "column": 9,
       "func": "(*CodexProvider).Ping",
       "subsystem": "internal:engine",
