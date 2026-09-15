@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # overnight-cascade.sh — Run inference cascades overnight using only local models.
 #
-# Supervisor: Codex (gpt-5.3-codex, low cost) OR gemma4:26b (free)
+# Supervisor: Codex (gpt-5.6-terra, low cost) OR gemma4:26b (free)
 # Agents: gemma4:26b / gemma4:e4b / qwen3.5:9b via Ollama (free)
 # Claude credits used: ZERO
 #
@@ -57,9 +57,9 @@ ollama_generate() {
 
 codex_generate() {
     local prompt="$1"
-    codex exec -m "gpt-5.3-codex-spark" \
+    codex exec -m "gpt-5.6-terra" \
         --config model_reasoning_effort="low" \
-        --sandbox read-only --full-auto --skip-git-repo-check \
+        --sandbox read-only --skip-git-repo-check \
         -C "$COGOS_WORKSPACE" \
         "$prompt" 2>/dev/null
 }

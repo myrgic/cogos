@@ -292,9 +292,9 @@ Be concise — 5-10 sentences max."""
     if SUPERVISOR_MODE == "codex":
         try:
             result = subprocess.run(
-                ["codex", "exec", "-m", "gpt-5.3-codex-spark",
+                ["codex", "exec", "-m", "gpt-5.6-terra",
                  "--config", "model_reasoning_effort=low",
-                 "--sandbox", "read-only", "--full-auto", "--skip-git-repo-check",
+                 "--sandbox", "read-only", "--skip-git-repo-check",
                  prompt],
                 capture_output=True, text=True, timeout=120)
             analysis = result.stdout.strip()
