@@ -134,7 +134,7 @@ Total sites: 239  (cog: 97, home: 2, elsewhere: 14, unanchored: 85, dynamic: 41)
 | pattern | writer func | file:line | subsystem |
 |---|---|---|---|
 | `<TempDir>` | GenerateMCPConfig (`os.CreateTemp`) | harness/claude.go:205 | harness |
-| `<TempDir>` | writeCodexSchemaFile (`os.CreateTemp`) | harness/codex.go:213 | harness |
+| `<TempDir>` | writeCodexSchemaFile (`os.CreateTemp`) | harness/codex.go:265 | harness |
 | `<TempDir>` | gitCogTreeHash (`os.CreateTemp`) | internal/coherence/coherence.go:156 | internal:coherence |
 | `<TempDir>` | (*modalityProxy).playAudio (`os.CreateTemp`) | internal/engine/mcp_modality_proxy.go:853 | internal:engine |
 | `<TempDir>` | streamFetch (`os.CreateTemp`) | internal/engine/remote_hydrate_spike.go:195 | internal:engine |
@@ -300,8 +300,8 @@ Total subprocess sites: 76
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, bw, "get", "password", name)` | envspec/resolvers.go:165 | other |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "security", "find-generic-password", "-s", r.service, "-a", account, "-w")` | envspec/resolvers.go:305 | other |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "security", "add-generic-password", "-s", r.service, "-a", account, "-w", value, "-U")` | envspec/resolvers.go:321 | other |
-| `<unresolved>` | `exec.CommandContext(ctx, CodexCommand, args...)` | harness/codex.go:348 | harness |
-| `<unresolved>` | `exec.CommandContext(ctx, CodexCommand, args...)` | harness/codex.go:495 | harness |
+| `<unresolved>` | `exec.CommandContext(ctx, CodexCommand, args...)` | harness/codex.go:400 | harness |
+| `<unresolved>` | `exec.CommandContext(ctx, CodexCommand, args...)` | harness/codex.go:547 | harness |
 | `<unresolved>` | `exec.CommandContext(ctx, ClaudeCommand, args...)` | harness/harness.go:435 | harness |
 | `<unresolved>` | `exec.CommandContext(ctx, ClaudeCommand, args...)` | harness/harness.go:882 | harness |
 | `{opts.Cwd}` | `exec.CommandContext(ctx, bin, args...)` | internal/acp/claudecli.go:87 | internal:acp |

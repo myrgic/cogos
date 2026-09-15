@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # overnight-cascade.sh — Run inference cascades overnight using only local models.
 #
-# Supervisor: Codex (gpt-5.3-codex, low cost) OR gemma4:26b (free)
+# Supervisor: Codex (gpt-5.6-terra, low cost) OR gemma4:26b (free)
 # Agents: gemma4:26b / gemma4:e4b / qwen3.5:9b via Ollama (free)
 # Claude credits used: ZERO
 #

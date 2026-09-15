@@ -9,6 +9,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,17 +22,67 @@ import (
 
 const (
 	CodexCommand = "codex"
-	// defaultCodexModel is the fallback model id used when a caller passes
-	// the bare "codex" alias without a specific model. codex-cli's own
-	// catalog (~/.codex/models_cache.json) drifts over time as OpenAI
-	// retires/renames slugs (see myrgic/cogos#627, where CodexProvider's
-	// equivalent hardcoded default had already gone stale); this harness
-	// package is a separate Go module without access to internal/engine's
-	// config.toml/models_cache.json discovery, so the id here needs to be
-	// re-checked against a live models_cache.json periodically rather than
-	// assumed evergreen.
-	defaultCodexModel = "gpt-5.6-terra"
 )
+
+// codexHomeDir resolves the Codex CLI's config directory: $CODEX_HOME if set,
+// else ~/.codex, matching the CLI's own resolution order. Package-level var
+// so tests can point it at a fixture directory. Mirrors the equivalent seam
+// in internal/engine/provider_codex.go (a separate Go module, hence the
+// duplication rather than a shared import).
+var codexHomeDir = func() string {
+	if home := os.Getenv("CODEX_HOME"); home != "" {
+		return home
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".codex")
+	}
+	return ""
+}
+
+// codexConfigModelRe matches a `model = "..."` line in config.toml.
+var codexConfigModelRe = regexp.MustCompile(`(?m)^\s*model\s*=\s*"([^"]+)"\s*$`)
+
+// codexTableHeaderRe matches a TOML table header line, used to scope the
+// config.toml search to the top-of-file global section (see
+// defaultCodexModel's doc comment).
+var codexTableHeaderRe = regexp.MustCompile(`(?m)^\s*\[`)
+
+// fallbackCodexModel is used only when config.toml has no top-level `model`
+// key and $CODEX_HOME can't be resolved at all — codex-cli itself would still
+// apply its own default in that case, but resolveCodexModel needs some
+// non-empty string to build --model with. Kept intentionally minimal since
+// it's the last resort, not the primary source of truth.
+const fallbackCodexModel = "gpt-5.6-terra"
+
+// defaultCodexModel returns the fallback model id used when a caller passes
+// the bare "codex" alias (or no model) without a specific model: read live
+// from $CODEX_HOME/config.toml's top-level `model = "..."` key (same
+// discovery internal/engine/provider_codex.go's codexDefaultModel performs;
+// duplicated here rather than imported because harness/ is a separate Go
+// module — see harness/go.mod). Falls back to fallbackCodexModel only when
+// config.toml has no top-level model key at all, so a request always has
+// some resolvable model id even on a host with an unusual ~/.codex layout.
+// Only the portion of config.toml before the first `[...]` table header is
+// searched, so a same-named key nested in a later table (e.g.
+// `[projects."/some/path"]`) can't be mistaken for the real top-level default.
+func defaultCodexModel() string {
+	dir := codexHomeDir()
+	if dir == "" {
+		return fallbackCodexModel
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "config.toml"))
+	if err != nil {
+		return fallbackCodexModel
+	}
+	if loc := codexTableHeaderRe.FindIndex(data); loc != nil {
+		data = data[:loc[0]]
+	}
+	m := codexConfigModelRe.FindSubmatch(data)
+	if m == nil {
+		return fallbackCodexModel
+	}
+	return string(m[1])
+}
 
 type codexOutputState struct {
 	content          string
@@ -84,7 +136,7 @@ func resolveCodexModel(req *InferenceRequest) string {
 
 	switch {
 	case model == "", model == "codex":
-		return defaultCodexModel
+		return defaultCodexModel()
 	case strings.HasPrefix(model, "codex/"):
 		return strings.TrimPrefix(model, "codex/")
 	default:

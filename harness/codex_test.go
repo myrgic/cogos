@@ -5,7 +5,19 @@ import (
 	"testing"
 )
 
+// resetCodexHomeDirForTest overrides codexHomeDir to point at a fixture
+// directory for the duration of the test, restoring the original on cleanup.
+// Mirrors internal/engine/provider_codex_test.go's equivalent helper.
+func resetCodexHomeDirForTest(t *testing.T, dir string) {
+	t.Helper()
+	old := codexHomeDir
+	codexHomeDir = func() string { return dir }
+	t.Cleanup(func() { codexHomeDir = old })
+}
+
 func TestBuildCodexArgs_DefaultAlias(t *testing.T) {
+	resetCodexHomeDirForTest(t, "testdata/codex_home_fixture")
+
 	req := &InferenceRequest{
 		Prompt: "Summarize the repo",
 		Model:  "codex",
@@ -24,7 +36,32 @@ func TestBuildCodexArgs_DefaultAlias(t *testing.T) {
 		t.Fatalf("expected --json mode, got %v", args)
 	}
 	if !strings.Contains(joined, "--model gpt-5.6-terra") {
-		t.Fatalf("expected codex alias to resolve to gpt-5.6-terra, got %v", args)
+		t.Fatalf("expected codex alias to resolve to gpt-5.6-terra (from testdata/codex_home_fixture/config.toml), got %v", args)
+	}
+}
+
+// TestDefaultCodexModel_FallsBackWhenConfigMissing guards the "no ~/.codex at
+// all" path: defaultCodexModel must still return a non-empty model id
+// (fallbackCodexModel) rather than "", so BuildCodexArgs never emits a bare
+// `--model` with no value.
+func TestDefaultCodexModel_FallsBackWhenConfigMissing(t *testing.T) {
+	resetCodexHomeDirForTest(t, "testdata/does-not-exist")
+
+	got := defaultCodexModel()
+	if got != fallbackCodexModel {
+		t.Fatalf("defaultCodexModel() = %q, want fallback %q when config.toml is missing", got, fallbackCodexModel)
+	}
+}
+
+// TestDefaultCodexModel_IgnoresNestedTableModel mirrors
+// internal/engine/provider_codex_test.go's equivalent: a `model = "..."` key
+// nested inside a later [table] must not shadow the real top-level default.
+func TestDefaultCodexModel_IgnoresNestedTableModel(t *testing.T) {
+	resetCodexHomeDirForTest(t, "testdata/codex_home_fixture")
+
+	got := defaultCodexModel()
+	if got != "gpt-5.6-terra" {
+		t.Fatalf("defaultCodexModel() = %q, want top-level %q (nested table's model must not shadow it)", got, "gpt-5.6-terra")
 	}
 }
 

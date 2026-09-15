@@ -39,7 +39,7 @@
     },
     {
       "file": "harness/codex.go",
-      "line": 213,
+      "line": 265,
       "column": 18,
       "primitive": "os.CreateTemp",
       "func": "writeCodexSchemaFile",
@@ -2934,7 +2934,7 @@
     },
     {
       "file": "harness/codex.go",
-      "line": 348,
+      "line": 400,
       "column": 9,
       "func": "(*Harness).runCodexInference",
       "subsystem": "harness",
@@ -2944,7 +2944,7 @@
     },
     {
       "file": "harness/codex.go",
-      "line": 495,
+      "line": 547,
       "column": 9,
       "func": "(*Harness).runCodexInferenceStream",
       "subsystem": "harness",
