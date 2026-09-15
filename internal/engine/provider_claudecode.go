@@ -176,11 +176,20 @@ func (p *ClaudeCodeProvider) probeAvailable(ctx context.Context) bool {
 }
 
 // Capabilities returns what this provider supports.
+//
+// CapVision (#640): the claude-code CLI drives the same claude-* model
+// family as claude-oauth/AnthropicProvider (sonnet/opus/haiku, all
+// genuinely multimodal), so it declares CapVision alongside them — omitting
+// it here would make /v1/models advertise vision for the direct-API
+// frontier providers but not for the CLI-backed one serving the identical
+// models, which is exactly the "provider name says one thing, upstream says
+// another" gap #640 exists to close.
 func (p *ClaudeCodeProvider) Capabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		Capabilities: []Capability{
 			CapStreaming,
 			CapToolUse,
+			CapVision,
 			CapLongContext,
 			CapCaching,
 		},

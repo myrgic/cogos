@@ -344,9 +344,14 @@ func (p *CodexProvider) Capabilities() ProviderCapabilities {
 	}
 
 	return ProviderCapabilities{
+		// CapVision (#640): every model codex's catalog currently serves is a
+		// gpt-* family model, and the whole gpt-4o/gpt-5 line is multimodal —
+		// unlike PiProvider (backend-dependent, left alone) this is a real
+		// property of what's actually behind this provider, not a guess.
 		Capabilities: []Capability{
 			CapStreaming,
 			CapToolUse,
+			CapVision,
 		},
 		MaxContextTokens:   maxContext,
 		MaxOutputTokens:    0,

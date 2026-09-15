@@ -138,6 +138,15 @@ type compatModelPermission struct {
 // guessed default there would be worse than omitting the field — a client
 // that sees no field can fall back to its own default; one that sees a wrong
 // number cannot tell the difference from a real answer.
+//
+// Capabilities is `omitempty` for the identical reason, one field over
+// (#640): it is populated from the SERVING provider's Capabilities().
+// Capabilities (string form of each Capability, e.g. "vision", "tool_use"),
+// and an entry whose provider declares an empty capability slice — or whose
+// provider cannot be resolved at all (a static/alias entry not backed by a
+// live probe) — omits the field entirely rather than emitting `[]` or a
+// guessed list. `[]` on the wire would read as "declared and supports
+// nothing", which is a different (and false) claim from "unknown".
 type compatModel struct {
 	ID            string                  `json:"id"`
 	Object        string                  `json:"object"`
@@ -147,6 +156,7 @@ type compatModel struct {
 	Tier          string                  `json:"tier,omitempty"`
 	Description   string                  `json:"description,omitempty"`
 	ContextLength int                     `json:"context_length,omitempty"`
+	Capabilities  []string                `json:"capabilities,omitempty"`
 }
 
 type compatModelsResponse struct {
@@ -345,6 +355,16 @@ func buildModelsList(ctx context.Context, router Router) []compatModel {
 		}
 		return m
 	}
+	// withCaps mirrors withCtx exactly (#640): a nil/empty slice leaves
+	// Capabilities unset, which `omitempty` drops from the wire — same
+	// "absent means unknown, never guessed" contract #518 established for
+	// context_length.
+	withCaps := func(m compatModel, caps []string) compatModel {
+		if len(caps) > 0 {
+			m.Capabilities = caps
+		}
+		return m
+	}
 
 	if frontierConfigured {
 		// Intent aliases for frontier-managed tiers. Their window is whatever
@@ -352,34 +372,47 @@ func buildModelsList(ctx context.Context, router Router) []compatModel {
 		// claude-code declare 1M (context beta), the API-key AnthropicProvider
 		// declares 200k. Never a constant: /v1/card already derives from the
 		// same Capabilities() and the two endpoints must agree (#518 review).
+		//
+		// Capabilities (#640) mirror this exactly: foreground/deliberation DO
+		// get context_length today via frontierContextLength, so they get
+		// capabilities too via the same resolved provider's Capabilities().
 		fctx := frontierContextLength(router)
-		add(withCtx(mkCompatModel("foreground", "cogos", "frontier-managed",
-			"interactive, full capability (managed Claude, Max sub)", now), fctx))
-		add(withCtx(mkCompatModel("deliberation", "cogos", "frontier-managed",
-			"heavier reasoning (Opus)", now), fctx))
+		fcaps := frontierCapabilities(router)
+		add(withCaps(withCtx(mkCompatModel("foreground", "cogos", "frontier-managed",
+			"interactive, full capability (managed Claude, Max sub)", now), fctx), fcaps))
+		add(withCaps(withCtx(mkCompatModel("deliberation", "cogos", "frontier-managed",
+			"heavier reasoning (Opus)", now), fctx), fcaps))
 	}
 	if localConfigured {
 		// Intent alias for the local-sovereign tier. Its context window is
 		// whatever is loaded on the provider "local" actually resolves to —
 		// pulled from the live listings, omitted when genuinely unknown (#518).
-		add(withCtx(mkCompatModel("local", "cogos", "local-sovereign",
-			"private, no egress (E4B on this node)", now), localAliasContextLength(router, live)))
+		// Capabilities (#640) come from the same resolved provider's
+		// Capabilities() — provider-scoped, not per-loaded-model, so no live
+		// listing lookup is needed the way context_length needs one.
+		add(withCaps(withCtx(mkCompatModel("local", "cogos", "local-sovereign",
+			"private, no egress (E4B on this node)", now), localAliasContextLength(router, live)),
+			localAliasCapabilities(router)))
 	}
 	if frontierConfigured {
 		// Static frontier model IDs — retained so clients keep working even when
 		// the live Anthropic catalog probe is unavailable. Window comes from the
-		// serving frontier provider's declared capability (#518).
+		// serving frontier provider's declared capability (#518); capabilities
+		// (#640) mirror it via the same frontierCapabilities lookup.
 		fctx := frontierContextLength(router)
-		add(withCtx(mkCompatModel("claude-sonnet-4-6", "anthropic", "frontier-managed", "", now), fctx))
-		add(withCtx(mkCompatModel("claude-opus-4-7", "anthropic", "frontier-managed", "", now), fctx))
-		add(withCtx(mkCompatModel("claude-haiku-4-5-20251001", "anthropic", "frontier-managed", "fast, low-cost", now), fctx))
+		fcaps := frontierCapabilities(router)
+		add(withCaps(withCtx(mkCompatModel("claude-sonnet-4-6", "anthropic", "frontier-managed", "", now), fctx), fcaps))
+		add(withCaps(withCtx(mkCompatModel("claude-opus-4-7", "anthropic", "frontier-managed", "", now), fctx), fcaps))
+		add(withCaps(withCtx(mkCompatModel("claude-haiku-4-5-20251001", "anthropic", "frontier-managed", "fast, low-cost", now), fctx), fcaps))
 	}
 	if eclipseServed {
 		// Same rule as every other entry: the window is what the serving
 		// provider declares, or omitted when it declares nothing (#518 review
 		// round 2 — this static entry was the last one shipping without it).
-		add(withCtx(mkCompatModel("eclipse-26b", "cogos", "lan-local",
-			"LAN-resident 26B model (Eclipse node)", now), servingProviderContextLength(router, "eclipse-26b")))
+		// Capabilities (#640) follow the identical serving-provider lookup.
+		add(withCaps(withCtx(mkCompatModel("eclipse-26b", "cogos", "lan-local",
+			"LAN-resident 26B model (Eclipse node)", now), servingProviderContextLength(router, "eclipse-26b")),
+			servingProviderCapabilities(router, "eclipse-26b")))
 	}
 
 	for _, m := range live {
@@ -424,6 +457,22 @@ func cardModelsFrom(list []compatModel) []map[string]any {
 	return out
 }
 
+// capabilityStrings converts a provider's []Capability into the wire string
+// form used by compatModel.Capabilities (#640) — "vision", "tool_use", etc.
+// Returns nil (not an empty non-nil slice) for a nil/empty input, so callers
+// that feed the result straight to compatModel.Capabilities get the
+// omitempty "absent means unknown" behavior for free.
+func capabilityStrings(caps []Capability) []string {
+	if len(caps) == 0 {
+		return nil
+	}
+	out := make([]string, len(caps))
+	for i, c := range caps {
+		out[i] = string(c)
+	}
+	return out
+}
+
 // servingProviderContextLength returns the context window declared by whichever
 // provider the router would route model id to, or 0 (omitted) when nothing
 // serves it. One rule for every advertised entry, static or live (#518).
@@ -442,6 +491,28 @@ func servingProviderContextLength(router Router, id string) int {
 		}
 	})
 	return n
+}
+
+// servingProviderCapabilities returns the capability list declared by
+// whichever provider the router would route model id to, or nil (omitted)
+// when nothing serves it or that provider declares no capabilities (#640).
+// Mirrors servingProviderContextLength exactly — same resolution, same
+// "absent means unknown" contract, one field over.
+func servingProviderCapabilities(router Router, id string) []string {
+	if router == nil {
+		return nil
+	}
+	name, ok := router.ProviderForModel(id)
+	if !ok || name == "" {
+		return nil
+	}
+	var caps []string
+	router.RangeProviders(func(p Provider) {
+		if p.Name() == name {
+			caps = capabilityStrings(p.Capabilities().Capabilities)
+		}
+	})
+	return caps
 }
 
 // frontierContextLength returns the context window the registered frontier
@@ -464,6 +535,29 @@ func frontierContextLength(router Router) int {
 		}
 	})
 	return n
+}
+
+// frontierCapabilities returns the capability list the registered frontier
+// provider declares, or nil (omitted) when no frontier provider is
+// registered or it declares none (#640). Used for the static frontier
+// entries and the foreground/deliberation aliases — same resolution
+// frontierContextLength uses, so the two fields can never name a different
+// serving provider for the same entry.
+func frontierCapabilities(router Router) []string {
+	if router == nil {
+		return nil
+	}
+	name, ok := frontierProviderName(router)
+	if !ok {
+		return nil
+	}
+	var caps []string
+	router.RangeProviders(func(p Provider) {
+		if p.Name() == name {
+			caps = capabilityStrings(p.Capabilities().Capabilities)
+		}
+	})
+	return caps
 }
 
 // localAliasContextLength resolves the "local" intent alias to its target
@@ -496,6 +590,28 @@ func localAliasContextLength(router Router, live []compatModel) int {
 		}
 	}
 	return 0
+}
+
+// localAliasCapabilities resolves the "local" intent alias to its target
+// provider (same resolution localAliasContextLength uses) and returns that
+// provider's declared Capabilities() (#640). Unlike context_length,
+// capability support is a property of the PROVIDER, not the currently-loaded
+// model, so this does not need the live-listing lookup localAliasContextLength
+// performs — the provider's own Capabilities() is the complete answer.
+// Returns nil (⇒ omitted on the wire) when the alias doesn't resolve or the
+// provider declares no capabilities.
+func localAliasCapabilities(router Router) []string {
+	res := ResolveModelRequest(router, "local", "")
+	if res.PreferProvider == "" || router == nil {
+		return nil
+	}
+	var caps []string
+	router.RangeProviders(func(p Provider) {
+		if p.Name() == res.PreferProvider {
+			caps = capabilityStrings(p.Capabilities().Capabilities)
+		}
+	})
+	return caps
 }
 
 // liveModelEntries walks the router's providers, probing each ModelLister (or
@@ -632,6 +748,16 @@ func isEmbeddingModelID(id string) bool {
 // listing.ContextLength (#518) is carried onto the entry only when > 0 — see
 // compatModel's doc comment for why 0/absent must stay omitted rather than
 // becoming a wire 0.
+//
+// Capabilities (#640) come from p.Capabilities().Capabilities — the SERVING
+// provider's declared list, converted via capabilityStrings — for every live
+// id regardless of branch (bare claude or composite). Unlike context_length,
+// no upstream per-model field is consulted here: ModelListing carries no
+// capability data (LM Studio's /api/v0/models exposes no per-model
+// vision/capability flag as of this change — see provider_openai.go's
+// ListModelsWithContext doc comment), so this is provider-scoped, not
+// model-scoped, for every provider today. omitempty drops it when the
+// provider declares nothing.
 func modelEntryFor(p Provider, listing ModelListing, frontier bool, now int64) compatModel {
 	id := listing.ID
 	desc := ""
@@ -663,6 +789,7 @@ func modelEntryFor(p Provider, listing ModelListing, frontier bool, now int64) c
 	if listing.ContextLength > 0 {
 		m.ContextLength = listing.ContextLength
 	}
+	m.Capabilities = capabilityStrings(p.Capabilities().Capabilities)
 	return m
 }
 
