@@ -496,28 +496,40 @@ func doctorAliasTargetsInCatalog(g *DoctorGroup, root string, opts DoctorOptions
 		live[m.ID] = true
 	}
 
-	// AvailableModelIDs needs a Router; nil is valid for this doctor check
-	// per its own doc comment ("Without a live router only the static alias
-	// table is knowable") — we are only checking the STATIC alias ids here,
-	// the same subset AvailableModelIDs(nil) yields without ever touching a
-	// live router: intentAliases keys plus "local", excluding registered
-	// provider names (which are not alias promises this check is about).
-	promised := AvailableModelIDs(nil)
+	// An alias is a resolver, not a catalog entry: "sonnet" is never in
+	// /v1/models, but its ModelOverride target ("claude-sonnet-5") must be.
+	// Collect every static alias whose resolution names a concrete model and
+	// assert THAT id is live. Aliases with no ModelOverride (provider-only
+	// routing such as "codex", "local") have nothing to check here; the
+	// provider-registration check covers them.
+	promised := map[string]string{} // target id → alias(es) that promise it
+	for _, table := range []map[string]ModelResolution{intentAliases, dispatchFrontierAliases} {
+		for alias, res := range table {
+			if res.ModelOverride == "" {
+				continue
+			}
+			if prev := promised[res.ModelOverride]; prev != "" {
+				promised[res.ModelOverride] = prev + "," + alias
+			} else {
+				promised[res.ModelOverride] = alias
+			}
+		}
+	}
 
 	var missing []string
-	for _, id := range promised {
-		if !live[id] {
-			missing = append(missing, id)
+	for target, aliases := range promised {
+		if !live[target] {
+			missing = append(missing, fmt.Sprintf("%s (via %s)", target, aliases))
 		}
 	}
 	if len(missing) > 0 {
 		sort.Strings(missing)
 		g.add("alias targets in live catalog", StatusFail,
-			fmt.Sprintf("%s: alias(es) not present in live catalog (%d entries): %s", url, len(listing.Data), strings.Join(missing, ", ")))
+			fmt.Sprintf("%s: alias target(s) not present in live catalog (%d entries): %s", url, len(listing.Data), strings.Join(missing, ", ")))
 		return
 	}
 	g.add("alias targets in live catalog", StatusOK,
-		fmt.Sprintf("%s: all %d promised alias(es) present in live catalog (%d entries)", url, len(promised), len(listing.Data)))
+		fmt.Sprintf("%s: all %d alias target(s) present in live catalog (%d entries)", url, len(promised), len(listing.Data)))
 }
 
 // kernelEndpointForDoctor mirrors resolveClientEndpoint's precedence
