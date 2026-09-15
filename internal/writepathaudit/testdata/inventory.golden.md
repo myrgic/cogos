@@ -340,7 +340,7 @@ Total subprocess sites: 76
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, p.lmsCLI, args...)` | internal/engine/provider_lms_model_state.go:786 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, p.nodeBin, args...)` | internal/engine/provider_lms_model_state.go:818 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("git", "rev-parse", "--show-toplevel")` | internal/engine/provider_lms_model_state.go:1324 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, p.piBinary, "--help")` | internal/engine/provider_pi.go:209 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, p.piBinary, "--help")` | internal/engine/provider_pi.go:289 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "launchctl", args...)` | internal/engine/service_supervisor_launchctl.go:321 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "launchctl", args...)` | internal/engine/service_supervisor_launchctl.go:331 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "launchctl", args...)` | internal/engine/service_supervisor_launchctl.go:349 | internal:engine |

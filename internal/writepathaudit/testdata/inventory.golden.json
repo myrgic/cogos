@@ -3334,7 +3334,7 @@
     },
     {
       "file": "internal/engine/provider_pi.go",
-      "line": 209,
+      "line": 289,
       "column": 9,
       "func": "(*PiProvider).Ping",
       "subsystem": "internal:engine",
