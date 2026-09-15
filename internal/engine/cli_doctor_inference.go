@@ -260,72 +260,80 @@ func readLimited(r io.Reader, max int64) ([]byte, error) {
 // ---------------------------------------------------------------------------
 
 // cliArgvContract describes one provider's buildArgs() contract: the binary
-// name, the subcommand whose --help output is authoritative, and the long
-// flags that provider's buildArgs() unconditionally emits (i.e. present on
-// every request, not gated behind optional per-request fields) and which
-// MUST therefore appear in that subcommand's --help output for the
-// subprocess call to succeed.
+// name, the subcommand whose --help output is authoritative, and the flags
+// that provider's buildArgs() emits for a representative request — every one
+// of which MUST appear in that subcommand's --help output for the subprocess
+// call to succeed.
 //
-// MUST track buildArgs() in provider_<x>.go: any long flag buildArgs()
-// unconditionally passes belongs here, and any flag removed from buildArgs()
-// should be removed here too, or this check drifts from what actually ships.
+// The flag list is DERIVED by calling the real buildArgs() on a throwaway
+// provider with a fully-populated CompletionRequest, not hand-copied. A
+// hand-maintained table is exactly the class of drift this check exists to
+// catch (cog-review on #635 found "--no-extensions" missing from the pi
+// contract on the first round); deriving from buildArgs() cannot miss a flag.
 type cliArgvContract struct {
-	// provider names the check for reporting; bin/subcmd/longFlags source
-	// the exact provider_<x>.go this contract mirrors.
-	provider  string
-	bin       string
-	subcmd    []string // args appended before --help, e.g. []string{"exec"}
-	longFlags []string
+	provider string
+	bin      string
+	subcmd   []string // args appended before --help, e.g. []string{"exec"}
+	flags    []string // every "-x"/"--xyz" token buildArgs() emitted
 }
 
-// cliArgvContracts is intentionally doctor-local (not exported from the
-// provider_*.go files) — see cli_doctor_inference.go's package doc. Update
-// this table whenever a provider's buildArgs() unconditional flag set
-// changes.
-var cliArgvContracts = []cliArgvContract{
-	{
-		// provider_codex.go buildArgs(), ~line 212-224.
-		provider: "codex",
-		bin:      "codex",
-		subcmd:   []string{"exec"},
-		longFlags: []string{
-			"-m", "--config", "--sandbox", "--full-auto",
-			"--skip-git-repo-check", "--json",
-		},
-	},
-	{
-		// provider_pi.go buildArgs(), ~line 378-390. "-p" and "--no-session"
-		// are unconditional; "--provider"/"--model" are always emitted with
-		// a value (provider/model are always non-empty on a configured
-		// provider); "--thinking"/"--tools"/"--system-prompt" are
-		// conditional on per-request fields and deliberately excluded here.
-		provider: "pi",
-		bin:      "pi",
-		subcmd:   nil,
-		longFlags: []string{
-			"-p", "--provider", "--model", "--no-session",
-		},
-	},
-	{
-		// provider_claudecode.go buildArgs(), ~line 466+. --effort,
-		// --append-system-prompt, --mcp-config/--strict-mcp-config,
-		// --allowedTools/--disallowedTools are all conditional on optional
-		// per-provider config and deliberately excluded; only what's
-		// genuinely unconditional is checked.
-		provider: "claude",
-		bin:      "claude",
-		subcmd:   nil,
-		longFlags: []string{
-			"-p", "--dangerously-skip-permissions", "--model",
-		},
-	},
+// argvFlagTokens extracts the flag tokens ("-m", "--json", "--config=x" → "--config")
+// from a buildArgs() result, in first-seen order, deduplicated.
+func argvFlagTokens(args []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") || a == "-" || a == "--" {
+			continue
+		}
+		if i := strings.IndexByte(a, '='); i > 0 {
+			a = a[:i]
+		}
+		if !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// doctorArgvRequest is a request with every optional field populated so
+// conditional flags (--thinking, --tools, --system-prompt, --effort,
+// --append-system-prompt, --allowedTools, …) are exercised too. Any flag the
+// provider CAN emit must be one the CLI accepts.
+func doctorArgvRequest() *CompletionRequest {
+	return &CompletionRequest{
+		SystemPrompt:  "doctor",
+		Messages:      []ProviderMessage{{Role: "user", Content: "doctor"}},
+		ModelOverride: "doctor-model",
+	}
+}
+
+// cliArgvContracts builds the three CLI providers' contracts from their real
+// buildArgs(). Providers are constructed with a representative ProviderConfig
+// so every config-gated branch that affects argv is on.
+func cliArgvContracts() []cliArgvContract {
+	req := doctorArgvRequest()
+	codex := NewCodexProvider("doctor-codex", ProviderConfig{Model: "doctor-model", Options: map[string]any{"effort": "medium", "sandbox": "read-only"}})
+	pi := NewPiProvider("doctor-pi", ProviderConfig{Model: "doctor-model", Options: map[string]any{"provider": "ollama", "thinking": "medium", "tools": "read"}}, nil)
+	cc := NewClaudeCodeProvider("doctor-claude", ProviderConfig{Model: "sonnet", Options: map[string]any{"effort": "medium"}}, nil)
+	return []cliArgvContract{
+		{provider: "codex", bin: "codex", subcmd: []string{"exec"}, flags: argvFlagTokens(codex.buildArgs(req))},
+		{provider: "pi", bin: "pi", subcmd: nil, flags: argvFlagTokens(pi.buildArgs(req))},
+		{provider: "claude", bin: "claude", subcmd: nil, flags: argvFlagTokens(cc.buildArgs(req))},
+	}
 }
 
 // cliHelpTimeout bounds each `<bin> <subcmd> --help` subprocess call.
 const cliHelpTimeout = 5 * time.Second
 
 func doctorProviderArgvVsCLI(g *DoctorGroup, opts DoctorOptions) {
-	checkArgvContracts(g, cliArgvContracts)
+	if opts.SkipNetwork {
+		// --help spawns subprocesses; treat like the other external probes.
+		g.add("argv vs CLI", StatusUnknown, "skipped (--skip-network)")
+		return
+	}
+	checkArgvContracts(g, cliArgvContracts())
 }
 
 // checkArgvContracts is the testable core of doctorProviderArgvVsCLI: it
@@ -353,7 +361,7 @@ func checkArgvContracts(g *DoctorGroup, contracts []cliArgvContract) {
 
 		helpText := string(out)
 		var missing []string
-		for _, flag := range c.longFlags {
+		for _, flag := range c.flags {
 			if !helpAdvertisesFlag(helpText, flag) {
 				missing = append(missing, flag)
 			}

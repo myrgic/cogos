@@ -219,7 +219,7 @@ func TestCheckArgvContracts_OK(t *testing.T) {
 		provider:  "fake",
 		bin:       "fake-cli-ok",
 		subcmd:    []string{"exec"},
-		longFlags: []string{"-m", "--config", "--sandbox", "--full-auto", "--skip-git-repo-check", "--json"},
+		flags: []string{"-m", "--config", "--sandbox", "--full-auto", "--skip-git-repo-check", "--json"},
 	}})
 
 	c := findCheckInGroup(t, g, "argv vs CLI: fake")
@@ -243,7 +243,7 @@ func TestCheckArgvContracts_FAIL(t *testing.T) {
 		provider:  "fake",
 		bin:       "fake-cli-missing-flag",
 		subcmd:    []string{"exec"},
-		longFlags: []string{"-m", "--config", "--sandbox", "--full-auto", "--skip-git-repo-check", "--json"},
+		flags: []string{"-m", "--config", "--sandbox", "--full-auto", "--skip-git-repo-check", "--json"},
 	}})
 
 	c := findCheckInGroup(t, g, "argv vs CLI: fake")
