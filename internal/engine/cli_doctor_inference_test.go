@@ -154,9 +154,15 @@ func TestLoadProvidersYAMLDoctor_LocalOverrideMergesShallow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pcfg, found, err := loadProvidersYAMLDoctor(root)
-	if !found || err != nil {
-		t.Fatalf("found=%v err=%v", found, err)
+	// Doctor now uses the router's own loader (loadProvidersConfig), so the
+	// overlay semantics under test are the kernel's, not a doctor re-implementation.
+	cfg, err := LoadConfig(root, 0)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	pcfg, err := loadProvidersConfig(cfg)
+	if err != nil {
+		t.Fatalf("loadProvidersConfig: %v", err)
 	}
 	p1 := pcfg.Providers["p1"]
 	if p1.Endpoint != "http://override:5678" {
@@ -679,5 +685,35 @@ func TestDoctorProviderEndpoints_SendsAPIKeyEnv(t *testing.T) {
 	}
 	if !strings.Contains(c.Detail, "$DOCTOR_TEST_LMS_KEY") || strings.Contains(c.Detail, "sekrit") {
 		t.Fatalf("detail must name the env var and never the value: %q", c.Detail)
+	}
+}
+
+// cog-review #635 round 5: the anthropic type authenticates with x-api-key,
+// not Authorization: Bearer. Doctor must not know that — the provider does.
+// This passes only because doctorProviderEndpoints delegates to the
+// provider's own Ping() (provider_anthropic.go setAuthHeaders).
+func TestDoctorProviderEndpoints_AnthropicUsesXAPIKeyViaProviderPing(t *testing.T) {
+	var sawXAPIKey, sawBearer bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawXAPIKey = r.Header.Get("x-api-key") == "sk-test"
+		sawBearer = r.Header.Get("Authorization") != ""
+		if !sawXAPIKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"claude-x"}]}`))
+	}))
+	defer srv.Close()
+	t.Setenv("DOCTOR_TEST_ANTHROPIC_KEY", "sk-test")
+	root := t.TempDir()
+	writeProvidersYAMLRaw(t, root, "providers:\n  anthropic:\n    type: anthropic\n    endpoint: "+srv.URL+"\n    api_key_env: DOCTOR_TEST_ANTHROPIC_KEY\n    enabled: true\n")
+	g := &DoctorGroup{}
+	doctorProviderEndpoints(g, root, DoctorOptions{})
+	c := findCheckInGroup(t, g, "providers.yaml endpoint: anthropic")
+	if c.Status != StatusOK {
+		t.Fatalf("anthropic probe must succeed via x-api-key; got %s %q (x-api-key seen=%v, bearer seen=%v)", c.Status, c.Detail, sawXAPIKey, sawBearer)
+	}
+	if sawBearer {
+		t.Fatalf("doctor sent Authorization: Bearer to an anthropic endpoint — it is re-implementing auth instead of delegating to the provider")
 	}
 }

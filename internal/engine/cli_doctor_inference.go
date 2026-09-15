@@ -73,113 +73,38 @@ func doctorInferenceSurface(report *DoctorReport, root string, opts DoctorOption
 // full BuildRouter machinery (which additionally probes local backends,
 // auto-registers claude-oauth, etc. — more than a read-only doctor check
 // should trigger as a side effect).
-// providerYAMLEntry is one provider block as doctor reads it — the subset of
-// ProviderConfig fields the inference-surface checks need.
-type providerYAMLEntry struct {
-	Type      string                 `yaml:"type"`
-	Endpoint  string                 `yaml:"endpoint"`
-	Model     string                 `yaml:"model"`
-	Enabled   *bool                  `yaml:"enabled"`
-	APIKeyEnv string                 `yaml:"api_key_env"`
-	Options   map[string]interface{} `yaml:"options"`
-}
-
-type providersYAMLShape struct {
-	Providers map[string]providerYAMLEntry `yaml:"providers"`
-}
-
 // cliProviderTypes overload ProviderConfig.Endpoint as a binary PATH, not an
 // HTTP URL (provider_codex.go:156, provider_claudecode.go:88 "abuse Endpoint
-// field for binary path", provider_pi.go:75). Probing them over HTTP would
-// be a spurious FAIL; check (c) validates them via their real CLI instead.
+// field for binary path", provider_pi.go:75). They have no HTTP surface to
+// probe; check (c) validates them via their real CLI instead.
 var cliProviderTypes = map[string]bool{"codex": true, "claude-code": true, "pi": true}
 
-func (p providersYAMLShape) isEnabled(name string) bool {
-	pc := p.Providers[name]
-	if pc.Enabled == nil {
-		return true
-	}
-	return *pc.Enabled
-}
-
-// loadProvidersYAMLDoctor parses .cog/config/providers.yaml, deep-merging
-// providers.local.yaml on top when present. Per the task's scope note this
-// is a SIMPLE merge — local provider keys fully override same-named base
-// keys (no field-by-field merge) — deliberately simpler than
-// mergeProvidersConfig in router.go, which this doctor check does not call
-// because that merge is tied to the full ProviderConfig/router type and
-// would pull in more of router.go's surface than a read-only check needs.
-func loadProvidersYAMLDoctor(root string) (providersYAMLShape, bool, error) {
-	basePath := filepath.Join(root, ".cog", "config", "providers.yaml")
-	data, err := os.ReadFile(basePath)
-	if err != nil {
-		return providersYAMLShape{}, false, err
-	}
-	var base providersYAMLShape
-	if err := yaml.Unmarshal(data, &base); err != nil {
-		return providersYAMLShape{}, true, fmt.Errorf("parse providers.yaml: %w", err)
-	}
-	if base.Providers == nil {
-		base.Providers = map[string]providerYAMLEntry{}
-	}
-
-	localPath := filepath.Join(root, ".cog", "config", "providers.local.yaml")
-	if localData, lerr := os.ReadFile(localPath); lerr == nil {
-		var local providersYAMLShape
-		if perr := yaml.Unmarshal(localData, &local); perr == nil {
-			for name, pc := range local.Providers {
-				// Simple override: local's key entirely replaces base's key
-				// UNLESS local only set a subset of fields, in which case we
-				// still want the base entry's other fields. Emulate a
-				// shallow per-field override on top of any existing base
-				// entry so a local.yaml that only overrides `endpoint`
-				// doesn't blank out `model`/`type` from providers.yaml.
-				merged := base.Providers[name]
-				if pc.Type != "" {
-					merged.Type = pc.Type
-				}
-				if pc.Endpoint != "" {
-					merged.Endpoint = pc.Endpoint
-				}
-				if pc.Model != "" {
-					merged.Model = pc.Model
-				}
-				if pc.Enabled != nil {
-					merged.Enabled = pc.Enabled
-				}
-				if pc.APIKeyEnv != "" {
-					merged.APIKeyEnv = pc.APIKeyEnv
-				}
-				if pc.Options != nil {
-					merged.Options = pc.Options
-				}
-				base.Providers[name] = merged
-			}
-		}
-	}
-	return base, true, nil
-}
-
-// openAIModelsListShape is the minimal GET /v1/models response shape this
-// check needs to extract ids from an OpenAI-compatible listing.
-type openAIModelsListShape struct {
-	Data []struct {
-		ID string `json:"id"`
-	} `json:"data"`
-}
-
+// doctorProviderEndpoints asks each enabled HTTP-backed provider to probe
+// ITSELF. It loads providers.yaml + providers.local.yaml through the same
+// loadProvidersConfig the router uses, constructs each provider with the
+// same makeProvider the router uses, and calls the provider's own Ping()
+// and (when implemented) ListModels(). The provider already knows its auth
+// scheme (Authorization: Bearer for OpenAI-compat, x-api-key for Anthropic),
+// its health path, and its listing shape — doctor re-implementing any of
+// that is exactly the drift cog-review caught three rounds running on #635
+// (no auth → 401; Bearer-only → wrong header for anthropic; endpoint-as-path
+// for CLI types). One probe implementation per provider, owned by the provider.
 func doctorProviderEndpoints(g *DoctorGroup, root string, opts DoctorOptions) {
-	pcfg, found, err := loadProvidersYAMLDoctor(root)
-	if !found {
-		g.add("providers.yaml endpoints", StatusUnknown, fmt.Sprintf("no providers.yaml at .cog/config: %v", err))
+	cfg, err := LoadConfig(root, 0)
+	if err != nil {
+		g.add("providers.yaml endpoints", StatusUnknown, fmt.Sprintf("workspace config not loadable: %v", err))
 		return
 	}
+	pcfg, err := loadProvidersConfig(cfg)
 	if err != nil {
-		g.add("providers.yaml endpoints", StatusFail, err.Error())
+		if os.IsNotExist(err) {
+			g.add("providers.yaml endpoints", StatusUnknown, fmt.Sprintf("no providers.yaml at .cog/config: %v", err))
+		} else {
+			g.add("providers.yaml endpoints", StatusFail, err.Error())
+		}
 		return
 	}
 
-	// Deterministic order.
 	names := make([]string, 0, len(pcfg.Providers))
 	for name := range pcfg.Providers {
 		names = append(names, name)
@@ -189,13 +114,14 @@ func doctorProviderEndpoints(g *DoctorGroup, root string, opts DoctorOptions) {
 	checked := 0
 	for _, name := range names {
 		pc := pcfg.Providers[name]
-		if !pcfg.isEnabled(name) {
+		if !pc.IsEnabled() {
 			continue
 		}
-		if pc.Endpoint == "" || cliProviderTypes[pc.Type] {
-			// No HTTP surface: either nothing declared, or a subprocess-CLI
-			// provider whose `endpoint` is a binary path (see cliProviderTypes).
-			// Not a finding; check (c) covers CLI providers.
+		typ := pc.Type
+		if typ == "" {
+			typ = name
+		}
+		if pc.Endpoint == "" || cliProviderTypes[typ] {
 			continue
 		}
 		checked++
@@ -205,70 +131,60 @@ func doctorProviderEndpoints(g *DoctorGroup, root string, opts DoctorOptions) {
 			continue
 		}
 
-		healthPath := "/v1/models"
-		if hp, ok := pc.Options["health_path"].(string); ok && hp != "" {
-			healthPath = hp
-		}
-		url := strings.TrimRight(pc.Endpoint, "/") + healthPath
-
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		req, rerr := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if rerr != nil {
-			cancel()
-			g.add("providers.yaml endpoint: "+name, StatusFail, fmt.Sprintf("bad request for %s: %v", url, rerr))
+		prov, perr := makeProvider(name, pc, nil)
+		if perr != nil {
+			g.add("providers.yaml endpoint: "+name, StatusUnknown, fmt.Sprintf("cannot construct provider (type %q): %v", typ, perr))
 			continue
 		}
-		// Mirror OpenAICompatProvider (provider_openai.go:107): the provider
-		// sends Authorization: Bearer $api_key_env; so must the probe, or an
-		// auth-gated endpoint (lmstudio-eclipse) reports a false 401 (#638).
+
 		authNote := ""
 		if pc.APIKeyEnv != "" {
 			if key := os.Getenv(pc.APIKeyEnv); key != "" {
-				req.Header.Set("Authorization", "Bearer "+key)
 				authNote = fmt.Sprintf(" (auth: $%s, len=%d)", pc.APIKeyEnv, len(key))
 			} else {
 				authNote = fmt.Sprintf(" (auth: $%s UNSET in this environment)", pc.APIKeyEnv)
 			}
 		}
-		resp, herr := http.DefaultClient.Do(req)
-		if herr != nil {
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		latency, pingErr := prov.Ping(ctx)
+		if pingErr != nil {
 			cancel()
-			g.add("providers.yaml endpoint: "+name, StatusFail, fmt.Sprintf("%s: %v", url, herr))
-			continue
-		}
-		body, _ := readLimited(resp.Body, 1<<20)
-		resp.Body.Close()
-		cancel()
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			g.add("providers.yaml endpoint: "+name, StatusFail, fmt.Sprintf("%s: HTTP %d%s", url, resp.StatusCode, authNote))
+			g.add("providers.yaml endpoint: "+name, StatusFail, fmt.Sprintf("%s: %v%s", pc.Endpoint, pingErr, authNote))
 			continue
 		}
 
-		var listing openAIModelsListShape
-		if jerr := json.Unmarshal(body, &listing); jerr == nil && len(listing.Data) > 0 {
-			if pc.Model != "" {
-				declaredPresent := false
-				for _, m := range listing.Data {
-					if m.ID == pc.Model {
-						declaredPresent = true
-						break
-					}
-				}
-				if !declaredPresent {
-					g.add("providers.yaml endpoint: "+name, StatusWarn,
-						fmt.Sprintf("%s answered (%d models) but declared model %q is not among them%s", url, len(listing.Data), pc.Model, authNote))
-					continue
+		// Declared-model check via the provider's own lister when it has one.
+		if lister, ok := prov.(ModelLister); ok && pc.Model != "" {
+			ids, lerr := lister.ListModels(ctx)
+			cancel()
+			if lerr != nil {
+				g.add("providers.yaml endpoint: "+name, StatusWarn,
+					fmt.Sprintf("%s answered ping in %s but ListModels failed: %v%s", pc.Endpoint, latency.Round(time.Millisecond), lerr, authNote))
+				continue
+			}
+			present := false
+			for _, id := range ids {
+				if id == pc.Model {
+					present = true
+					break
 				}
 			}
-			g.add("providers.yaml endpoint: "+name, StatusOK, fmt.Sprintf("%s answered, %d model(s), declared model present%s", url, len(listing.Data), authNote))
+			if !present {
+				g.add("providers.yaml endpoint: "+name, StatusWarn,
+					fmt.Sprintf("%s answered (%d models) but declared model %q is not among them%s", pc.Endpoint, len(ids), pc.Model, authNote))
+				continue
+			}
+			g.add("providers.yaml endpoint: "+name, StatusOK,
+				fmt.Sprintf("%s answered in %s, %d model(s), declared model present%s", pc.Endpoint, latency.Round(time.Millisecond), len(ids), authNote))
 			continue
 		}
-		g.add("providers.yaml endpoint: "+name, StatusOK, fmt.Sprintf("%s answered (non-OpenAI-shaped or empty listing)%s", url, authNote))
+		cancel()
+		g.add("providers.yaml endpoint: "+name, StatusOK,
+			fmt.Sprintf("%s answered ping in %s%s", pc.Endpoint, latency.Round(time.Millisecond), authNote))
 	}
-
 	if checked == 0 {
-		g.add("providers.yaml endpoints", StatusUnknown, "no enabled provider declares an HTTP endpoint to check")
+		g.add("providers.yaml endpoints", StatusOK, "no enabled HTTP-backed providers declared")
 	}
 }
 
