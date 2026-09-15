@@ -1446,6 +1446,17 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 		// that names "claude-opus-4-7" has expressed intent that is more specific
 		// than the autonomic loop's state-based preference.
 		usedModelRoute := false
+		// Per-provider deny policy (nil-router dispatch path): a composite
+		// "<provider>/<model>" id whose provider prefix is denied by operator
+		// policy must not be routed to any provider. Mirrors the gateway 403
+		// guard in serve.go so a dispatch caller can't bypass it with a nil
+		// router.
+		if reason, denied := deniedModelProvider(string(req.Model)); denied {
+			return nil, &AgentControllerError{
+				Code:    "policy_denied",
+				Message: fmt.Sprintf("model %q is denied by policy: %s", req.Model, reason),
+			}
+		}
 		if mres := ResolveModelRequest(nil, string(req.Model), ""); mres.PreferProvider != "" {
 			pcfg, merr := loadProvidersConfig(c.cfg)
 			if merr == nil {

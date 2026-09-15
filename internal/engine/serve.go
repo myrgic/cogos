@@ -143,6 +143,12 @@ type Server struct {
 
 // NewServer constructs a Server bound to the configured port.
 func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
+	// Install the operator-authored per-provider model deny table (kernel.yaml
+	// `routing.deny:`), or fall back to the hardcoded default. applyKernelSection
+	// already copied cfg.RoutingDeny from the file; an empty slice restores the
+	// default openrouter entry in SetProviderModelDeny.
+	SetProviderModelDeny(cfg.RoutingDeny)
+
 	s := &Server{cfg: cfg, nucleus: nucleus, process: process}
 
 	// Phase 3 bus/session surface. Managers are always instantiated so
@@ -1061,6 +1067,36 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// the gateway and dispatch tool share a single source of truth. The
 	// InjectKernelTools flag is handled below (kernel-agent / ollama path).
 	{
+		// Per-provider deny policy: a composite "<provider>/<model>" id whose
+		// provider prefix is denied by operator policy (e.g.
+		// openrouter/anthropic/*, the Incident: an operator on Anthropic Max
+		// was billed through OpenRouter for claude-fable via a Hermes
+		// delegation config) is rejected with HTTP 403 policy_denied before it
+		// can reach any provider. Returning 403 (not 400) keeps this distinct
+		// from the unknown-model guard below, and names an allowed alternative.
+		if reason, denied := deniedModelProvider(req.Model); denied {
+			provider := req.Model
+			if i := strings.Index(req.Model, "/"); i > 0 {
+				provider = req.Model[:i]
+			}
+			slog.Warn("chat: rejected policy-denied model at kernel boundary",
+				"request_id", creq.Metadata.RequestID,
+				"model", req.Model,
+				"provider", provider,
+			)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"type":                "policy_denied",
+					"message":             fmt.Sprintf("model %q is denied on provider %q: %s", req.Model, provider, reason),
+					"param":               "model",
+					"allowed_alternative": "fable",
+				},
+			})
+			return
+		}
+
 		// Kernel-boundary admission: reject a non-empty model id that resolves
 		// to no known routing target (alias / "local" / provider name /
 		// provider-served model) with HTTP 400 + the available menu. Without
