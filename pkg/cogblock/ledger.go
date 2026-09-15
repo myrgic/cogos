@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/myrgic/cogos/pkg/pathsafe"
@@ -250,6 +251,18 @@ func AppendEvent(workspaceRoot, sessionID string, envelope *EventEnvelope) error
 		return fmt.Errorf("failed to write event: %w", err)
 	}
 
+	// A workspace.genesis event declares the hash algorithm for the whole
+	// workspace. The GetHashAlgorithm lookup earlier in this call ran before
+	// this event existed on disk, so on a workspace's very first append it
+	// would have cached a "not found" result that is now stale. Refresh the
+	// cache directly so it doesn't shadow the algorithm this event just
+	// declared (myrgic/cogos#539).
+	if envelope.HashedPayload.Type == "workspace.genesis" {
+		if alg, ok := envelope.HashedPayload.Data["hash_algorithm"].(string); ok && alg != "" {
+			setHashAlgorithmCache(workspaceRoot, alg)
+		}
+	}
+
 	return nil
 }
 
@@ -290,13 +303,57 @@ func GetLastEvent(workspaceRoot, sessionID string) (*EventEnvelope, error) {
 	return lastEvent, nil
 }
 
+// hashAlgResult caches the outcome of resolving a workspace's hash algorithm
+// (myrgic/cogos#539). Resolution requires an O(N) walk of every session's
+// events.jsonl looking for a workspace.genesis event; since the genesis event
+// is written once per workspace and its declared algorithm doesn't change
+// during a process's lifetime, the result (including "not found") is cached
+// per workspaceRoot so repeated AppendEvent calls don't re-scan the ledger.
+type hashAlgResult struct {
+	alg string
+	err error
+}
+
+var hashAlgCache = struct {
+	mu     sync.RWMutex
+	byRoot map[string]hashAlgResult
+}{byRoot: make(map[string]hashAlgResult)}
+
+// resetHashAlgorithmCacheForTest clears the package-level hashAlgCache. Tests
+// that use fresh t.TempDir() roots don't need this (distinct cache keys), but
+// tests exercising cache behavior directly should call it via t.Cleanup.
+func resetHashAlgorithmCacheForTest() {
+	hashAlgCache.mu.Lock()
+	defer hashAlgCache.mu.Unlock()
+	hashAlgCache.byRoot = make(map[string]hashAlgResult)
+}
+
+// setHashAlgorithmCache records alg as the resolved hash algorithm for
+// workspaceRoot, overwriting any existing entry (including a "not found"
+// result). Used by AppendEvent immediately after writing a workspace.genesis
+// event, since that event's own algorithm is known directly without a scan.
+func setHashAlgorithmCache(workspaceRoot, alg string) {
+	hashAlgCache.mu.Lock()
+	defer hashAlgCache.mu.Unlock()
+	hashAlgCache.byRoot[workspaceRoot] = hashAlgResult{alg: alg}
+}
+
 // GetHashAlgorithm retrieves the hash algorithm from the workspace genesis event.
 func GetHashAlgorithm(workspaceRoot string) (string, error) {
+	hashAlgCache.mu.RLock()
+	cached, ok := hashAlgCache.byRoot[workspaceRoot]
+	hashAlgCache.mu.RUnlock()
+	if ok {
+		return cached.alg, cached.err
+	}
+
 	// Look for workspace genesis event in .cog/ledger/
 	ledgerDir := filepath.Join(workspaceRoot, ".cog", "ledger")
 
 	entries, err := os.ReadDir(ledgerDir)
 	if err != nil {
+		// Don't cache environmental errors (e.g. ledger dir not created yet) —
+		// only cache a completed scan's outcome.
 		return "", err
 	}
 
@@ -315,11 +372,18 @@ func GetHashAlgorithm(workspaceRoot string) (string, error) {
 		alg, found := scanForGenesisAlgorithm(f)
 		f.Close()
 		if found {
+			hashAlgCache.mu.Lock()
+			hashAlgCache.byRoot[workspaceRoot] = hashAlgResult{alg: alg}
+			hashAlgCache.mu.Unlock()
 			return alg, nil
 		}
 	}
 
-	return "", fmt.Errorf("no workspace.genesis event found")
+	notFound := fmt.Errorf("no workspace.genesis event found")
+	hashAlgCache.mu.Lock()
+	hashAlgCache.byRoot[workspaceRoot] = hashAlgResult{err: notFound}
+	hashAlgCache.mu.Unlock()
+	return "", notFound
 }
 
 // scanForGenesisAlgorithm reads a JSONL stream looking for a workspace.genesis event

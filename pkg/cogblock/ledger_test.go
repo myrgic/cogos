@@ -2,6 +2,7 @@ package cogblock
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -617,5 +618,98 @@ func TestAppendEvent_SanitizesColonSessionID(t *testing.T) {
 
 	if err := VerifyLedger(tmpDir, sessionID); err != nil {
 		t.Fatalf("VerifyLedger: %v", err)
+	}
+}
+
+// === GetHashAlgorithm CACHING TESTS (myrgic/cogos#539) ===
+//
+// GetHashAlgorithm used to re-scan every session's events.jsonl under
+// .cog/ledger/ on every call (unbounded, uncached — the reported ~553MB/call
+// cost). These tests prove the result is now cached per workspaceRoot by
+// deleting the ledger directory between calls: without a cache, the second
+// call would hit a fresh os.ReadDir and either error differently or lose the
+// resolved algorithm; with a cache, the second call must return the exact
+// same result without touching the filesystem again.
+
+func TestGetHashAlgorithm_CachesFoundResultAcrossCalls(t *testing.T) {
+	t.Cleanup(resetHashAlgorithmCacheForTest)
+	resetHashAlgorithmCacheForTest()
+
+	tmpDir := t.TempDir()
+	sessionID := "session-with-genesis"
+
+	genesis := NewEventEnvelope("workspace.genesis", sessionID)
+	genesis.WithData("hash_algorithm", "sha512")
+	if err := AppendEvent(tmpDir, sessionID, genesis); err != nil {
+		t.Fatalf("AppendEvent genesis: %v", err)
+	}
+
+	alg, err := GetHashAlgorithm(tmpDir)
+	if err != nil {
+		t.Fatalf("GetHashAlgorithm: %v", err)
+	}
+	if alg != "sha512" {
+		t.Fatalf("alg = %q; want sha512", alg)
+	}
+
+	// Remove the ledger directory entirely. A cached lookup must not touch
+	// the filesystem again, so the second call should still return the value
+	// resolved on the first call instead of erroring on the missing dir.
+	ledgerDir := filepath.Join(tmpDir, ".cog", "ledger")
+	if err := os.RemoveAll(ledgerDir); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+
+	alg2, err := GetHashAlgorithm(tmpDir)
+	if err != nil {
+		t.Fatalf("GetHashAlgorithm (cached): %v", err)
+	}
+	if alg2 != "sha512" {
+		t.Fatalf("cached alg = %q; want sha512 (should not have rescanned deleted ledger dir)", alg2)
+	}
+}
+
+func TestGetHashAlgorithm_CachesNotFoundResultAcrossCalls(t *testing.T) {
+	t.Cleanup(resetHashAlgorithmCacheForTest)
+	resetHashAlgorithmCacheForTest()
+
+	tmpDir := t.TempDir()
+	ledgerDir := filepath.Join(tmpDir, ".cog", "ledger")
+	for i := 0; i < 3; i++ {
+		sessionID := fmt.Sprintf("session-%d", i)
+		sessionDir := filepath.Join(ledgerDir, sessionID)
+		if err := os.MkdirAll(sessionDir, 0755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		event := NewEventEnvelope("tool.call", sessionID)
+		line, err := json.Marshal(event)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), append(line, '\n'), 0644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	_, err1 := GetHashAlgorithm(tmpDir)
+	if err1 == nil {
+		t.Fatal("expected error, got nil (no genesis event present)")
+	}
+
+	// Delete the ledger directory. Without caching, the next call hits
+	// os.ReadDir on a now-missing directory and returns a different error
+	// ("no such file or directory" rather than "no workspace.genesis event
+	// found"). A cached miss must return the exact same error without
+	// rescanning.
+	if err := os.RemoveAll(ledgerDir); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+
+	_, err2 := GetHashAlgorithm(tmpDir)
+	if err2 == nil {
+		t.Fatal("expected cached error, got nil")
+	}
+	if err1.Error() != err2.Error() {
+		t.Fatalf("cached error changed after ledger dir removal: first=%q second=%q", err1, err2)
 	}
 }
