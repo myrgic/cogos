@@ -193,9 +193,13 @@ func TestPiAvailableBinaryPresentBackendUp(t *testing.T) {
 	resetPiProbesForTest(t)
 	piOnPath(t)
 	piBackendProbe = func(ctx context.Context, baseURL string) error { return nil }
+	// Available also verifies the configured --provider is in pi's registry
+	// (#629); stub a registry that has it so this test still isolates the
+	// binary+backend behavior it's named for.
+	stubPiHomeDir(t, "testdata/pi_home_present")
 
 	if !newLocalPi().Available(context.Background()) {
-		t.Fatal("Available should be true with binary present and backend up")
+		t.Fatal("Available should be true with binary present, backend up, and provider registered")
 	}
 }
 
@@ -255,3 +259,45 @@ func TestPiAvailableCachesResult(t *testing.T) {
 		t.Fatalf("probe ran %d times after cache expiry, want 2", calls)
 	}
 }
+
+// ── pi provider registry (#629) ─────────────────────────────────────────────
+//
+// pi maintains its own provider registry (agent/models.json under its home
+// dir, the same source `pi --list-models` reads) independent of the engine's
+// defaultLocalPiProvider config default. Comments prior to #629 claimed PR
+// #417 already made "lmstudio" a safe default; it did not verify pi's
+// registry actually has an "lmstudio" entry. These tests pin the fix:
+// Available() must confirm the configured --provider exists in the registry,
+// not merely that the backend HTTP probe answers.
+
+func stubPiHomeDir(t *testing.T, dir string) {
+	t.Helper()
+	orig := piHomeDir
+	piHomeDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { piHomeDir = orig })
+}
+
+func TestPiAvailable_ProviderMissingFromRegistry(t *testing.T) {
+	resetPiProbesForTest(t)
+	piOnPath(t)
+	piBackendProbe = func(ctx context.Context, baseURL string) error { return nil }
+	stubPiHomeDir(t, "testdata/pi_home_missing")
+
+	// newLocalPi() defaults provider to defaultLocalPiProvider ("lmstudio"),
+	// which the fixture registry does not contain (only "ollama").
+	if newLocalPi().Available(context.Background()) {
+		t.Fatal("Available must be false when the configured --provider is missing from pi's registry")
+	}
+}
+
+func TestPiAvailable_ProviderPresent(t *testing.T) {
+	resetPiProbesForTest(t)
+	piOnPath(t)
+	piBackendProbe = func(ctx context.Context, baseURL string) error { return nil }
+	stubPiHomeDir(t, "testdata/pi_home_present")
+
+	if !newLocalPi().Available(context.Background()) {
+		t.Fatal("Available must be true when backend is up and the configured --provider exists in pi's registry")
+	}
+}
+

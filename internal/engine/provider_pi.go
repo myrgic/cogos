@@ -9,9 +9,13 @@
 //   - PiProvider: local agentic inference via Pi
 //
 // The kernel assembles foveated context and injects it via --system-prompt.
-// Pi runs the agent loop; the local backend runs the model. The default local
-// backend is LM Studio (lmstudio-darkstar, resident gemma-4-26b at
-// 127.0.0.1:1234) — see PR #417, which decommissioned Ollama as the default.
+// Pi runs the agent loop; the local backend runs the model. defaultLocalPiProvider
+// below is configured as "lmstudio" (PR #417) — but that is only a config
+// default, not a guarantee that pi's own provider registry (agent/models.json,
+// what `pi --list-models` reads) actually has an "lmstudio" entry. Available()
+// verifies the configured --provider exists in that registry before reporting
+// the provider usable. Earlier comments here claimed PR #417 already made this
+// safe; it did not — see #629.
 //
 // Output: parsed from `--mode json` which emits NDJSON AgentSessionEvents.
 package engine
@@ -23,21 +27,26 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 )
 
 // defaultLocalPiProvider is the pi `--provider` value used when a PiProvider
-// config does not specify one. Repointed from "ollama" to "lmstudio" to match
-// the engine's live local backend after PR #417 (Ollama decommissioned).
+// config does not specify one. Set to "lmstudio" by PR #417 to match the
+// engine's intended local backend. This is a config default only — whether
+// pi's own registry (agent/models.json) actually has an "lmstudio" provider
+// entry is verified at runtime by Available() via piRegistryHas (#629). A
+// mismatch is reported as unavailable, not silently repointed to whatever
+// provider the registry does have.
 const defaultLocalPiProvider = "lmstudio"
 
 // defaultLocalModel is the model used when a PiProvider config does not specify
 // one. The resident local model is google/gemma-4-26b-a4b via LM Studio
-// (lmstudio-darkstar), consistent with defaults/providers.yaml. Repointed from
-// defaultOllamaModel per PR #417.
+// (lmstudio-darkstar), consistent with defaults/providers.yaml (PR #417).
 const defaultLocalModel = "google/gemma-4-26b-a4b"
 
 // PiProvider implements Provider by spawning pi CLI processes.
@@ -137,6 +146,56 @@ var piBackendProbe = func(ctx context.Context, baseURL string) error {
 // Matches the resident LM Studio server documented in the file header.
 const defaultPiBackendURL = "http://127.0.0.1:1234"
 
+// piHomeDir resolves pi's home directory (where agent/models.json lives).
+// Package-level var so tests can stub it. Mirrors PI's own resolution order:
+// $PI_HOME if set, else ~/.pi.
+var piHomeDir = func() (string, error) {
+	if h := os.Getenv("PI_HOME"); h != "" {
+		return h, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".pi"), nil
+}
+
+// piModelsRegistry is the shape of $PI_HOME/agent/models.json that matters
+// here: a map of configured provider name -> provider config. We only need
+// to know whether a given provider key exists, so the value is left opaque.
+type piModelsRegistry struct {
+	Providers map[string]json.RawMessage `json:"providers"`
+}
+
+// piRegistryHas reports whether pi's own provider registry — the same file
+// `pi --list-models` reads — has an entry for the given --provider value.
+// Configuring PiProvider with provider="lmstudio" (the engine's default,
+// PR #417) does not mean pi itself knows about an "lmstudio" provider; the
+// two are independently configured, and a mismatch makes every pi invocation
+// fail with `Error: Unknown provider "..."` despite Available() historically
+// reporting true. The second return value is the registry path checked, for
+// logging/diagnostics.
+func piRegistryHas(provider string) (bool, string, error) {
+	home, err := piHomeDir()
+	if err != nil {
+		return false, "", err
+	}
+	path := filepath.Join(home, "agent", "models.json")
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, path, err
+	}
+
+	var reg piModelsRegistry
+	if err := json.Unmarshal(data, &reg); err != nil {
+		return false, path, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	_, ok := reg.Providers[provider]
+	return ok, path, nil
+}
+
 // Available reports whether pi can actually serve a request: the binary must be
 // on PATH AND the local backend it fronts must answer. Before this, Available
 // was exec.LookPath alone — the same defect class as claude-code and codex
@@ -175,6 +234,25 @@ func (p *PiProvider) probeAvailable(ctx context.Context) bool {
 	defer cancel()
 	if err := piBackendProbe(probeCtx, p.backendURL()); err != nil {
 		slog.Debug("pi: Available: backend probe failed", "backend", p.backendURL(), "err", err)
+		return false
+	}
+
+	// The backend answering does not mean pi itself will accept the
+	// configured --provider: pi maintains its own provider registry
+	// (agent/models.json, the source `pi --list-models` reads) independent
+	// of the engine's defaultLocalPiProvider default. A configured provider
+	// missing from that registry makes every pi invocation fail with
+	// `Error: Unknown provider "..."` even though the backend is healthy —
+	// this was the gap left by PR #417 (see #629). Do not silently repoint
+	// to whatever provider the registry does have; report unavailable and
+	// say why.
+	has, registryPath, err := piRegistryHas(p.provider)
+	if err != nil {
+		slog.Warn("pi: could not read provider registry", "provider", p.provider, "registry", registryPath, "err", err)
+		return false
+	}
+	if !has {
+		slog.Warn("pi: configured --provider not in pi registry", "provider", p.provider, "registry", registryPath, "hint", "pi --list-models")
 		return false
 	}
 	return true
