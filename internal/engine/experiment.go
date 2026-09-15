@@ -37,12 +37,12 @@ type ExperimentConfig struct {
 	Title   string `yaml:"title"`
 	Created string `yaml:"created"`
 	Run     struct {
-		PromptsFile        string  `yaml:"prompts_file"`        // path to benchmark_prompts.json
-		Model              string  `yaml:"model"`               // e.g. "qwen3.5:9b"
-		Budget             int     `yaml:"budget"`              // token budget (0 = default 4096)
-		Method             string  `yaml:"method"`              // e.g. "keyword-match"
+		PromptsFile         string  `yaml:"prompts_file"`         // path to benchmark_prompts.json
+		Model               string  `yaml:"model"`                // e.g. "qwen3.5:9b"
+		Budget              int     `yaml:"budget"`               // token budget (0 = default 4096)
+		Method              string  `yaml:"method"`               // e.g. "keyword-match"
 		RegressionThreshold float64 `yaml:"regression_threshold"` // recall drop that triggers flag (default 0.1)
-		BaselineRun        string  `yaml:"baseline_run"`        // path to previous result CogDoc for comparison
+		BaselineRun         string  `yaml:"baseline_run"`         // path to previous result CogDoc for comparison
 	} `yaml:"run"`
 }
 

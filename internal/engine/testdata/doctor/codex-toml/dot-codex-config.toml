@@ -1,0 +1,8 @@
+[mcp_servers."cogos-v3"]
+url = "PLACEHOLDER_KERNEL_URL"
+transport = "http"
+http_headers = { "X-Cogos-Grant" = "test-grant-value" }
+
+[mcp_servers.stdio-thing]
+command = "uvx"
+args = ["something"]

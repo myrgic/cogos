@@ -615,7 +615,7 @@
     },
     {
       "file": "internal/engine/cli_doctor.go",
-      "line": 1028,
+      "line": 1029,
       "column": 13,
       "primitive": "sql.Open(sqlite3)",
       "func": "doctorIndexHealth",
@@ -627,7 +627,7 @@
     },
     {
       "file": "internal/engine/cli_doctor.go",
-      "line": 1413,
+      "line": 1414,
       "column": 13,
       "primitive": "sql.Open(sqlite3)",
       "func": "doctorOneStore",
@@ -2989,6 +2989,16 @@
       "func": "gitCmd",
       "subsystem": "internal:coherence",
       "raw": "exec.CommandContext(ctx, \"git\", args...)",
+      "dir": "",
+      "dir_known": false
+    },
+    {
+      "file": "internal/engine/cli_doctor_inference.go",
+      "line": 313,
+      "column": 10,
+      "func": "checkArgvContracts",
+      "subsystem": "internal:engine",
+      "raw": "exec.CommandContext(ctx, binPath, args...)",
       "dir": "",
       "dir_known": false
     },

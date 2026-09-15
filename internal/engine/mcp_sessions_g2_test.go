@@ -3,36 +3,36 @@
 //
 // Test matrix:
 //
-//  PART A — correlation store unit tests:
-//   1. TestG2_CorrelationStore_RecordAndResolve
-//   2. TestG2_CorrelationStore_EmptyTransportID
-//   3. TestG2_CorrelationStore_UnknownID
-//   4. TestG2_RegisterSession_CorrelationRecorded
-//      Verify that toolRegisterSession populates the correlation store when
-//      the transport session provides a non-empty ID. (Tested via direct store
-//      injection since in-process CallTool path has Session.ID()=="".)
+//	PART A — correlation store unit tests:
+//	 1. TestG2_CorrelationStore_RecordAndResolve
+//	 2. TestG2_CorrelationStore_EmptyTransportID
+//	 3. TestG2_CorrelationStore_UnknownID
+//	 4. TestG2_RegisterSession_CorrelationRecorded
+//	    Verify that toolRegisterSession populates the correlation store when
+//	    the transport session provides a non-empty ID. (Tested via direct store
+//	    injection since in-process CallTool path has Session.ID()=="".)
 //
-//  PART B — attribution no-regression:
-//   5. TestG2_Attribution_NoTransportID_FallsBackToNucleus
-//      In-process CallTool: Session.ID()==""; attribution falls back to nucleus.Name.
+//	PART B — attribution no-regression:
+//	 5. TestG2_Attribution_NoTransportID_FallsBackToNucleus
+//	    In-process CallTool: Session.ID()==""; attribution falls back to nucleus.Name.
 //
-//  PART C — capability-envelope gating (behind IdentityNakedDefault):
-//   6. TestG2_CapabilityGating_FlagOff_NoEnforcement
-//   7. TestG2_CapabilityGating_FlagOn_Allowed
-//   8. TestG2_CapabilityGating_FlagOn_Denied
-//   9. TestG2_CapabilityGating_FlagOn_NoEnvelope
-//  10. TestG2_CapabilityGating_NoResolver_NoEnforcement
+//	PART C — capability-envelope gating (behind IdentityNakedDefault):
+//	 6. TestG2_CapabilityGating_FlagOff_NoEnforcement
+//	 7. TestG2_CapabilityGating_FlagOn_Allowed
+//	 8. TestG2_CapabilityGating_FlagOn_Denied
+//	 9. TestG2_CapabilityGating_FlagOn_NoEnvelope
+//	10. TestG2_CapabilityGating_NoResolver_NoEnforcement
 //
-//  PART C — filterToolsByCapability:
-//  11. TestG2_FilterToolsByCapability_RemovesDenied
-//  12. TestG2_FilterToolsByCapability_NoEnvelope_NoOp
-//  13. TestG2_FilterToolsByCapability_NilGater_NoOp
-//  14. TestG2_FilterToolsByCapability_EmptyCreq_NoOp
+//	PART C — filterToolsByCapability:
+//	11. TestG2_FilterToolsByCapability_RemovesDenied
+//	12. TestG2_FilterToolsByCapability_NoEnvelope_NoOp
+//	13. TestG2_FilterToolsByCapability_NilGater_NoOp
+//	14. TestG2_FilterToolsByCapability_EmptyCreq_NoOp
 //
-//  CapabilityResolver.CanInvoke:
-//  15. TestG2_CapabilityResolver_CanInvoke_NoEnvelope
-//  16. TestG2_CapabilityResolver_CanInvoke_DenyList
-//  17. TestG2_CapabilityResolver_CanInvoke_AllowList
+//	CapabilityResolver.CanInvoke:
+//	15. TestG2_CapabilityResolver_CanInvoke_NoEnvelope
+//	16. TestG2_CapabilityResolver_CanInvoke_DenyList
+//	17. TestG2_CapabilityResolver_CanInvoke_AllowList
 package engine
 
 import (
@@ -101,13 +101,13 @@ func TestG2_CorrelationStore_UnknownID(t *testing.T) {
 // Because CallTool (in-process) has Session.ID()=="" (the SDK's in-memory
 // transport returns an empty string), we cannot exercise the real transport
 // correlation path via CallTool. We instead:
-//   1. Call toolRegisterSession via CallTool to confirm it succeeds (PART A
-//      store is a no-op for empty transport IDs).
-//   2. Directly record a synthetic transport ID into the store and verify
-//      the resolver can find it — isolating the correlation store logic from
-//      the transport.
-//   3. Use the real HTTP Streamable transport (httptest.Server) to test the
-//      full path including the non-empty session ID from req.Session.ID().
+//  1. Call toolRegisterSession via CallTool to confirm it succeeds (PART A
+//     store is a no-op for empty transport IDs).
+//  2. Directly record a synthetic transport ID into the store and verify
+//     the resolver can find it — isolating the correlation store logic from
+//     the transport.
+//  3. Use the real HTTP Streamable transport (httptest.Server) to test the
+//     full path including the non-empty session ID from req.Session.ID().
 func TestG2_RegisterSession_CorrelationRecorded(t *testing.T) {
 	t.Parallel()
 

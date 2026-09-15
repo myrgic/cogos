@@ -35,15 +35,15 @@ type fakeMod3Proxy struct {
 	captured []capturedProxyRequest
 
 	// Overrides for per-endpoint behavior.
-	speakHandler        http.HandlerFunc
-	synthesizeHandler   http.HandlerFunc
-	stopHandler         http.HandlerFunc
-	voicesHandler       http.HandlerFunc
-	healthHandler       http.HandlerFunc
-	regHandler          http.HandlerFunc
-	deregHandler        http.HandlerFunc
-	listSessionHandler  http.HandlerFunc
-	chatFlowLogHandler  http.HandlerFunc
+	speakHandler       http.HandlerFunc
+	synthesizeHandler  http.HandlerFunc
+	stopHandler        http.HandlerFunc
+	voicesHandler      http.HandlerFunc
+	healthHandler      http.HandlerFunc
+	regHandler         http.HandlerFunc
+	deregHandler       http.HandlerFunc
+	listSessionHandler http.HandlerFunc
+	chatFlowLogHandler http.HandlerFunc
 }
 
 type capturedProxyRequest struct {
@@ -324,24 +324,24 @@ func newSpeakFn(capturedArgs *[]map[string]any) func(ctx context.Context, in mod
 		if n == 0 {
 			// First call: starts immediately, no queue.
 			return map[string]any{
-				"status":              "speaking",
-				"job_id":              jobID,
-				"queue_position":      float64(0),
+				"status":             "speaking",
+				"job_id":             jobID,
+				"queue_position":     float64(0),
 				"estimated_wait_sec": float64(0),
 			}, nil
 		}
 		// Subsequent calls: queued behind the first.
 		return map[string]any{
-			"status":       "queued",
-			"job_id":       jobID,
+			"status":         "queued",
+			"job_id":         jobID,
 			"queue_position": float64(n),
 			"currently_playing": map[string]any{
-				"job_id":       "job-mcp-0000",
+				"job_id":        "job-mcp-0000",
 				"remaining_sec": float64(3),
 			},
-			"queue_ahead":         []any{},
+			"queue_ahead":        []any{},
 			"estimated_wait_sec": float64(n) * 3.0,
-			"actions":             fmt.Sprintf("To cancel, call stop(job_id='%s').", jobID),
+			"actions":            fmt.Sprintf("To cancel, call stop(job_id='%s').", jobID),
 		}, nil
 	}
 }

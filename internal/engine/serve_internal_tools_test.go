@@ -26,19 +26,19 @@ import (
 // cursor; the final scripted entry repeats on overflow so a runaway tool
 // loop fails loudly rather than panicking in the test harness.
 type scriptedToolUseProvider struct {
-	name      string
-	mu        sync.Mutex
-	cursor    int
-	scripted  []*CompletionResponse
-	requests  []*CompletionRequest // captured for assertions
+	name     string
+	mu       sync.Mutex
+	cursor   int
+	scripted []*CompletionResponse
+	requests []*CompletionRequest // captured for assertions
 }
 
 func newScriptedToolUseProvider(name string, scripted ...*CompletionResponse) *scriptedToolUseProvider {
 	return &scriptedToolUseProvider{name: name, scripted: scripted}
 }
 
-func (p *scriptedToolUseProvider) Name() string  { return p.name }
-func (p *scriptedToolUseProvider) Model() string { return "scripted" }
+func (p *scriptedToolUseProvider) Name() string                     { return p.name }
+func (p *scriptedToolUseProvider) Model() string                    { return "scripted" }
 func (p *scriptedToolUseProvider) Available(_ context.Context) bool { return true }
 func (p *scriptedToolUseProvider) Capabilities() ProviderCapabilities {
 	return ProviderCapabilities{
@@ -135,8 +135,8 @@ func TestServerSideExecutionOfInternalCogTool(t *testing.T) {
 			ProviderMeta: ProviderMeta{Provider: "scripted", Model: "scripted"},
 		},
 		{
-			Content:    "I read the fixture and saw " + fixtureMarker + ".",
-			StopReason: "end_turn",
+			Content:      "I read the fixture and saw " + fixtureMarker + ".",
+			StopReason:   "end_turn",
 			ProviderMeta: ProviderMeta{Provider: "scripted", Model: "scripted"},
 		},
 	}
@@ -229,8 +229,8 @@ func newScriptedStreamUseProvider(name string, scripts ...[]StreamChunk) *script
 	return &scriptedStreamUseProvider{name: name, scripts: scripts}
 }
 
-func (p *scriptedStreamUseProvider) Name() string                  { return p.name }
-func (p *scriptedStreamUseProvider) Model() string                 { return "scripted-stream" }
+func (p *scriptedStreamUseProvider) Name() string                     { return p.name }
+func (p *scriptedStreamUseProvider) Model() string                    { return "scripted-stream" }
 func (p *scriptedStreamUseProvider) Available(_ context.Context) bool { return true }
 func (p *scriptedStreamUseProvider) Capabilities() ProviderCapabilities {
 	return ProviderCapabilities{

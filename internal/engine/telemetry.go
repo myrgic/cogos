@@ -4,13 +4,15 @@
 // Degrades gracefully to no-op when no collector is available.
 //
 // Environment variables:
-//   OTEL_EXPORTER_OTLP_ENDPOINT — collector endpoint (default: http://localhost:4318)
-//   OTEL_SERVICE_NAME           — service name (default: cogos)
+//
+//	OTEL_EXPORTER_OTLP_ENDPOINT — collector endpoint (default: http://localhost:4318)
+//	OTEL_SERVICE_NAME           — service name (default: cogos)
 //
 // Usage:
-//   shutdown := initTelemetry(ctx)
-//   defer shutdown(ctx)
-//   // Use otel.Tracer("cogos") and otel.Meter("cogos") anywhere.
+//
+//	shutdown := initTelemetry(ctx)
+//	defer shutdown(ctx)
+//	// Use otel.Tracer("cogos") and otel.Meter("cogos") anywhere.
 package engine
 
 import (
@@ -33,10 +35,10 @@ import (
 
 // Instruments holds the OTel metric instruments used across the kernel.
 var instruments struct {
-	ChatRequests    metric.Int64Counter
-	ContextTokens   metric.Int64Histogram
-	DocsInjected    metric.Int64Histogram
-	TurnsEvicted    metric.Int64Counter
+	ChatRequests     metric.Int64Counter
+	ContextTokens    metric.Int64Histogram
+	DocsInjected     metric.Int64Histogram
+	TurnsEvicted     metric.Int64Counter
 	InferenceLatency metric.Float64Histogram
 	InferenceTokens  metric.Int64Histogram
 }

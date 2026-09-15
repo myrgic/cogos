@@ -218,9 +218,9 @@ func scanSessionFile(path string) (summary string, turns, total int) {
 		// Claude Code wraps every record in an envelope with a top-level "type"
 		// field. The actual conversation message lives in the "message" field.
 		var envelope struct {
-			Type            string `json:"type"` // "user", "assistant", "system", etc.
+			Type             string `json:"type"` // "user", "assistant", "system", etc.
 			IsCompactSummary bool   `json:"isCompactSummary"`
-			Message         struct {
+			Message          struct {
 				Role    string `json:"role"`
 				Content any    `json:"content"` // string or []map
 			} `json:"message"`

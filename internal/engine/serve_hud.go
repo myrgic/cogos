@@ -50,18 +50,18 @@ type HUDState struct {
 
 // HUDIdentity captures the node's identity at snapshot time.
 type HUDIdentity struct {
-	NodeID    string  `json:"node_id"`
-	Name      string  `json:"name,omitempty"`       // nucleus name (seat)
+	NodeID     string  `json:"node_id"`
+	Name       string  `json:"name,omitempty"`        // nucleus name (seat)
 	TrustScore float64 `json:"trust_score,omitempty"` // local trust score [0,1]
 }
 
 // HUDSession summarises one active foveated-context session.
 type HUDSession struct {
-	SessionID    string    `json:"session_id"`
-	Profile      string    `json:"profile"`
-	TurnNumber   int       `json:"turn_number"`
-	IrisPressure float64   `json:"iris_pressure"` // context-window fill [0,1]
-	TotalTokens  int       `json:"total_tokens"`
+	SessionID     string    `json:"session_id"`
+	Profile       string    `json:"profile"`
+	TurnNumber    int       `json:"turn_number"`
+	IrisPressure  float64   `json:"iris_pressure"` // context-window fill [0,1]
+	TotalTokens   int       `json:"total_tokens"`
 	LastRequestAt time.Time `json:"last_request_at"`
 }
 

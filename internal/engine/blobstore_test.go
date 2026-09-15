@@ -163,14 +163,14 @@ func TestShouldRedirectToBlob(t *testing.T) {
 		size int64
 		want bool
 	}{
-		{"audio.mp3", 100, true},           // always redirect audio
-		{"model.bin", 100, true},            // always redirect binary
-		{"small.pdf", 1000, false},          // small PDF OK
-		{"big.pdf", 6_000_000, true},        // big PDF → blob
-		{"readme.md", 500, false},           // small text OK
-		{"huge.json", 15_000_000, true},     // big JSON → blob
-		{"image.png", 500_000, false},       // small image OK
-		{"image.png", 2_000_000, true},      // big image → blob
+		{"audio.mp3", 100, true},        // always redirect audio
+		{"model.bin", 100, true},        // always redirect binary
+		{"small.pdf", 1000, false},      // small PDF OK
+		{"big.pdf", 6_000_000, true},    // big PDF → blob
+		{"readme.md", 500, false},       // small text OK
+		{"huge.json", 15_000_000, true}, // big JSON → blob
+		{"image.png", 500_000, false},   // small image OK
+		{"image.png", 2_000_000, true},  // big image → blob
 	}
 
 	for _, tt := range tests {
@@ -180,4 +180,3 @@ func TestShouldRedirectToBlob(t *testing.T) {
 		}
 	}
 }
-

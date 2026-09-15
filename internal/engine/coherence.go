@@ -5,10 +5,10 @@
 // The continuous process runs this on a cadence; it is not session-triggered.
 //
 // Layers:
-//   1. Schema    — frontmatter structure valid
-//   2. Invariants — system invariants hold (nucleus loaded, workspace intact)
-//   3. Policy    — kernel boundary not violated
-//   4. Consistency — cross-artifact coherence
+//  1. Schema    — frontmatter structure valid
+//  2. Invariants — system invariants hold (nucleus loaded, workspace intact)
+//  3. Policy    — kernel boundary not violated
+//  4. Consistency — cross-artifact coherence
 package engine
 
 import (

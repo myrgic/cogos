@@ -225,4 +225,3 @@ func TestCogBlockLinearChainPrev(t *testing.T) {
 		t.Errorf("Prev[0] = %q; want sha256:predecessor", decoded.Prev[0])
 	}
 }
-

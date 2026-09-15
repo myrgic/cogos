@@ -516,4 +516,3 @@ func TestHandleToolCallsHTTP(t *testing.T) {
 		t.Errorf("status = %q; want success", decoded.Calls[0].Status)
 	}
 }
-

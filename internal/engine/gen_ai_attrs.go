@@ -15,16 +15,18 @@
 //     fields that have no upstream semconv equivalent.
 //
 // Architectural note:
-//   H1/H2/H3/H4 is one OTel convention applied at multiple call sites — not
-//   four separate tracks. This file is the foundation; H2 wires it into
-//   ProjectionReconciler spans; H3 adds the conversation/turn/service span
-//   hierarchy; H4 wires ProjectionReconciler spans into that hierarchy.
+//
+//	H1/H2/H3/H4 is one OTel convention applied at multiple call sites — not
+//	four separate tracks. This file is the foundation; H2 wires it into
+//	ProjectionReconciler spans; H3 adds the conversation/turn/service span
+//	hierarchy; H4 wires ProjectionReconciler spans into that hierarchy.
 //
 // Wire compatibility:
-//   These attributes are emitted on OpenTelemetry spans that may be exported
-//   to Jaeger, Prometheus, or any OTel-compatible backend. The cogos.* extension
-//   keys are namespaced to avoid collisions with future upstream GenAI semconv
-//   additions.
+//
+//	These attributes are emitted on OpenTelemetry spans that may be exported
+//	to Jaeger, Prometheus, or any OTel-compatible backend. The cogos.* extension
+//	keys are namespaced to avoid collisions with future upstream GenAI semconv
+//	additions.
 //
 // See: https://opentelemetry.io/docs/specs/semconv/gen-ai/ (v1.30.0)
 package engine

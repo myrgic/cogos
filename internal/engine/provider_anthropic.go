@@ -126,6 +126,9 @@ func (p *AnthropicProvider) Ping(ctx context.Context) (time.Duration, error) {
 	if resp.StatusCode == http.StatusUnauthorized {
 		return 0, fmt.Errorf("anthropic: ping: invalid API key (401)")
 	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("anthropic: ping: /v1/models returned HTTP %d", resp.StatusCode)
+	}
 	return time.Since(start), nil
 }
 

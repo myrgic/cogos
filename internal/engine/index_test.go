@@ -281,8 +281,8 @@ func TestParseCogdocFrontmatter(t *testing.T) {
 		bodyPrefix string
 	}{
 		{
-			name: "full frontmatter",
-			input: "---\ntitle: Hello\ntype: insight\ntags: [a, b]\nstatus: active\n---\n\n# Body\n",
+			name:      "full frontmatter",
+			input:     "---\ntitle: Hello\ntype: insight\ntags: [a, b]\nstatus: active\n---\n\n# Body\n",
 			wantTitle: "Hello", wantType: "insight",
 			wantTags: []string{"a", "b"}, wantStatus: "active",
 			bodyPrefix: "# Body", // leading blank line stripped by TrimLeft
@@ -337,4 +337,3 @@ func uriKeys(idx *CogDocIndex) []string {
 	}
 	return keys
 }
-

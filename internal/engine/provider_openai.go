@@ -241,6 +241,14 @@ func (p *OpenAICompatProvider) Ping(ctx context.Context) (time.Duration, error) 
 		return 0, fmt.Errorf("openai-compat: ping: %w", err)
 	}
 	resp.Body.Close()
+	// A reachable endpoint that answers non-2xx (reverse-proxy 502, 403 on a
+	// bad key, 404 on a server without /v1/models) is not a healthy ping.
+	// Before #635 this returned nil for any status, so `cogos doctor` — the
+	// only caller of Ping() besides the mlx passthrough — reported OK for a
+	// genuinely broken endpoint.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("openai-compat: ping: %s returned HTTP %d", req.URL.Path, resp.StatusCode)
+	}
 	return time.Since(start), nil
 }
 

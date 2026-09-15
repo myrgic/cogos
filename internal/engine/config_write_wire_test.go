@@ -31,7 +31,7 @@ func newMCPForTest(t *testing.T) (*MCPServer, string) {
 	return NewMCPServer(cfg, makeNucleus("Cog", "tester"), process), root
 }
 
-// 15. MCP roundtrip: toolWriteConfig with a real merge patch writes + returns
+//  15. MCP roundtrip: toolWriteConfig with a real merge patch writes + returns
 //     the expected shape.
 func TestToolWriteConfig_HappyPath(t *testing.T) {
 	t.Parallel()

@@ -18,14 +18,14 @@ import (
 // ── expected violation string constants ──────────────────────────────────────
 
 const (
-	wantI1Violation        = "I1: first message must be user, got"
-	wantI2UserViolation    = "I2: consecutive user at index 1"
-	wantI2AssistViolation  = "I2: consecutive assistant at index 2"
+	wantI1Violation         = "I1: first message must be user, got"
+	wantI2UserViolation     = "I2: consecutive user at index 1"
+	wantI2AssistViolation   = "I2: consecutive assistant at index 2"
 	wantI3OrphanTUViolation = "I3: assistant tool_use id="
 	wantI3OrphanTRViolation = "I3: orphan tool_result tool_use_id="
-	wantI4Violation        = "I4: tool_result is not block-0 in user message at index"
-	wantI5Violation        = "I5: assistant at index"
-	wantI6Violation        = "I6: thinking block with signature in non-final assistant at index"
+	wantI4Violation         = "I4: tool_result is not block-0 in user message at index"
+	wantI5Violation         = "I5: assistant at index"
+	wantI6Violation         = "I6: thinking block with signature in non-final assistant at index"
 )
 
 // ── checker self-test ────────────────────────────────────────────────────────
@@ -545,7 +545,7 @@ func generateRandomMessages(rng *rand.Rand) []anthropicMessage {
 	// 20% chance of leading assistant (I1 violation seed).
 	if rng.Float64() < 0.20 {
 		msgs = append(msgs, anthropicMessage{
-			Role: "assistant",
+			Role:    "assistant",
 			Content: []anthropicContentBlock{{Type: "text", Text: "leading"}},
 		})
 	}

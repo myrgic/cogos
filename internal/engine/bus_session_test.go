@@ -847,7 +847,7 @@ func TestArchiveRetentionFor(t *testing.T) {
 		busID string
 		want  int
 	}{
-		{"bus_traces", 8},                        // exact match, prefixed
+		{"bus_traces", 8},                         // exact match, prefixed
 		{"traces", 8},                             // exact match, unprefixed
 		{"bus_kernel_proprio", 8},                 // exact match wins over the "kernel" segment
 		{"bus_peer_awareness", 8},                 // exact match wins over the "peer" segment
@@ -1562,7 +1562,7 @@ func TestReadEventsSince_CacheBoundedByBytesPerBus(t *testing.T) {
 	root := t.TempDir()
 	originalBytes := maxReadCacheBytesPerBus
 	originalEvents := maxReadCacheEventsPerBus
-	maxReadCacheBytesPerBus = 1000 // small bound, easily crossed by a few large payloads
+	maxReadCacheBytesPerBus = 1000       // small bound, easily crossed by a few large payloads
 	maxReadCacheEventsPerBus = 1_000_000 // effectively disabled, so only the byte cap can fire
 	t.Cleanup(func() {
 		maxReadCacheBytesPerBus = originalBytes

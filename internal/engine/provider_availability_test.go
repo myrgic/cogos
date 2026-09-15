@@ -352,4 +352,3 @@ func TestPiAvailable_NonDefaultProviderPresent(t *testing.T) {
 		t.Fatal("Available must be true when a non-default configured --provider is present in pi's registry")
 	}
 }
-

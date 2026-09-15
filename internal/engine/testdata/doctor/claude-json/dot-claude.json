@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "cogos-kernel": {
+      "type": "http",
+      "url": "PLACEHOLDER_KERNEL_URL",
+      "headers": {
+        "X-Cogos-Grant": "test-grant-value"
+      }
+    },
+    "stdio-server": {
+      "command": "/usr/bin/true",
+      "args": []
+    }
+  },
+  "projects": {}
+}

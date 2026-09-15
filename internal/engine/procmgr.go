@@ -166,7 +166,7 @@ type ProcessManager struct {
 	processes map[string]*ManagedProcess
 
 	// Limits.
-	maxGlobal     int // max concurrent processes across all identities
+	maxGlobal      int // max concurrent processes across all identities
 	maxPerIdentity int // max concurrent processes per NodeID
 
 	// Callback handler — called when a background process finishes.
@@ -453,15 +453,15 @@ func (pm *ProcessManager) CanSpawn(identity string) error {
 
 // ProcessSummary is a JSON-friendly snapshot of a managed process.
 type ProcessSummary struct {
-	ID              string  `json:"id"`
-	Kind            string  `json:"kind"`
-	Status          string  `json:"status"`
-	Source          string  `json:"source"`
-	Identity        string  `json:"identity,omitempty"`
-	StartedAt       string  `json:"started_at"`
-	Duration        string  `json:"duration"`
-	CallbackChannel string  `json:"callback_channel,omitempty"`
-	Error           string  `json:"error,omitempty"`
+	ID              string `json:"id"`
+	Kind            string `json:"kind"`
+	Status          string `json:"status"`
+	Source          string `json:"source"`
+	Identity        string `json:"identity,omitempty"`
+	StartedAt       string `json:"started_at"`
+	Duration        string `json:"duration"`
+	CallbackChannel string `json:"callback_channel,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 // List returns a snapshot of all tracked processes.
@@ -493,13 +493,13 @@ func (pm *ProcessManager) List() []ProcessSummary {
 
 // Stats returns aggregate counts.
 type ProcessStats struct {
-	Total      int            `json:"total"`
-	Running    int            `json:"running"`
-	Completed  int            `json:"completed"`
-	Failed     int            `json:"failed"`
-	Cancelled  int            `json:"cancelled"`
-	ByKind     map[string]int `json:"by_kind"`
-	BySource   map[string]int `json:"by_source"`
+	Total     int            `json:"total"`
+	Running   int            `json:"running"`
+	Completed int            `json:"completed"`
+	Failed    int            `json:"failed"`
+	Cancelled int            `json:"cancelled"`
+	ByKind    map[string]int `json:"by_kind"`
+	BySource  map[string]int `json:"by_source"`
 }
 
 func (pm *ProcessManager) Stats() ProcessStats {

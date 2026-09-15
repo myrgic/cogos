@@ -96,11 +96,11 @@ const DefaultForkRetention = 7 * 24 * time.Hour
 // The bus is ground truth; this registry is a derived warm cache rebuilt
 // from replay on startup.
 type ForkRegistry struct {
-	mu       sync.RWMutex
+	mu sync.RWMutex
 	// children maps parentSessionID → []forkEntry
 	children map[string][]forkEntry
 	// byChild maps childSessionID → forkEntry (for ancestor walk)
-	byChild  map[string]forkEntry
+	byChild map[string]forkEntry
 }
 
 // NewForkRegistry returns an empty ForkRegistry.

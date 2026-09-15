@@ -41,7 +41,7 @@ type BlobEntry struct {
 	Hash        string   `json:"hash"`
 	Size        int64    `json:"size"`
 	ContentType string   `json:"content_type"`
-	Refs        []string `json:"refs,omitempty"`   // CogDoc URIs that reference this blob
+	Refs        []string `json:"refs,omitempty"` // CogDoc URIs that reference this blob
 	SyncedTo    []string `json:"synced_to,omitempty"`
 	StoredAt    string   `json:"stored_at"`
 }
@@ -410,10 +410,10 @@ func ShouldRedirectToBlob(path string, size int64) bool {
 
 	// Size-based thresholds.
 	thresholds := map[string]int64{
-		".pdf": 5 * 1024 * 1024,  // 5MB
-		".png": 1024 * 1024,       // 1MB
-		".jpg": 1024 * 1024,       // 1MB
-		".jpeg": 1024 * 1024,      // 1MB
+		".pdf":  5 * 1024 * 1024, // 5MB
+		".png":  1024 * 1024,     // 1MB
+		".jpg":  1024 * 1024,     // 1MB
+		".jpeg": 1024 * 1024,     // 1MB
 	}
 	if threshold, ok := thresholds[ext]; ok {
 		return size >= threshold

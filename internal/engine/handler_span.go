@@ -123,7 +123,9 @@ func (e *serverSpanEmitter) emitSpan(span KernelHandlerSpan) {
 // collector.  All durations are wall-clock milliseconds.
 //
 // To export to Jaeger, set OTEL_EXPORTER_OTLP_ENDPOINT and run:
-//   docker run -p 16686:16686 -p 4317:4317 jaegertracing/all-in-one
+//
+//	docker run -p 16686:16686 -p 4317:4317 jaegertracing/all-in-one
+//
 // The OTel SDK in telemetry.go will pick it up automatically.
 type ChatSubSpan struct {
 	SpanName      string    `json:"span_name"`      // e.g. "chat.answer_generation"
@@ -147,9 +149,9 @@ func emitChatSubSpan(bus *BusSessionManager, sub ChatSubSpan) {
 		return
 	}
 	payload := map[string]interface{}{
-		"span_name":    sub.SpanName,
-		"started_at":   sub.StartedAt.UTC().Format(time.RFC3339Nano),
-		"duration_ms":  sub.DurationMS,
+		"span_name":   sub.SpanName,
+		"started_at":  sub.StartedAt.UTC().Format(time.RFC3339Nano),
+		"duration_ms": sub.DurationMS,
 	}
 	if sub.ParentSpanID != "" {
 		payload["parent_span_id"] = sub.ParentSpanID

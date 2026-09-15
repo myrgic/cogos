@@ -161,4 +161,3 @@ func (s *Server) emitSkillExecEvent(skill *SkillRecord, resp *SkillExecResponse)
 	}
 	_, _ = s.busSessions.AppendEvent("skill", "skill.exec", "kernel:skill:exec", payload)
 }
-

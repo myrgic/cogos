@@ -60,11 +60,11 @@ type ConversationTurn struct {
 
 // ConversationQueryResult is the envelope returned to MCP/HTTP callers.
 type ConversationQueryResult struct {
-	Count         int                 `json:"count"`
-	SessionID     string              `json:"session_id,omitempty"`
-	Turns         []ConversationTurn  `json:"turns"`
-	Truncated     bool                `json:"truncated"`
-	NextAfterTurn int                 `json:"next_after_turn,omitempty"`
+	Count         int                `json:"count"`
+	SessionID     string             `json:"session_id,omitempty"`
+	Turns         []ConversationTurn `json:"turns"`
+	Truncated     bool               `json:"truncated"`
+	NextAfterTurn int                `json:"next_after_turn,omitempty"`
 }
 
 // QueryConversation reads turn.completed events for the given session and

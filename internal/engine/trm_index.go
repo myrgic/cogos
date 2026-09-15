@@ -42,9 +42,9 @@ type EmbeddingIndex struct {
 
 // IndexResult is a single search result from the embedding index.
 type IndexResult struct {
-	Index      int
-	Score      float32
-	ChunkMeta  ChunkMeta
+	Index     int
+	Score     float32
+	ChunkMeta ChunkMeta
 }
 
 // LoadEmbeddingIndex loads the binary embedding file and chunk metadata JSON.

@@ -116,12 +116,12 @@ type ScoreHead struct {
 // MambaTRM is the full temporal retrieval model.
 type MambaTRM struct {
 	Config     TRMConfig
-	TypeEmbed  [][]float32    // [n_event_types][d_model]
-	InputProj  Linear         // 2*d_model → d_model
-	Layers     []MambaBlock   // [n_layers]
-	FinalNorm  LayerNorm      // d_model
+	TypeEmbed  [][]float32      // [n_event_types][d_model]
+	InputProj  Linear           // 2*d_model → d_model
+	Layers     []MambaBlock     // [n_layers]
+	FinalNorm  LayerNorm        // d_model
 	Probes     []AttentionProbe // [n_probes]
-	ProbeNorms []LayerNorm    // [n_probes]
+	ProbeNorms []LayerNorm      // [n_probes]
 	Head       ScoreHead
 }
 
