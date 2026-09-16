@@ -56,6 +56,8 @@ jobs:
 
       - name: Run self-contained integration tests
         run: |
-          go test -tags "integration fts5" -race -count=1 -v -timeout 120s \
+          # #637: package wall must exceed engine's -race time (140-160s on CI);
+          # per-test tightness belongs in t.Deadline, not here.
+          go test -tags "integration fts5" -race -count=1 -v -timeout 10m \
             ./internal/engine/ \
             ./sdk/
