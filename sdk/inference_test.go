@@ -1,31 +1,80 @@
 package sdk
 
 import (
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/myrgic/cogos/sdk/types"
 )
 
+// TestModelAlias asserts ResolveModelAlias is now the identity function
+// (see #632): the SDK no longer owns a short-name -> date-pinned-id table.
+// Short aliases like "sonnet"/"opus"/"haiku" are passed straight through to
+// the `claude` CLI (which resolves them itself) or the kernel's resolve.go
+// for kernel-routed calls.
 func TestModelAlias(t *testing.T) {
-	tests := []struct {
-		alias    string
-		expected string
-	}{
-		{"sonnet", "claude-sonnet-4-20250514"},
-		{"opus", "claude-opus-4-20250514"},
-		{"haiku", "claude-haiku-3-20240307"},
-		{"claude-sonnet-4-20250514", "claude-sonnet-4-20250514"}, // Pass through full IDs
-		{"unknown-model", "unknown-model"},                       // Pass through unknowns
+	tests := []string{
+		"sonnet", "opus", "haiku",
+		"claude-sonnet-4-5", // full (undated) IDs pass through unchanged too
+		"unknown-model",
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.alias, func(t *testing.T) {
-			got := types.ResolveModelAlias(tt.alias)
-			if got != tt.expected {
-				t.Errorf("ResolveModelAlias(%q) = %q, want %q", tt.alias, got, tt.expected)
+	for _, alias := range tests {
+		t.Run(alias, func(t *testing.T) {
+			got := types.ResolveModelAlias(alias)
+			if got != alias {
+				t.Errorf("ResolveModelAlias(%q) = %q, want identity %q", alias, got, alias)
 			}
 		})
+	}
+}
+
+// TestSDKNoDatePinnedModelIDs guards against literal date-pinned Claude model
+// IDs (e.g. claude-sonnet-4 followed by an 8-digit date) creeping back into
+// sdk/, which is what caused #632: a stale ModelAlias table with dead ids
+// nothing re-verified against a live catalog. Allowlist is intentionally
+// empty.
+func TestSDKNoDatePinnedModelIDs(t *testing.T) {
+	allowlist := map[string]bool{}
+
+	pattern := regexp.MustCompile(`claude-[a-z]+-\d+(-\d+)?-20\d{6}`)
+
+	root := ".." // sdk/ package dir -> repo-relative sdk/
+	sdkRoot := filepath.Join(root, "sdk")
+	// Resolve to an absolute path robust to test working directory.
+	if abs, err := filepath.Abs(sdkRoot); err == nil {
+		sdkRoot = abs
+	}
+
+	err := filepath.WalkDir(sdkRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, m := range pattern.FindAllString(string(data), -1) {
+			if allowlist[m] {
+				continue
+			}
+			t.Errorf("%s: found date-pinned model id %q (not in allowlist)", path, m)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk sdk/: %v", err)
 	}
 }
 
@@ -98,7 +147,7 @@ func TestInferenceResponse(t *testing.T) {
 	resp := types.InferenceResponse{
 		ID:           "req-test-123",
 		Content:      "Test response content",
-		Model:        "claude-sonnet-4-20250514",
+		Model:        "claude-sonnet-4-5",
 		InputTokens:  100,
 		OutputTokens: 50,
 		StopReason:   "stop",

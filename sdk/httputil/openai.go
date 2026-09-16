@@ -26,7 +26,7 @@ func NewOpenAIHandler(k *sdk.Kernel) *OpenAIHandler {
 
 // ChatCompletionRequest matches the OpenAI chat completion request format.
 type ChatCompletionRequest struct {
-	// Model is the model to use (e.g., "sonnet", "opus", "claude-sonnet-4-20250514").
+	// Model is the model to use (e.g., "sonnet", "opus", "claude-sonnet-4-5").
 	Model string `json:"model"`
 
 	// Messages is the conversation history.

@@ -208,7 +208,7 @@ Essential for testing. The full request pipeline — context assembly, routing, 
 providers:
   anthropic:
     api_key_env: ANTHROPIC_API_KEY
-    model: claude-sonnet-4-20250514
+    model: claude-sonnet-5
     max_tokens: 8192
     timeout: 120
 

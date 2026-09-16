@@ -268,14 +268,17 @@ type anthropicSSEUsage struct {
 // 2026-07-17: claude-opus-4-7 rejects; claude-sonnet-4-6 and
 // claude-haiku-4-5-20251001 still accept. The Claude 5 family follows the
 // opus-4-7+ behavior.
+//
+// "claude-haiku-5" and "claude-mythos-5" were pruned 2026-09-15 (#632): no
+// catalog lists either model, so their inclusion was an unverified guess
+// rather than an observed 400. Add them back only alongside a live
+// verification note like the ones above.
 var temperatureDeprecatedPrefixes = []string{
 	"claude-opus-4-7",
 	"claude-opus-4-8",
 	"claude-sonnet-5",
-	"claude-haiku-5",
 	"claude-opus-5",
 	"claude-fable-5",
-	"claude-mythos-5",
 }
 
 // modelDeprecatesTemperature reports whether the given Anthropic model id

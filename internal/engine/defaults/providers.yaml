@@ -82,7 +82,7 @@ providers:
     type: anthropic
     enabled: false   # Set ANTHROPIC_API_KEY and enable to use
     api_key_env: ANTHROPIC_API_KEY
-    model: "claude-sonnet-4-20250514"
+    model: "claude-sonnet-5"
     timeout: 120
     context_window: 200000
 
