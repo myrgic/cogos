@@ -411,11 +411,12 @@ func TestGateway_DeliberationRoutes_ToClaudeCode(t *testing.T) {
 
 // modelsResponseModel mirrors the JSON shape of a model entry in the response.
 type modelsResponseModel struct {
-	ID            string `json:"id"`
-	OwnedBy       string `json:"owned_by"`
-	Tier          string `json:"tier"`
-	Description   string `json:"description"`
-	ContextLength int    `json:"context_length"`
+	ID            string   `json:"id"`
+	OwnedBy       string   `json:"owned_by"`
+	Tier          string   `json:"tier"`
+	Description   string   `json:"description"`
+	ContextLength int      `json:"context_length"`
+	Capabilities  []string `json:"capabilities"`
 }
 
 type modelsResponse struct {

@@ -56,6 +56,7 @@ autoresearch-foveated/
 .claude/
 agent-worktrees/
 cogos-worktrees/
+.cog/scratch/
 
 # Runtime/private spill — never publish (episodic sessions, blobs, OOB Hermes state)
 .cog/blobs/

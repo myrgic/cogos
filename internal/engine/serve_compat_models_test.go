@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -981,6 +982,188 @@ func TestHandleCard_DefaultModelIsListed(t *testing.T) {
 		def, ids := decode(t, freshModelsServer(t, router))
 		if def != "" || len(ids) != 0 {
 			t.Fatalf("defaultModel=%q models=%v; want empty/none — never a model that cannot be served", def, ids)
+		}
+	})
+}
+
+// ── #640: capabilities propagation ──────────────────────────────────────────
+
+// TestHandleModels_CapabilitiesPropagated verifies the core #640 fix: a live
+// provider whose Capabilities() declares a non-empty capability list has that
+// list surfaced (string form) as `capabilities` on every composed
+// /v1/models entry it serves.
+func TestHandleModels_CapabilitiesPropagated(t *testing.T) {
+	t.Parallel()
+
+	lister := newListerStub("lmstudio-darkstar", true, "gemma-4-26b")
+	lister.capabilities.Capabilities = []Capability{CapVision, CapToolUse}
+	router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-darkstar"})
+	router.RegisterProvider(lister)
+
+	srv := freshModelsServer(t, router)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	srv.handleModels(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleModels: status = %d; want 200", w.Code)
+	}
+	raw := w.Body.String()
+	if !strings.Contains(raw, `"capabilities":["vision","tool_use"]`) {
+		t.Errorf("raw JSON missing expected capabilities array; body: %s", raw)
+	}
+
+	resp := fetchModels(t, srv)
+	byID := modelIDSet(resp)
+	m, ok := byID["lmstudio-darkstar/gemma-4-26b"]
+	if !ok {
+		t.Fatalf("composite id missing; got %v", modelIDKeys(byID))
+	}
+	if len(m.Capabilities) != 2 || m.Capabilities[0] != "vision" || m.Capabilities[1] != "tool_use" {
+		t.Errorf("Capabilities = %v; want [vision tool_use]", m.Capabilities)
+	}
+}
+
+// TestHandleModels_CapabilitiesAbsentIsOmitted verifies the design constraint
+// from #640 (mirroring #518 for context_length): a provider that declares an
+// EMPTY capability list must have the `capabilities` JSON key OMITTED
+// entirely from its entries — never emitted as `[]` or a guessed list. `[]`
+// on the wire would falsely claim "declared and supports nothing" instead of
+// "unknown".
+func TestHandleModels_CapabilitiesAbsentIsOmitted(t *testing.T) {
+	t.Parallel()
+
+	lister := newListerStub("some-vllm", true, "mystery-model")
+	lister.capabilities.Capabilities = nil // explicit: provider declares nothing
+	router := NewSimpleRouter(RoutingConfig{Default: "some-vllm"})
+	router.RegisterProvider(lister)
+
+	srv := freshModelsServer(t, router)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	srv.handleModels(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleModels: status = %d; want 200", w.Code)
+	}
+	raw := w.Body.String()
+	if strings.Contains(raw, `"capabilities"`) {
+		t.Errorf("capabilities key must be entirely omitted when the provider declares none; body: %s", raw)
+	}
+}
+
+// TestHandleModels_CapabilitiesFrontierAliasesMatchProvider verifies the
+// foreground/deliberation intent aliases and the static claude-* ids inherit
+// capabilities from the resolved frontier provider (mirrors the existing
+// #518 context_length parity tests), and that a provider declaring no
+// capabilities omits the field on those entries too.
+func TestHandleModels_CapabilitiesFrontierAliasesMatchProvider(t *testing.T) {
+	t.Parallel()
+
+	claude := newCloudStub("claude-oauth", "resp")
+	claude.capabilities.Capabilities = []Capability{CapVision, CapToolUse, CapStreaming}
+	router := NewSimpleRouter(RoutingConfig{Default: "claude-oauth"})
+	router.RegisterProvider(claude)
+
+	srv := freshModelsServer(t, router)
+	resp := fetchModels(t, srv)
+	byID := modelIDSet(resp)
+
+	for _, id := range []string{"foreground", "deliberation", "claude-sonnet-4-6", "claude-opus-4-7", "claude-haiku-4-5-20251001"} {
+		m, ok := byID[id]
+		if !ok {
+			t.Fatalf("%q missing from /v1/models; got %v", id, modelIDKeys(byID))
+		}
+		want := map[string]bool{"vision": true, "tool_use": true, "streaming": true}
+		if len(m.Capabilities) != len(want) {
+			t.Errorf("%q Capabilities = %v; want %v", id, m.Capabilities, want)
+			continue
+		}
+		for _, c := range m.Capabilities {
+			if !want[c] {
+				t.Errorf("%q Capabilities has unexpected entry %q (got %v)", id, c, m.Capabilities)
+			}
+		}
+	}
+}
+
+// TestHandleModels_CapabilitiesAbsentOnAliasesWhenProviderDeclaresNone pins
+// the negative case (#640): when the resolved frontier provider declares an
+// empty capability list, foreground/deliberation/claude-* must all omit
+// `capabilities`, the same way they'd omit `context_length` (#518) for a
+// provider with MaxContextTokens 0.
+func TestHandleModels_CapabilitiesAbsentOnAliasesWhenProviderDeclaresNone(t *testing.T) {
+	t.Parallel()
+
+	claude := newCloudStub("claude-oauth", "resp")
+	claude.capabilities.Capabilities = nil
+	router := NewSimpleRouter(RoutingConfig{Default: "claude-oauth"})
+	router.RegisterProvider(claude)
+
+	srv := freshModelsServer(t, router)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	srv.handleModels(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleModels: status = %d; want 200", w.Code)
+	}
+	raw := w.Body.String()
+	if strings.Contains(raw, `"capabilities"`) {
+		t.Errorf("capabilities key must be omitted for every alias/static entry when the frontier provider declares none; body: %s", raw)
+	}
+}
+
+// TestHandleModels_CapabilitiesLocalAlias verifies localAliasCapabilities
+// (review finding on #640: the "local" alias's capability propagation had
+// no dedicated test, unlike frontierCapabilities). Mirrors
+// localAliasContextLength's own coverage: resolves "local" to its target
+// provider (lmstudio-darkstar here) and asserts the alias entry carries
+// that provider's declared capabilities, and that a provider declaring
+// none omits the field on the alias too.
+func TestHandleModels_CapabilitiesLocalAlias(t *testing.T) {
+	t.Parallel()
+
+	t.Run("propagated", func(t *testing.T) {
+		t.Parallel()
+		local := newListerStub("lmstudio-darkstar", true, "gemma-4-26b")
+		local.capabilities.Capabilities = []Capability{CapVision, CapStreaming}
+		router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-darkstar"})
+		router.RegisterProvider(local)
+
+		srv := freshModelsServer(t, router)
+		resp := fetchModels(t, srv)
+		byID := modelIDSet(resp)
+
+		m, ok := byID["local"]
+		if !ok {
+			t.Fatalf("local alias missing; got %v", modelIDKeys(byID))
+		}
+		want := map[string]bool{"vision": true, "streaming": true}
+		if len(m.Capabilities) != len(want) {
+			t.Fatalf("local Capabilities = %v; want %v", m.Capabilities, want)
+		}
+		for _, c := range m.Capabilities {
+			if !want[c] {
+				t.Errorf("local Capabilities has unexpected entry %q (got %v)", c, m.Capabilities)
+			}
+		}
+	})
+
+	t.Run("absent when provider declares none", func(t *testing.T) {
+		t.Parallel()
+		local := newListerStub("lmstudio-darkstar", true, "gemma-4-26b")
+		local.capabilities.Capabilities = nil
+		router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-darkstar"})
+		router.RegisterProvider(local)
+
+		srv := freshModelsServer(t, router)
+		resp := fetchModels(t, srv)
+		byID := modelIDSet(resp)
+
+		m, ok := byID["local"]
+		if !ok {
+			t.Fatalf("local alias missing; got %v", modelIDKeys(byID))
+		}
+		if len(m.Capabilities) != 0 {
+			t.Errorf("local Capabilities = %v; want empty/absent", m.Capabilities)
 		}
 	})
 }
