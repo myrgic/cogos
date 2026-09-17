@@ -30,9 +30,117 @@
 package engine
 
 import (
+	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
+	"sync"
 )
+
+// ── Per-provider model DENYLIST ─────────────────────────────────────────────
+//
+// The kernel can be asked (via a Hermes delegation config, an agent harness, or
+// a direct OpenAI-compat client) to route a model id to a named aggregator
+// provider. An operator on an Anthropic Max subscription was billed *through
+// OpenRouter* for claude-fable because a delegation config pinned
+// "openrouter/anthropic/claude-fable-5.1" — routing a first-party Anthropic
+// model to an aggregator that re-bills it at list price instead of the already
+// paid Max tier. This table lets an operator block specific (provider, model)
+// pairs at the kernel boundary so such a request never reaches upstream.
+//
+// The table is keyed by provider NAME (the composite "<provider>/<model>" prefix
+// or the resolved PreferProvider); each value is a list of regexes matched
+// against the *model* id (the composite suffix, sans the provider prefix).
+//
+// Default deny table ships with openrouter blocking first-party Anthropic ids
+// (`^anthropic/` composite spellings and bare `^claude-` ids). Absent
+// operator-provider override this is the policy. It is loaded from the optional
+// `routing.deny:` section of .cog/config/kernel.yaml (see SetProviderModelDeny).
+
+// ProviderDenyRule is one operator-authored deny entry from kernel.yaml
+// `routing.deny:`.
+type ProviderDenyRule struct {
+	Provider string   `yaml:"provider"`
+	Models   []string `yaml:"models"`
+}
+
+var (
+	providerModelDenyMu sync.RWMutex
+	// providerModelDeny maps a provider NAME to compiled regexes that match
+	// denied model ids routed to that provider. Guarded by
+	// providerModelDenyMu; replaced wholesale by SetProviderModelDeny.
+	providerModelDeny = defaultProviderModelDeny()
+)
+
+// defaultProviderModelDeny returns the compiled hardcoded deny table used when
+// no `routing.deny:` section is configured: OpenRouter must never serve
+// first-party Anthropic ids.
+func defaultProviderModelDeny() map[string][]*regexp.Regexp {
+	return map[string][]*regexp.Regexp{
+		"openrouter": {
+			regexp.MustCompile(`^anthropic/`), // "openrouter/anthropic/..."
+			regexp.MustCompile(`^claude-`),    // bare "claude-fable-5" etc.
+		},
+	}
+}
+
+// SetProviderModelDeny installs the operator-authored deny table (from
+// `routing.deny:` in kernel.yaml). An empty rule list restores the default
+// hardcoded entry. Safe for concurrent callers. Called once at server boot.
+func SetProviderModelDeny(rules []ProviderDenyRule) {
+	table := defaultProviderModelDeny()
+	if len(rules) > 0 {
+		table = make(map[string][]*regexp.Regexp, len(rules))
+		for _, rule := range rules {
+			if rule.Provider == "" {
+				continue
+			}
+			for _, pat := range rule.Models {
+				if re, err := regexp.Compile(pat); err == nil {
+					table[rule.Provider] = append(table[rule.Provider], re)
+				}
+			}
+		}
+	}
+	providerModelDenyMu.Lock()
+	providerModelDeny = table
+	providerModelDenyMu.Unlock()
+}
+
+// DeniedByPolicy reports whether routing (model) to (provider) is blocked by
+// operator policy. ok==true means DENIED and reason carries a human-readable
+// explanation (for the 403 policy_denied message). An unknown provider or a
+// non-matching model yields (reason="", ok=false).
+func DeniedByPolicy(provider, model string) (reason string, ok bool) {
+	if provider == "" || model == "" {
+		return "", false
+	}
+	providerModelDenyMu.RLock()
+	defer providerModelDenyMu.RUnlock()
+	pats, found := providerModelDeny[provider]
+	if !found {
+		return "", false
+	}
+	for _, re := range pats {
+		if re.MatchString(model) {
+			return fmt.Sprintf("model %q matches deny pattern %q for provider %q", model, re.String(), provider), true
+		}
+	}
+	return "", false
+}
+
+// deniedModelProvider extracts the provider name from a composite
+// "<provider>/<model>" id (the segment before the FIRST "/") and reports
+// whether the deny table blocks routing that id. Used at the admission boundary
+// where only the raw model string is available (no resolved provider yet).
+// Bare ids (no "/") carry no provider prefix and are never denied this way.
+func deniedModelProvider(model string) (reason string, ok bool) {
+	i := strings.Index(model, "/")
+	if i <= 0 || i >= len(model)-1 {
+		return "", false
+	}
+	return DeniedByPolicy(model[:i], model[i+1:])
+}
 
 // ModelResolution is the output of ResolveModelRequest.
 type ModelResolution struct {
@@ -286,6 +394,13 @@ func ResolveModelRequest(router Router, model string, requestID string) ModelRes
 func IsKnownModel(router Router, model string) bool {
 	if model == "" {
 		return true // default routing is always valid
+	}
+	// Per-provider deny policy: a composite "<provider>/<model>" id whose
+	// provider prefix is denied by policy must never be admitted, so it never
+	// reaches upstream. Denied ids are not advertised at GET /v1/models, so
+	// this cannot break the admission-parity invariant.
+	if _, denied := deniedModelProvider(model); denied {
+		return false
 	}
 	if _, ok := intentAliases[model]; ok {
 		return true

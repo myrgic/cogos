@@ -928,3 +928,105 @@ func TestResolve_Claude5Generation(t *testing.T) {
 		}
 	}
 }
+
+// ── Per-provider model DENYLIST tests ───────────────────────────────────────
+
+// TestDeniedByPolicy_OpenRouterAnthropic is the table-driven spec of the
+// default deny table: OpenRouter must never serve first-party Anthropic model
+// ids (the Incident — an operator on Anthropic Max billed via OpenRouter for
+// claude-fable), while non-Anthropic ids on openrouter and first-party ids on
+// other providers pass.
+func TestDeniedByPolicy_OpenRouterAnthropic(t *testing.T) {
+	t.Parallel()
+	// Deterministic irrespective of test ordering: restore the default table.
+	SetProviderModelDeny(nil)
+
+	cases := []struct {
+		name     string
+		provider string
+		model    string
+		denied   bool
+	}{
+		{
+			name:     "openrouter composite anthropic id denied",
+			provider: "openrouter",
+			model:    "anthropic/claude-fable-5.1", // the Incident
+			denied:   true,
+		},
+		{
+			name:     "openrouter composite claude- prefix id denied",
+			provider: "openrouter",
+			model:    "claude-sonnet-5",
+			denied:   true,
+		},
+		{
+			name:     "openrouter bare claude id denied",
+			provider: "openrouter",
+			model:    "claude-fable-5",
+			denied:   true,
+		},
+		{
+			name:     "openrouter deepseek id allowed",
+			provider: "openrouter",
+			model:    "deepseek/deepseek-v4-flash-0731",
+			denied:   false,
+		},
+		{
+			name:     "openrouter third-party id allowed",
+			provider: "openrouter",
+			model:    "meta-llama/llama-3.3-70b-instruct",
+			denied:   false,
+		},
+		{
+			name:     "provider not keyed passes",
+			provider: "claude-oauth",
+			model:    "claude-sonnet-5",
+			denied:   false,
+		},
+		{
+			name:     "empty provider never denied",
+			provider: "",
+			model:    "anthropic/claude-fable-5.1",
+			denied:   false,
+		},
+		{
+			name:     "empty model never denied",
+			provider: "openrouter",
+			model:    "",
+			denied:   false,
+		},
+	}
+	for _, tc := range cases {
+		reason, denied := DeniedByPolicy(tc.provider, tc.model)
+		if denied != tc.denied {
+			t.Errorf("%s: DeniedByPolicy(%q, %q) denied=%v; want %v (reason=%q)",
+				tc.name, tc.provider, tc.model, denied, tc.denied, reason)
+		}
+		if tc.denied && reason == "" {
+			t.Errorf("%s: denied but reason empty", tc.name)
+		}
+		if !tc.denied && reason != "" {
+			t.Errorf("%s: not denied but reason=%q", tc.name, reason)
+		}
+	}
+}
+
+// TestDeniedModelProvider_CompositeId verifies deniedModelProvider derives the
+// provider from a composite "<provider>/<model>" id and only fires on composites.
+func TestDeniedModelProvider_CompositeId(t *testing.T) {
+	t.Parallel()
+	SetProviderModelDeny(nil)
+
+	if _, denied := deniedModelProvider("openrouter/anthropic/claude-fable-5.1"); !denied {
+		t.Error("openrouter/anthropic/claude-fable-5.1: want denied")
+	}
+	if _, denied := deniedModelProvider("openrouter/deepseek/deepseek-v4-flash-0731"); denied {
+		t.Error("openrouter/deepseek/deepseek-v4-flash-0731: want NOT denied")
+	}
+	if _, denied := deniedModelProvider("claude-fable-5"); denied {
+		t.Error("bare claude-fable-5 (no provider prefix): want NOT denied")
+	}
+	if _, denied := deniedModelProvider(""); denied {
+		t.Error("empty model: want NOT denied")
+	}
+}
