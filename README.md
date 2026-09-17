@@ -414,6 +414,21 @@ make e2e          # Build + run full cold-start test in a container
 
 A Docker Compose topology with `bridge-{primary,secondary}` and `tailscale-{primary,secondary}` siblings landed in #19.
 
+### Workspace base image
+
+`Dockerfile.workspace` is the declared minimal starting condition of a CogOS
+workspace: the exact directory tree and default config `cogos init` produces,
+built from a checksum- and signature-verified published release, nothing
+more. Validate a workspace with `cog doctor`; materialize one with this
+image. Distributions (a product, a fleet node, a demo) layer their own
+skills and config on top of this base via its `SKILLS_OVERLAY` /
+`CONFIG_OVERLAY` build args — they don't redefine what "minimal" means.
+
+```sh
+docker build -f Dockerfile.workspace -t cogos-workspace:dev .
+docker compose -f docker-compose.workspace.yml up --build
+```
+
 ---
 
 ## Logs and troubleshooting
