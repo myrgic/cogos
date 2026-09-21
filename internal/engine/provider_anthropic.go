@@ -294,13 +294,41 @@ func modelDeprecatesTemperature(model string) bool {
 	return false
 }
 
+// resolveAnthropicMaxTokens picks the output budget for one dispatch.
+//
+// The caller's per-request budget WINS over the provider's configured default.
+// This mirrors the OpenAI-compatible provider, which has always honoured
+// req.MaxTokens (provider_openai.go), and the Ollama provider, which maps it to
+// num_predict (provider_ollama.go). Before this, both Anthropic-family
+// providers passed their own construction-time constant straight to the wire
+// builder and dropped req.MaxTokens on the floor: a client asking for 32000
+// output tokens through /v1/chat/completions or /v1/messages was silently
+// clamped to anthropicDefaultMaxToks (8192) and got finish_reason="length"
+// mid-answer with no indication the ceiling was the kernel's, not the model's.
+//
+// providerDefault is still the floor when a request carries no budget (0), so
+// Capabilities().MaxOutputTokens remains the documented default — it is a
+// default, not a ceiling. No upper clamp is applied here: the per-model output
+// cap is Anthropic's to enforce, and inventing a local ceiling would recreate
+// the same silent-clamp defect one layer up. An over-large request surfaces as
+// an upstream 400 the caller can read, not as a truncated answer.
+func resolveAnthropicMaxTokens(req *CompletionRequest, providerDefault int) int {
+	if req != nil && req.MaxTokens > 0 {
+		return req.MaxTokens
+	}
+	return providerDefault
+}
+
 // buildAnthropicRequest converts a CompletionRequest to the Anthropic wire format.
 // Context items are prepended to the system prompt as labelled sections so the
 // model sees full workspace attentional field content.
+//
+// maxTokens is the PROVIDER DEFAULT, applied only when req carries no
+// per-request budget — see resolveAnthropicMaxTokens.
 func buildAnthropicRequest(model string, req *CompletionRequest, stream bool, maxTokens int) *anthropicRequest {
 	ar := &anthropicRequest{
 		Model:         model,
-		MaxTokens:     maxTokens,
+		MaxTokens:     resolveAnthropicMaxTokens(req, maxTokens),
 		System:        buildAnthropicSystem(req),
 		Stream:        stream,
 		Temperature:   req.Temperature,
