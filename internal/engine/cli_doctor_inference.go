@@ -695,19 +695,51 @@ func (e claudeJSONMCPEntry) target(source string) (externalClientTarget, bool) {
 	return externalClientTarget{source: source, url: e.URL, headers: e.Headers}, true
 }
 
-// codexMCPServerHeaderRe matches one `"key" = "value"` pair inside a TOML
-// inline table, used to parse http_headers = { "X-Cogos-Grant" = "..." }
-// without a TOML dependency.
-var codexMCPServerHeaderRe = regexp.MustCompile(`"([^"]+)"\s*=\s*"([^"]*)"`)
+// codexMCPServerHeaderRe matches one `key = "value"` pair inside a TOML
+// inline table or a header sub-table body, used to parse both
+//
+//	http_headers = { X-Cogos-Grant = "..." }      (inline)
+//	[mcp_servers.NAME.http_headers]               (sub-table)
+//	X-Cogos-Grant = "..."
+//
+// without a TOML dependency. The key may be bare or quoted: TOML permits bare
+// keys containing letters, digits, '-' and '_', which covers every HTTP header
+// name in practice (X-Cogos-Grant, Authorization). The previous pattern
+// required QUOTED keys and so silently matched nothing against real configs,
+// which write them bare.
+var codexMCPServerHeaderRe = regexp.MustCompile(`(?:"([^"]+)"|([A-Za-z0-9_-]+))\s*=\s*"([^"]*)"`)
 
-var codexSectionHeaderRe = regexp.MustCompile(`^\[mcp_servers\.(?:"([^"]+)"|([^\]]+))\]$`)
+// codexSectionHeaderRe matches a top-level [mcp_servers.NAME] section header
+// and nothing deeper. NAME may be quoted or bare, but a bare NAME must not
+// contain a '.', because a dot introduces a SUB-TABLE
+// ([mcp_servers.NAME.http_headers], [mcp_servers.NAME.env]) — a different
+// server-scoped section, not a server named "NAME.http_headers".
+//
+// The prior pattern used ([^\]]+) for the bare case, which greedily swallowed
+// sub-table headers and registered a phantom server. That is the parse bug
+// behind the false-positive doctor FAIL: reaching
+// [mcp_servers.cogos-v3.http_headers] flushed the real cogos-v3 entry BEFORE
+// its credential was ever read, so the auth probe ran with no headers and the
+// kernel answered 401 missing_grant on a credential that is in fact valid.
+var codexSectionHeaderRe = regexp.MustCompile(`^\[mcp_servers\.(?:"([^"]+)"|([^\].]+))\]$`)
+
+// codexHeaderSubTableRe matches a [mcp_servers.NAME.http_headers] sub-table
+// header, capturing NAME so its key/value body can be attached to the server
+// of that name.
+var codexHeaderSubTableRe = regexp.MustCompile(`^\[mcp_servers\.(?:"([^"]+)"|([^\].]+))\.http_headers\]$`)
 
 // collectCodexTOMLTargets scans ~/.codex/config.toml line-by-line for
-// [mcp_servers.NAME] sections carrying a `url` and, on the same
-// (possibly-multiline-folded-into-one-line) or later lines within the
-// section, an `http_headers` inline table. Deliberately NOT a general TOML
-// parser: only the exact shape provider configs in this repo actually use
-// (see provider_codex.go's own config surface).
+// [mcp_servers.NAME] sections carrying a `url`, plus the credentials that
+// client would send with it. Credentials appear in BOTH shapes Codex accepts:
+//
+//	inline:    http_headers = { X-Cogos-Grant = "..." }
+//	sub-table: [mcp_servers.NAME.http_headers]
+//	           X-Cogos-Grant = "..."
+//
+// Deliberately NOT a general TOML parser: only the exact shapes client configs
+// actually use. Sub-table bodies are collected into headersByName and merged
+// onto their server at the end, so declaration ORDER does not matter — a
+// sub-table may legally appear before or after the server's own section.
 func collectCodexTOMLTargets(home string) []externalClientTarget {
 	path := filepath.Join(home, ".codex", "config.toml")
 	f, err := os.Open(path)
@@ -723,6 +755,13 @@ func collectCodexTOMLTargets(home string) []externalClientTarget {
 	var curEnabled bool
 	inSection := false
 
+	// headersByName accumulates [mcp_servers.NAME.http_headers] sub-table
+	// bodies keyed by server name, merged onto targets after the scan.
+	headersByName := map[string]map[string]string{}
+	// inHeaderSubTable names the server whose header sub-table we are inside,
+	// or "" when we are not in one.
+	inHeaderSubTable := ""
+
 	flush := func() {
 		if inSection && curURL != "" && curEnabled {
 			out = append(out, externalClientTarget{
@@ -734,6 +773,16 @@ func collectCodexTOMLTargets(home string) []externalClientTarget {
 		curName, curURL, curHeaders, curEnabled, inSection = "", "", nil, true, false
 	}
 
+	// parseHeaderPair extracts one `key = "value"` pair, handling bare or
+	// quoted keys, and reports whether a pair was found.
+	parseHeaderPair := func(m []string) (string, string) {
+		key := m[1]
+		if key == "" {
+			key = m[2]
+		}
+		return key, m[3]
+	}
+
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
@@ -743,6 +792,22 @@ func collectCodexTOMLTargets(home string) []externalClientTarget {
 		}
 		if strings.HasPrefix(line, "[") {
 			flush()
+			inHeaderSubTable = ""
+			// A header sub-table is checked FIRST: it is server-scoped state,
+			// not a new server. Any other section (including [mcp_servers.
+			// NAME.env] and unrelated top-level tables) simply ends the
+			// previous section, which flush() above already did.
+			if m := codexHeaderSubTableRe.FindStringSubmatch(line); m != nil {
+				name := m[1]
+				if name == "" {
+					name = m[2]
+				}
+				inHeaderSubTable = name
+				if headersByName[name] == nil {
+					headersByName[name] = map[string]string{}
+				}
+				continue
+			}
 			if m := codexSectionHeaderRe.FindStringSubmatch(line); m != nil {
 				name := m[1]
 				if name == "" {
@@ -751,6 +816,13 @@ func collectCodexTOMLTargets(home string) []externalClientTarget {
 				curName = name
 				curEnabled = true
 				inSection = true
+			}
+			continue
+		}
+		if inHeaderSubTable != "" {
+			if m := codexMCPServerHeaderRe.FindStringSubmatch(line); m != nil {
+				k, v := parseHeaderPair(m)
+				headersByName[inHeaderSubTable][k] = v
 			}
 			continue
 		}
@@ -770,12 +842,43 @@ func collectCodexTOMLTargets(home string) []externalClientTarget {
 		case strings.HasPrefix(line, "http_headers"):
 			curHeaders = map[string]string{}
 			for _, m := range codexMCPServerHeaderRe.FindAllStringSubmatch(line, -1) {
-				curHeaders[m[1]] = m[2]
+				k, v := parseHeaderPair(m)
+				curHeaders[k] = v
 			}
 		}
 	}
 	flush()
+
+	// Merge sub-table headers onto their servers. Inline headers on the
+	// server's own section win on key collision: they are the more specific
+	// declaration and the shape the previous parser already honoured.
+	for i := range out {
+		name := codexTargetName(out[i].source)
+		sub, ok := headersByName[name]
+		if !ok || len(sub) == 0 {
+			continue
+		}
+		if out[i].headers == nil {
+			out[i].headers = map[string]string{}
+		}
+		for k, v := range sub {
+			if _, exists := out[i].headers[k]; !exists {
+				out[i].headers[k] = v
+			}
+		}
+	}
 	return out
+}
+
+// codexTargetName recovers the server name from a source label built by
+// collectCodexTOMLTargets, so sub-table headers can be matched back to it.
+func codexTargetName(source string) string {
+	const prefix = "~/.codex/config.toml ([mcp_servers."
+	const suffix = "])"
+	if !strings.HasPrefix(source, prefix) || !strings.HasSuffix(source, suffix) {
+		return ""
+	}
+	return source[len(prefix) : len(source)-len(suffix)]
 }
 
 // collectHermesProfileTargets reads every ~/.hermes/profiles/*/config.yaml

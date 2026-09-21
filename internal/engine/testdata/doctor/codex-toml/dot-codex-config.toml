@@ -6,3 +6,29 @@ http_headers = { "X-Cogos-Grant" = "test-grant-value" }
 [mcp_servers.stdio-thing]
 command = "uvx"
 args = ["something"]
+
+# Sub-table credential shape — what ~/.codex/config.toml actually writes.
+# The server's own section carries no http_headers; the credential lives in a
+# [mcp_servers.NAME.http_headers] sub-table with a BARE (unquoted) key.
+[mcp_servers.cogos-kernel]
+url = "PLACEHOLDER_KERNEL_URL"
+
+[mcp_servers.cogos-kernel.http_headers]
+X-Cogos-Grant = "subtable-grant-value"
+
+# A server whose sub-table is declared BEFORE its own section: parsing must
+# not depend on declaration order.
+[mcp_servers.early-headers.http_headers]
+Authorization = "Bearer early-value"
+
+[mcp_servers.early-headers]
+url = "PLACEHOLDER_KERNEL_URL"
+
+# A non-header sub-table must not be mistaken for a server, and must not
+# contribute credentials.
+[mcp_servers.bridge-thing]
+command = "uvx"
+args = ["bridge"]
+
+[mcp_servers.bridge-thing.env]
+COGOS_BASE_URL = "http://localhost:6931"

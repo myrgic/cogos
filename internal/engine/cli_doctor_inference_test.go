@@ -526,14 +526,108 @@ func TestCollectCodexTOMLTargets_Fixture(t *testing.T) {
 	}
 
 	targets := collectCodexTOMLTargets(home)
+
+	byName := map[string]externalClientTarget{}
+	for _, tg := range targets {
+		byName[codexTargetName(tg.source)] = tg
+	}
+
+	// stdio-thing and bridge-thing have no url and must be skipped. A
+	// sub-table ([...].http_headers, [...].env) must never register as a
+	// server of its own — that phantom entry is the parse bug this guards.
+	if len(targets) != 3 {
+		t.Fatalf("got %d targets; want 3 (cogos-v3, cogos-kernel, early-headers): %+v", len(targets), targets)
+	}
+	for _, phantom := range []string{
+		"cogos-v3.http_headers",
+		"cogos-kernel.http_headers",
+		"early-headers.http_headers",
+		"bridge-thing.env",
+	} {
+		if _, found := byName[phantom]; found {
+			t.Errorf("sub-table %q registered as a server; sub-tables are server-scoped state, not servers", phantom)
+		}
+	}
+
+	// Inline shape: http_headers = { "X-Cogos-Grant" = "..." } (quoted key).
+	inline, ok := byName["cogos-v3"]
+	if !ok {
+		t.Fatalf("cogos-v3 missing from targets: %+v", targets)
+	}
+	if inline.url != "http://127.0.0.1:6931/mcp" {
+		t.Errorf("cogos-v3 url = %q", inline.url)
+	}
+	if inline.headers["X-Cogos-Grant"] != "test-grant-value" {
+		t.Errorf("cogos-v3 headers = %v; want X-Cogos-Grant parsed from http_headers inline table", inline.headers)
+	}
+
+	// Sub-table shape with a BARE key — the shape ~/.codex/config.toml
+	// actually writes, and the one that produced the false-positive FAIL.
+	sub, ok := byName["cogos-kernel"]
+	if !ok {
+		t.Fatalf("cogos-kernel missing from targets: %+v", targets)
+	}
+	if sub.url != "http://127.0.0.1:6931/mcp" {
+		t.Errorf("cogos-kernel url = %q", sub.url)
+	}
+	if sub.headers["X-Cogos-Grant"] != "subtable-grant-value" {
+		t.Errorf("cogos-kernel headers = %v; want X-Cogos-Grant parsed from a [mcp_servers.NAME.http_headers] sub-table with a bare key", sub.headers)
+	}
+
+	// Declaration order must not matter: sub-table before its own section.
+	early, ok := byName["early-headers"]
+	if !ok {
+		t.Fatalf("early-headers missing from targets: %+v", targets)
+	}
+	if early.headers["Authorization"] != "Bearer early-value" {
+		t.Errorf("early-headers headers = %v; want Authorization from a sub-table declared BEFORE the server section", early.headers)
+	}
+}
+
+// TestCollectCodexTOMLTargets_SubTableCredentialReachesAuthProbe is the
+// regression guard for the false-positive doctor FAIL that blocked the
+// pre-push hook on this branch.
+//
+// Observed on Darkstar before the fix:
+//
+//	[FAIL] external client: ~/.codex/config.toml ([mcp_servers.cogos-v3])
+//	       kernel auth: HTTP 401 (missing_grant), credential(s) sent:
+//
+// with "credential(s) sent" EMPTY — while the very same grant, sent by hand,
+// was accepted by the kernel (HTTP 400, i.e. past auth). Doctor was reporting
+// a live credential as missing.
+//
+// The auth probe builds its request from target.headers, so an empty map is
+// indistinguishable from "this client sends no credential". This asserts the
+// credential survives collection, which is the precondition for the probe
+// reporting truthfully.
+func TestCollectCodexTOMLTargets_SubTableCredentialReachesAuthProbe(t *testing.T) {
+	home := t.TempDir()
+	codexDir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Minimal reproduction of the real file's shape.
+	content := `[mcp_servers.cogos-v3]
+url = "http://127.0.0.1:6931/mcp"
+transport = "http"
+
+[mcp_servers.cogos-v3.http_headers]
+X-Cogos-Grant = "live-grant-32-chars-exactly-ok!!"
+`
+	if err := os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	targets := collectCodexTOMLTargets(home)
 	if len(targets) != 1 {
-		t.Fatalf("got %d targets; want 1 (stdio-thing has no url, must be skipped): %+v", len(targets), targets)
+		t.Fatalf("got %d targets; want exactly 1 (the sub-table must not register as a second server): %+v", len(targets), targets)
 	}
-	if targets[0].url != "http://127.0.0.1:6931/mcp" {
-		t.Errorf("url = %q", targets[0].url)
+	if got := len(targets[0].headers); got == 0 {
+		t.Fatal("credential(s) sent would be EMPTY — doctor would report a live grant as missing_grant (the false-positive FAIL)")
 	}
-	if targets[0].headers["X-Cogos-Grant"] != "test-grant-value" {
-		t.Errorf("headers = %v; want X-Cogos-Grant parsed from http_headers inline table", targets[0].headers)
+	if targets[0].headers["X-Cogos-Grant"] != "live-grant-32-chars-exactly-ok!!" {
+		t.Errorf("headers = %v; want the sub-table grant carried through to the auth probe", targets[0].headers)
 	}
 }
 
