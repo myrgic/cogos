@@ -185,6 +185,22 @@ jobs:
       - name: Public release gate — scan
         run: python3 ./scripts/cogpublic-guard.py
 
+      # Fixture hygiene: see the `fixture-hygiene` job below, which calls the
+      # org-level reusable module. Kept out of `lint` so the gate reports as
+      # its own required check rather than hiding inside a lint failure.
+
+  fixture-hygiene:
+    # Org CI/CD module — myrgic/.github. The rule lives in one place so every
+    # repo that records live-machine traffic into testdata inherits it instead
+    # of re-deriving it after its own incident. Origin: PR #588 shipped a
+    # private status board, an MCP/plugin inventory, plugin-cache paths and an
+    # IPC socket path to this PUBLIC repo behind a substring-denylist redaction
+    # that CLAIMED completeness and was believed for three days. A denylist
+    # cannot be verified; the allowlist sanitizer named below can.
+    uses: myrgic/.github/.github/workflows/fixture-hygiene.yml@main
+    with:
+      sanitizer: internal/acp/testdata/sanitize_fixture.py
+
   e2e:
     runs-on: ubuntu-latest
     needs: build
