@@ -26,9 +26,10 @@ import (
 // catching drift (a new caller added without reading the deprecation
 // notice) rather than relitigating the existing one on every run.
 //
-// Scope: internal/engine only, matching the ADR's "from within the
-// kernel" — this package is where the substrate lives; other packages
-// (cmd/, tooling) are out of scope for this guard.
+// Scope: the internal/engine tree (this package and its subdirectories,
+// e.g. inference/ and defaults/, since the walk is recursive), matching
+// the ADR's "from within the kernel" — this is where the substrate lives;
+// packages outside it (cmd/, tooling) are out of scope for this guard.
 func TestAudit_NoNewSpawnBackgroundCallers(t *testing.T) {
 	// Files allowed to reference `.SpawnBackground(` as a *call* (not the
 	// method's own definition, which is exempted by name below). Update

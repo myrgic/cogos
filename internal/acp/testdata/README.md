@@ -51,9 +51,10 @@ and the final answer correctly named `github.com/myrgic/cogos`).
 | rate_limit_event | 1 | 1 | 1 | 1 |
 | result/success | 1 | 1 | 1 | 1 |
 
-`rate_limit_event` is not in `acp.EventType` — every row above falls
-through `ParseLine` to `Event.Unknown` for that frame today (harmless: the
-translator just needs to add it, not a parse failure).
+`rate_limit_event` is dispatched by `ParseLine` as `acp.EventRateLimit`
+into `Event.RateLimit` (and `user` frames as `EventUser`), as of this
+corpus's parser fix — see `TestParseLine_RateLimitEvent`. At capture time
+both fell through to `Event.Unknown`; the corpus is what exposed that.
 
 ### What each flag actually gates
 

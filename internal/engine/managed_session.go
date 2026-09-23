@@ -55,7 +55,9 @@ const (
 	// the subprocess exited on its own (EOF/exit 0) without one.
 	StateDetached
 	// StateCrashed: the subprocess exited unexpectedly (Wait returned a
-	// non-nil error) with no preceding Detach() call. Note this also
+	// non-nil error). This holds even if Detach() was called first — a
+	// non-zero exit overrides Detached, because a graceful stdin-close
+	// exits 0 and anything else is a crash the caller must see. Note this also
 	// covers "we sent CancelSIGINT and the process exited non-zero as a
 	// result" — from this object's perspective that subprocess instance
 	// is gone; resuming the same claude session_id means registering a
@@ -204,11 +206,15 @@ func (ms *ManagedSession) startEventPump() {
 		err := ms.proc.Wait()
 		ms.mu.Lock()
 		defer ms.mu.Unlock()
-		if ms.state == StateDetached {
-			// An explicit Detach() already claimed this outcome —
-			// whatever the exit code, it was requested.
-			return
-		}
+		// The exit status is the ground truth and always wins over a
+		// prior Detach(). Detach() flips state to Detached synchronously
+		// so no further Send/Cancel is accepted, but it cannot know
+		// whether the process it asked to stop was already crashing: a
+		// crash racing a concurrent Detach() (a supervisor shutting
+		// sessions down while claude is OOM-killed) must still surface
+		// as Crashed with its exit error, not be reclassified as a clean
+		// detach. A requested stdin-close exits 0 (L1 finding,
+		// 2026-08-28), so a genuine graceful detach stays Detached.
 		ms.exitErr = err
 		if err != nil {
 			ms.state = StateCrashed
@@ -315,7 +321,10 @@ func (ms *ManagedSession) CheckStalled(staleAfter time.Duration) {
 }
 
 // Detach stops the managed process cleanly via a graceful stdin-close
-// (ADR-093's "no more turns" semantics, per the L1 spike). Idempotent per
+// (ADR-093's "no more turns" semantics, per the L1 spike). State becomes
+// Detached immediately, but if the process then exits non-zero (it was
+// crashing anyway) the event pump moves it to Crashed and records
+// ExitErr — see startEventPump. Idempotent per
 // ADR-093 §6: calling Detach against an already-detached or already-gone
 // session succeeds as a no-op.
 func (ms *ManagedSession) Detach() error {

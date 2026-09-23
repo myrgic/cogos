@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -198,6 +200,87 @@ func TestManagedSession_Detach_AfterPriorCancelStdinClose_IsIdempotent(t *testin
 	// A further Detach() call remains idempotent too.
 	if err := ms.Detach(); err != nil {
 		t.Fatalf("third detach should also be a no-op, got: %v", err)
+	}
+}
+
+// TestManagedSession_Detach_ThenNonZeroExit_ReportsCrashed covers the
+// cog-review finding on managed_session.go: Detach() used to claim the
+// outcome unconditionally, and the event pump's "already Detached" guard
+// then discarded the exit status, so a subprocess that crashed at the same
+// moment a caller detached it was reported as a clean detach with a nil
+// ExitErr. The stand-in below behaves like a process that was crashing
+// anyway: it reaches init normally, then exits 7 (sentinel, distinct from
+// SIGINT's 130) instead of 0 when stdin closes.
+func TestManagedSession_Detach_ThenNonZeroExit_ReportsCrashed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	crasher := filepath.Join(t.TempDir(), "crashclaude.sh")
+	script := "#!/bin/sh\n" +
+		"echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"crash\"}'\n" +
+		"while IFS= read -r _line; do :; done\n" +
+		"exit 7\n"
+	if err := os.WriteFile(crasher, []byte(script), 0o755); err != nil {
+		t.Fatalf("write crasher: %v", err)
+	}
+
+	ms, err := NewManagedSession(ctx, "fake-session-crash-race", ManagedSessionOpts{ClaudePath: crasher})
+	if err != nil {
+		t.Fatalf("NewManagedSession: %v", err)
+	}
+	drainInBackground(ms)
+	waitForState(t, ms, StateLive, 2*time.Second)
+
+	if err := ms.Detach(); err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+
+	waitForState(t, ms, StateCrashed, 3*time.Second)
+	exitErr := ms.ExitErr()
+	if exitErr == nil {
+		t.Fatalf("ExitErr() = nil after a non-zero exit; the crash was swallowed by Detach")
+	}
+	if !strings.Contains(exitErr.Error(), "exit status 7") {
+		t.Fatalf("ExitErr() = %v, want the subprocess's own exit status 7", exitErr)
+	}
+}
+
+// TestManagedSession_Detach_CleanExit_StaysDetached is the positive twin:
+// the graceful path (stdin-close -> exit 0) must remain Detached with a nil
+// ExitErr after the pump observes the exit, not only synchronously.
+func TestManagedSession_Detach_CleanExit_StaysDetached(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	ms, err := NewManagedSession(ctx, "fake-session-clean-detach", ManagedSessionOpts{ClaudePath: fakeClaudePath(t)})
+	if err != nil {
+		t.Fatalf("NewManagedSession: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		for range ms.Events() {
+		}
+		close(done)
+	}()
+	waitForState(t, ms, StateLive, 2*time.Second)
+
+	if err := ms.Detach(); err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("events channel never closed after Detach")
+	}
+	// The pump records the final state just after closing outCh (Wait +
+	// one lock); give it a moment so a wrong Crashed transition would be
+	// observed rather than raced past.
+	time.Sleep(200 * time.Millisecond)
+	if got := ms.State(); got != StateDetached {
+		t.Fatalf("state after clean exit = %s, want %s (exitErr=%v)", got, StateDetached, ms.ExitErr())
+	}
+	if e := ms.ExitErr(); e != nil {
+		t.Fatalf("ExitErr() after clean exit = %v, want nil", e)
 	}
 }
 
