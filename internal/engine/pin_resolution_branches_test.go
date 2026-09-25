@@ -75,10 +75,86 @@ routing:
 			if p.Resolved != "gemma4:e4b" {
 				t.Errorf("dispatch:explicit-provider pin Resolved = %q, want %q", p.Resolved, "gemma4:e4b")
 			}
+			if p.Reason != PinReasonDeclared {
+				t.Errorf("dispatch:explicit-provider Reason = %q, want %q", p.Reason, PinReasonDeclared)
+			}
 		}
 	}
 	if !found {
 		t.Fatalf("no pin resolution recorded for site %q; explicit-provider branch is not instrumented", "dispatch:explicit-provider")
+	}
+}
+
+// TestDispatchToHarness_ExplicitProvider_PinReasonOverridden is the
+// regression test for cog-review round 2 on #601: dispatch:explicit-provider
+// (Path 1) has the same shape as state-routing/harness-provider (empty note
+// on the declared path, a descriptive "...overridden" note only when
+// req.RequestedModel is set) but was left on the untyped recordPinResolution
+// path while its three siblings were converted to recordPinResolutionTyped —
+// so its override case silently fell through classifyPinNote to
+// "fallback:other" instead of PinReasonOverridden.
+func TestDispatchToHarness_ExplicitProvider_PinReasonOverridden(t *testing.T) {
+	root := makeWorkspace(t)
+	cfg := makeConfig(t, root)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gemma4:e4b","object":"model"}]}`))
+		case "/v1/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			var body struct {
+				Model string `json:"model"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "chatcmpl-test", "object": "chat.completion", "model": body.Model,
+				"choices": []map[string]any{{"index": 0, "message": map[string]any{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}},
+				"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	writeTestFile(t, filepath.Join(root, ".cog", "config", "providers.yaml"), `providers:
+  bench:
+    type: openai-compat
+    endpoint: `+srv.URL+`
+    model: gemma4:e4b
+routing:
+  default: bench
+`)
+
+	resetPinResolutionsForTest()
+
+	proc := NewProcess(cfg, makeNucleus("Cog", "tester"))
+	testSrv := NewServer(cfg, makeNucleus("Cog", "tester"), proc)
+	ctrl, err := NewLocalHarnessController(cfg, makeNucleus("Cog", "tester"), proc, testSrv.mcpServer)
+	if err != nil {
+		t.Fatalf("NewLocalHarnessController: %v", err)
+	}
+
+	_, dispErr := ctrl.DispatchToHarness(context.Background(), DispatchRequest{
+		Task:           "explicit-provider overridden pin test",
+		Provider:       "bench",
+		Model:          DispatchModel("ornith-1.0-35b"),
+		N:              1,
+		TimeoutSeconds: 10,
+	})
+	t.Logf("dispatch err (informational): %v", dispErr)
+
+	found := false
+	for _, p := range snapshotPinResolutions() {
+		if p.Site == "dispatch:explicit-provider" {
+			found = true
+			if p.Reason != PinReasonOverridden {
+				t.Errorf("dispatch:explicit-provider Reason = %q, want %q", p.Reason, PinReasonOverridden)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no pin resolution recorded for site %q", "dispatch:explicit-provider")
 	}
 }
 

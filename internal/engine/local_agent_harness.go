@@ -1423,9 +1423,18 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 		// issue #420's provider-precedence semantics — req.Provider still
 		// resolves the same way; only the *model* selection within that
 		// resolved provider now prefers the caller's explicit request.
+		// pinReason distinguishes the two outcomes explicitly — this branch has
+		// the same shape as state-routing/harness-provider below (empty note
+		// on the declared path, a descriptive "...overridden" note only when
+		// req.RequestedModel is set), so it needs the same typed classification
+		// instead of classifyPinNote's note=="" heuristic (cog-review round 2
+		// on #601 found this exact branch left on the untyped path while its
+		// three siblings were converted).
+		pinReason := PinReasonDeclared
 		if req.RequestedModel != "" {
 			model = req.RequestedModel
 			note = fmt.Sprintf("explicit-model: provider=%s model=%s (config default %s overridden)", req.Provider, req.RequestedModel, pc.Model)
+			pinReason = PinReasonOverridden
 		} else {
 			model = pc.Model
 		}
@@ -1442,7 +1451,7 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 				Message: fmt.Sprintf("model %q is denied on provider %q: %s", model, req.Provider, reason),
 			}
 		}
-		recordPinResolution("dispatch:explicit-provider", pc.Model, model, note)
+		recordPinResolutionTyped("dispatch:explicit-provider", pc.Model, model, pinReason, note)
 		// routeUsed stays empty; ProviderUsed on each slot is the canonical
 		// signal that the named-provider path fired. ServedModel (set from
 		// the provider response's ProviderMeta.Model) is the canonical
