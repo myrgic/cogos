@@ -41,6 +41,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1703,6 +1704,68 @@ func TestSessionRegistry_ReapStale(t *testing.T) {
 		if !after.LastSeen.Equal(before.LastSeen) {
 			t.Errorf("LastSeen mutated on appendFn failure: before=%v after=%v",
 				before.LastSeen, after.LastSeen)
+		}
+	})
+
+	t.Run("sweep does not hold the registry lock continuously across the whole batch", func(t *testing.T) {
+		// The registry has a single mutex, not one per row, so a
+		// concurrent caller is necessarily blocked for the duration of
+		// whichever single row's append is currently in flight — that part
+		// is unavoidable and matches ApplyEnd's existing single-row
+		// contract. What must NOT happen is the lock being held
+		// continuously for the sum of every row's append in the sweep: a
+		// concurrent caller must get a turn in the gaps between rows.
+		//
+		// Reproduce this by giving every row in the sweep a slow appendFn
+		// and, concurrently, hammering the registry with reads. If the
+		// lock is held for the whole batch (the pre-fix behavior), every
+		// read is delayed by roughly the full batch duration. If it's only
+		// held per-row (the fix), reads succeed in the gaps and none is
+		// delayed by more than roughly one row's append.
+		const (
+			rowCount   = 4
+			appendWait = 80 * time.Millisecond
+		)
+		fullBatchDuration := rowCount * appendWait
+
+		reg := NewSessionRegistry()
+		for i := 0; i < rowCount; i++ {
+			seed(t, reg, fmt.Sprintf("stale-batch-%d", i), now.Add(-2*ttl), false)
+		}
+
+		sweepDone := make(chan struct{})
+		go func() {
+			defer close(sweepDone)
+			reg.ReapStale(ttl, now, func(string) error {
+				time.Sleep(appendWait)
+				return nil
+			})
+		}()
+
+		var maxReadLatency time.Duration
+		for {
+			select {
+			case <-sweepDone:
+				goto assert
+			default:
+			}
+			start := time.Now()
+			reg.Get("stale-batch-0")
+			if d := time.Since(start); d > maxReadLatency {
+				maxReadLatency = d
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+
+	assert:
+		// A generous threshold: comfortably above one row's append (the
+		// unavoidable per-row hold) but well below the full batch — a
+		// whole-sweep lock would push this past fullBatchDuration.
+		threshold := fullBatchDuration - appendWait/2
+		if maxReadLatency >= threshold {
+			t.Errorf("max concurrent Get() latency during sweep = %v, want < %v (full batch = %v); "+
+				"the registry lock appears to be held across the whole sweep instead of per-row",
+				maxReadLatency, threshold, fullBatchDuration)
 		}
 	})
 }

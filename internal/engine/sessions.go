@@ -368,13 +368,25 @@ func (r *SessionRegistry) ApplyEnd(
 // unmutated and simply retried on the next sweep — one row's append
 // failure must not block reaping the rest of the sweep. Returns the
 // session_ids that were successfully reaped.
+//
+// Unlike ApplyEnd, a sweep can touch many rows at once (the #423 backlog
+// was 387), and each row's appendFn does a synchronous disk-writing bus
+// append. Holding the write lock across that whole loop would block every
+// concurrent register/heartbeat/end call from real, live sessions for the
+// duration of the sweep — exactly the traffic this reaper must not disturb.
+// So the lock is only held (a) briefly, to snapshot which rows currently
+// look stale, and (b) per-row, to re-validate and mutate that single row —
+// never across the appendFn calls for more than one row at a time. Because
+// the row is re-validated under lock immediately before mutating it, a row
+// that got ended or refreshed by a concurrent call between the snapshot and
+// its turn is correctly skipped rather than double-reaped.
 func (r *SessionRegistry) ReapStale(ttl time.Duration, now time.Time, appendFn func(id string) error) []string {
 	if ttl <= 0 {
 		return nil
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	var reaped []string
+
+	r.mu.RLock()
+	candidates := make([]string, 0, len(r.rows))
 	for id, row := range r.rows {
 		if row.Ended {
 			continue
@@ -382,18 +394,45 @@ func (r *SessionRegistry) ReapStale(ttl time.Duration, now time.Time, appendFn f
 		if row.LastSeen.IsZero() || now.Sub(row.LastSeen) <= ttl {
 			continue
 		}
-		if appendFn != nil {
-			if err := appendFn(id); err != nil {
-				continue
-			}
+		candidates = append(candidates, id)
+	}
+	r.mu.RUnlock()
+
+	var reaped []string
+	for _, id := range candidates {
+		if r.reapOne(id, ttl, now, appendFn) {
+			reaped = append(reaped, id)
 		}
-		row.Ended = true
-		row.EndedAt = now
-		row.EndReason = sessionReapEndReason
-		row.LastSeen = now
-		reaped = append(reaped, id)
 	}
 	return reaped
+}
+
+// reapOne re-validates and, if still stale, force-ends a single row. It
+// acquires the registry write lock only for this one row's check-append-
+// mutate sequence, so a multi-row sweep never blocks concurrent callers for
+// longer than a single row's append takes.
+func (r *SessionRegistry) reapOne(id string, ttl time.Duration, now time.Time, appendFn func(id string) error) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	row, ok := r.rows[id]
+	if !ok || row.Ended {
+		return false
+	}
+	if row.LastSeen.IsZero() || now.Sub(row.LastSeen) <= ttl {
+		// Refreshed by a concurrent heartbeat since the snapshot: no longer stale.
+		return false
+	}
+	if appendFn != nil {
+		if err := appendFn(id); err != nil {
+			return false
+		}
+	}
+	row.Ended = true
+	row.EndedAt = now
+	row.EndReason = sessionReapEndReason
+	row.LastSeen = now
+	return true
 }
 
 // ─── Handoff registry ────────────────────────────────────────────────────────
