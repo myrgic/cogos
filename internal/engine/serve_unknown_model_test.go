@@ -34,6 +34,75 @@ func jsonQuote(s string) string {
 	return string(b)
 }
 
+// TestGateway_PolicyDeniedModel_Returns403 is the regression for the Incident:
+// a composite model id routed to a denylisted provider (openrouter serving a
+// first-party Anthropic id) must be rejected at the gateway boundary with HTTP
+// 403 policy_denied BEFORE any provider call — not forwarded to an aggregator
+// that re-bills an already-paid Max-tier model.
+func TestGateway_PolicyDeniedModel_Returns403(t *testing.T) {
+	t.Parallel()
+	SetProviderModelDeny(nil)
+
+	ccStub := NewStubProvider("claude-oauth", "should not be reached")
+	router := NewSimpleRouter(RoutingConfig{Default: "claude-oauth"})
+	router.RegisterProvider(ccStub)
+	srv := newTestServerWithRouter(t, router)
+
+	w := postChat(t, srv, "openrouter/anthropic/claude-fable-5.1")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d; want 403", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "policy_denied") {
+		t.Errorf("body missing error.type=policy_denied: %s", body)
+	}
+	if !strings.Contains(body, "allowed_alternative") || !strings.Contains(body, "fable") {
+		t.Errorf("body missing allowed_alternative=fable: %s", body)
+	}
+	if !strings.Contains(body, "openrouter/anthropic/claude-fable-5.1") {
+		t.Errorf("body does not name the denied model: %s", body)
+	}
+	if ccStub.lastRequest != nil {
+		t.Error("denied model reached the provider; want short-circuit before any call")
+	}
+}
+
+// TestGateway_PolicyDenied_DoesNotBlockAllowedModels guards against
+// over-blocking: the intent alias "fable" still resolves to claude-oauth and is
+// served, and an openrouter id for a non-Anthropic model passes the deny check
+// (it may still fail unknown-model admission if openrouter isn't registered —
+// assert only on the deny outcome: NOT 403 policy_denied).
+func TestGateway_PolicyDenied_DoesNotBlockAllowedModels(t *testing.T) {
+	t.Parallel()
+	SetProviderModelDeny(nil)
+
+	ccStub := NewStubProvider("claude-oauth", "ok")
+	router := NewSimpleRouter(RoutingConfig{Default: "claude-oauth"})
+	router.RegisterProvider(ccStub)
+	srv := newTestServerWithRouter(t, router)
+
+	// "fable" is an intent alias → claude-oauth. Not denied by policy.
+	w := postChat(t, srv, "fable")
+	if w.Code != http.StatusOK {
+		t.Fatalf("fable: status = %d; want 200 (not denied)", w.Code)
+	}
+	if ccStub.lastRequest == nil {
+		t.Error("fable: provider was not called")
+	}
+
+	// openrouter/deepseek/... passes the deny table (non-Anthropic id). It may
+	// still be rejected as unknown admission since openrouter isn't registered
+	// here — assert only that the deny outcome is NOT policy_denied 403.
+	ccStub.lastRequest = nil
+	w = postChat(t, srv, "openrouter/deepseek/deepseek-v4-flash-0731")
+	if w.Code == http.StatusForbidden {
+		t.Error("openrouter/deepseek/deepseek-v4-flash-0731: got 403 policy_denied; want not denied by policy")
+	}
+	if reason, denied := DeniedByPolicy("openrouter", "deepseek/deepseek-v4-flash-0731"); denied {
+		t.Errorf("DeniedByPolicy(openrouter, deepseek/...): denied=%v reason=%q; want not denied", denied, reason)
+	}
+}
+
 // TestGateway_UnknownModel_Returns400 is the core failing-first assertion:
 // a bogus model id must be rejected with HTTP 400 before any provider call,
 // and the body must name the unknown model and list the available menu.

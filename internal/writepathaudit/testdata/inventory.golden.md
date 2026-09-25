@@ -139,7 +139,7 @@ Total sites: 239  (cog: 97, home: 2, elsewhere: 14, unanchored: 85, dynamic: 41)
 | `<TempDir>` | (*modalityProxy).playAudio (`os.CreateTemp`) | internal/engine/mcp_modality_proxy.go:853 | internal:engine |
 | `<TempDir>` | streamFetch (`os.CreateTemp`) | internal/engine/remote_hydrate_spike.go:195 | internal:engine |
 | `<TempDir>` | streamFetch (`io.Copy`) | internal/engine/remote_hydrate_spike.go:204 | internal:engine |
-| `<TempDir>` | (*Server).handleChat (`os.MkdirTemp`) | internal/engine/serve.go:1192 | internal:engine |
+| `<TempDir>` | (*Server).handleChat (`os.MkdirTemp`) | internal/engine/serve.go:1260 | internal:engine |
 | `<TempDir>` | (*Server).handleBlockPut (`os.CreateTemp`) | internal/engine/serve_blocks.go:184 | internal:engine |
 | `<TempDir>` | (*Server).handleBlockPut (`io.Copy`) | internal/engine/serve_blocks.go:195 | internal:engine |
 | `<TempDir>` | writeTempMCPConfig (`os.CreateTemp`) | internal/engine/serve_claude_code.go:460 | internal:engine |

@@ -372,6 +372,44 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	}
 	creq.ToolChoice = anthropicToolChoiceString(anthropicReq.ToolChoice)
 
+	// Per-provider deny policy: enforced on THIS endpoint's own model-routing
+	// decision below, not by swapping in the OpenAI-compat handler's shared
+	// resolver — cog-review round 1 flagged that ResolveModelRequest resolves
+	// "claude" to claude-oauth and "local" to an explicit live-provider probe,
+	// both of which silently differ from this switch's existing behavior
+	// ("claude" -> claude-code; "local" -> no-op/default routing) and would
+	// have redirected previously-working /v1/messages traffic to a different
+	// provider/auth path with no test coverage catching it. The deny check
+	// itself must still run against whatever THIS switch actually resolves,
+	// both before (raw composite string) and after (resolved provider/model)
+	// the switch runs, so the incident payload this PR exists to block is
+	// blocked here exactly as it is on /v1/chat/completions — without
+	// changing any route this endpoint already served correctly.
+	//
+	// Pre-resolution: reject an explicit "<provider>/<model>" composite id
+	// whose provider prefix is denied, before the switch below runs.
+	if reason, denied := deniedModelProvider(oaiReq.Model); denied {
+		provider := oaiReq.Model
+		if i := strings.Index(oaiReq.Model, "/"); i > 0 {
+			provider = oaiReq.Model[:i]
+		}
+		slog.Warn("anthropic: rejected policy-denied model at kernel boundary",
+			"request_id", creq.Metadata.RequestID,
+			"model", oaiReq.Model,
+			"provider", provider,
+		)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"type":    "policy_denied",
+				"message": fmt.Sprintf("model %q is denied on provider %q: %s", oaiReq.Model, provider, reason),
+			},
+		})
+		return
+	}
+
 	switch oaiReq.Model {
 	case "", "local":
 	case "claude":
@@ -387,6 +425,30 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		creq.Metadata.PreferProvider = "lmstudio-darkstar"
 	default:
 		creq.ModelOverride = oaiReq.Model
+	}
+
+	// Post-resolution: reject the (provider, model) pair the switch above
+	// just resolved, even when the raw client string carried no explicit
+	// provider prefix (e.g. the "default" arm's bare model id passing through
+	// as ModelOverride with no PreferProvider set, followed by the request's
+	// default routing landing on a denied provider).
+	if reason, denied := DeniedByPolicy(creq.Metadata.PreferProvider, creq.ModelOverride); denied {
+		slog.Warn("anthropic: rejected policy-denied model after resolution at kernel boundary",
+			"request_id", creq.Metadata.RequestID,
+			"model", oaiReq.Model,
+			"resolved_provider", creq.Metadata.PreferProvider,
+			"resolved_model", creq.ModelOverride,
+		)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"type":    "policy_denied",
+				"message": fmt.Sprintf("model %q is denied on provider %q: %s", oaiReq.Model, creq.Metadata.PreferProvider, reason),
+			},
+		})
+		return
 	}
 
 	// Allow per-request budget override via the X-Cogos-Context-Budget header.

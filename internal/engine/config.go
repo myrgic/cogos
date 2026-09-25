@@ -246,6 +246,12 @@ type Config struct {
 	// Loaded from .cog/config/core-inference.yaml; falls back to
 	// inference.DefaultCoreInferenceConfig() if the file is absent.
 	CoreInference inference.CoreInferenceConfig
+
+	// RoutingDeny is the operator-authored per-provider model deny table from
+	// the optional `routing.deny:` section of kernel.yaml. Nil/empty means
+	// use the hardcoded default. Installed into the package-level deny table
+	// by NewServer via SetProviderModelDeny.
+	RoutingDeny []ProviderDenyRule
 }
 
 // kernelConfigSection holds settings that can appear at the top level or inside v3:.
@@ -289,6 +295,18 @@ type kernelConfigSection struct {
 	// 0 means use DefaultMaxToolOutputBytes (32 KiB).
 	// Floor: MinToolOutputBytes (4 KiB).
 	MaxToolOutputBytes int `yaml:"max_tool_output_bytes,omitempty"`
+
+	// Routing holds optional routing knobs from kernel.yaml. Currently only
+	// the per-provider model deny table.
+	Routing *routingConfig `yaml:"routing"`
+}
+
+// routingConfig holds the optional `routing:` section of kernel.yaml.
+type routingConfig struct {
+	// Deny is a list of per-provider model deny rules. When absent, the
+	// kernel uses the hardcoded default (openrouter blocks first-party
+	// Anthropic ids). See SetProviderModelDeny in resolve.go.
+	Deny []ProviderDenyRule `yaml:"deny"`
 }
 
 // kernelConfig is the on-disk YAML shape of .cog/config/kernel.yaml.
@@ -459,6 +477,9 @@ func applyKernelSection(cfg *Config, s kernelConfigSection) {
 	}
 	if s.MaxToolOutputBytes != 0 {
 		cfg.MaxToolOutputBytes = s.MaxToolOutputBytes
+	}
+	if s.Routing != nil && len(s.Routing.Deny) > 0 {
+		cfg.RoutingDeny = s.Routing.Deny
 	}
 }
 

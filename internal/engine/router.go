@@ -247,6 +247,36 @@ func (r *SimpleRouter) Route(ctx context.Context, req *CompletionRequest) (Provi
 		// configured model. Only the involuntary carry-over into a fallback that
 		// can't serve the override is filtered.
 		canServe := i == 0 || providerCanServe(p, req.ModelOverride)
+		// Per-provider deny policy, enforced at the true routing boundary (not
+		// just the HTTP handlers that build this request): a fallback candidate
+		// that operator policy denies for this model must never be selected,
+		// even though providerCanServe above deliberately treats remote/
+		// aggregator providers as model-agnostic for legitimate frontier
+		// failover. Without this, a denied provider named in cfg.FallbackChain
+		// (or reached via buildCandidateOrder's "remaining providers" tail)
+		// could still serve a request whose ModelOverride/PreferProvider was
+		// denied at admission for a DIFFERENT provider, once the preferred
+		// provider becomes unavailable and Route falls through the chain.
+		//
+		// effectiveModel falls back to the provider's own configured default
+		// model (p.Model()) when req.ModelOverride is empty — a bare
+		// provider-name request (ResolveModelRequest's "named provider ->
+		// {name, ""}" case) leaves ModelOverride empty and the provider then
+		// serves ITS OWN configured model (OpenAICompatProvider.effectiveModel,
+		// PiProvider.buildArgs both fall back to Model() when no override is
+		// given). Checking only ModelOverride=="" would let an operator's
+		// denied default model (e.g. openrouter configured with
+		// `model: anthropic/claude-fable-5.1`) reach upstream on every request
+		// that just names the provider, reproducing the incident this policy
+		// exists to block through the one request shape the override-only
+		// check can't see (cog-review round 2, resolve.go:115).
+		effectiveModel := req.ModelOverride
+		if effectiveModel == "" {
+			effectiveModel = p.Model()
+		}
+		if _, denied := DeniedByPolicy(p.Name(), effectiveModel); denied {
+			canServe = false
+		}
 
 		score := ProviderScore{
 			Provider:        p.Name(),
