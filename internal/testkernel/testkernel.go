@@ -443,8 +443,27 @@ func extractSSEData(body []byte) []byte {
 // Boot does NOT call RegisterProviders or SetProvidersWorkspace. Tests that
 // need real providers should pass WithIsolatedRegistry (Phase 2) rather than
 // touching the global registry.
+//
+// HOME isolation: engine.Boot mints/recovers a node-root identity grant at
+// startup (boot_node_root_grant.go's ensureNodeRootGrant), which reads and
+// writes ~/.cog/vault/node-root-grant via os.UserHomeDir(). Left
+// unisolated, every test that boots a kernel overwrites the operator's real
+// vault file with a test-minted token — desyncing it from whatever live
+// kernel is running on the host (incident: 2026-09-24 23:02, every local
+// kernel write 401'd until restart). Boot therefore points HOME (and
+// USERPROFILE, for os.UserHomeDir's Windows path) at a fresh t.TempDir()
+// before calling engine.Boot, via t.Setenv — which is process-global but
+// test-scoped and auto-restored on test end. This is safe here because no
+// caller of testkernel.Boot runs in parallel with another (see
+// first_instruments_a_test.go's "no t.Parallel()" convention); t.Setenv
+// itself panics if a parallel test tries this, which is exactly the signal
+// a future parallel test would need to add its own isolation instead.
 func Boot(ctx context.Context, t *testing.T, opts ...Option) (*Kernel, error) {
 	t.Helper()
+
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("USERPROFILE", fakeHome)
 
 	cfg := &config{port: 0}
 	for _, o := range opts {
