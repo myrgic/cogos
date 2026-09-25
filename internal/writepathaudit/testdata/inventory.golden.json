@@ -2319,7 +2319,7 @@
     },
     {
       "file": "pkg/cogblock/ledger.go",
-      "line": 206,
+      "line": 207,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "AppendEvent",
@@ -2331,7 +2331,7 @@
     },
     {
       "file": "pkg/cogblock/ledger.go",
-      "line": 249,
+      "line": 257,
       "column": 12,
       "primitive": "os.OpenFile",
       "func": "AppendEvent",
