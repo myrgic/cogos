@@ -388,7 +388,13 @@ func GetHashAlgorithm(workspaceRoot string) (string, error) {
 		return "", fmt.Errorf("reading ledger directory %s: %w", ledgerDir, err)
 	}
 
-	// Search for genesis event in any session
+	// Search for genesis event in any session. A scan abort in one session
+	// (e.g. an oversized line) must not stop the search for the genesis
+	// event in a sibling session — but if the genesis event is never found
+	// anywhere, a prior scan abort means the answer is genuinely unknown,
+	// not "no genesis event present", so remember the first such error and
+	// report it instead of ErrNoGenesisEvent if the full scan comes up empty.
+	var scanErr error
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -403,7 +409,10 @@ func GetHashAlgorithm(workspaceRoot string) (string, error) {
 		alg, found, err := scanForGenesisAlgorithm(f)
 		f.Close()
 		if err != nil {
-			return "", fmt.Errorf("scanning %s for genesis event: %w", eventsFile, err)
+			if scanErr == nil {
+				scanErr = fmt.Errorf("scanning %s for genesis event: %w", eventsFile, err)
+			}
+			continue
 		}
 		if found {
 			hashAlgCache.mu.Lock()
@@ -413,6 +422,11 @@ func GetHashAlgorithm(workspaceRoot string) (string, error) {
 		}
 	}
 
+	if scanErr != nil {
+		// A scan abort means the genesis event's presence is genuinely
+		// unknown, not "not found" — don't cache this as ErrNoGenesisEvent.
+		return "", scanErr
+	}
 	hashAlgCache.mu.Lock()
 	hashAlgCache.byRoot[workspaceRoot] = hashAlgResult{err: ErrNoGenesisEvent}
 	hashAlgCache.mu.Unlock()

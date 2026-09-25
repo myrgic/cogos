@@ -927,3 +927,55 @@ func TestVerifyLedger_PropagatesHashAlgorithmScanError(t *testing.T) {
 		t.Fatalf("VerifyLedger: scan-abort was masked as a spurious hash mismatch: %v", err)
 	}
 }
+
+// TestGetHashAlgorithm_ScanAbortInOneSessionDoesNotBlockOthers verifies that
+// a scan abort in one session's ledger (e.g. an oversized line unrelated to
+// the genesis event) does not stop GetHashAlgorithm from finding a genuine
+// workspace.genesis event in a sibling session directory. Session
+// directories are visited in os.ReadDir's sorted order, so "aaa-corrupt" is
+// scanned (and aborts) before "zzz-genesis" is reached.
+func TestGetHashAlgorithm_ScanAbortInOneSessionDoesNotBlockOthers(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	corruptDir := filepath.Join(tmpDir, ".cog", "ledger", "aaa-corrupt")
+	if err := os.MkdirAll(corruptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	oversized := "{\"pad\":\"" + strings.Repeat("x", bufio.MaxScanTokenSize+1) + "\"}\n"
+	if err := os.WriteFile(filepath.Join(corruptDir, "events.jsonl"), []byte(oversized), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	genesisDir := filepath.Join(tmpDir, ".cog", "ledger", "zzz-genesis")
+	if err := os.MkdirAll(genesisDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	genesisLine := `{"hashed_payload":{"type":"workspace.genesis","data":{"hash_algorithm":"sha512"}},"metadata":{"seq":1}}` + "\n"
+	if err := os.WriteFile(filepath.Join(genesisDir, "events.jsonl"), []byte(genesisLine), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	alg, err := GetHashAlgorithm(tmpDir)
+	if err != nil {
+		t.Fatalf("GetHashAlgorithm: want the genesis event in the sibling session to be found despite the scan abort in 'aaa-corrupt', got error: %v", err)
+	}
+	if alg != "sha512" {
+		t.Fatalf("GetHashAlgorithm: alg = %q, want %q", alg, "sha512")
+	}
+}
+
+// TestGetHashAlgorithm_ScanAbortEverywhereReturnsError verifies that when
+// every session directory's scan aborts and the genesis event is never
+// found, GetHashAlgorithm reports the scan error rather than the misleading
+// ErrNoGenesisEvent sentinel.
+func TestGetHashAlgorithm_ScanAbortEverywhereReturnsError(t *testing.T) {
+	tmpDir := oversizedGenesisWorkspace(t)
+
+	_, err := GetHashAlgorithm(tmpDir)
+	if err == nil {
+		t.Fatalf("GetHashAlgorithm: want error when the only session's scan aborts, got nil")
+	}
+	if errors.Is(err, ErrNoGenesisEvent) {
+		t.Fatalf("GetHashAlgorithm: scan-abort error must not satisfy errors.Is(err, ErrNoGenesisEvent): %v", err)
+	}
+}
