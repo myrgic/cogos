@@ -99,8 +99,8 @@ Total sites: 239  (cog: 97, home: 2, elsewhere: 14, unanchored: 85, dynamic: 41)
 | `<WorkspaceRoot>/.cog/config` | (ConfigDriftInjector).Inject (`os.MkdirAll`) | internal/testkernel/experiment/injectors.go:101 | internal:testkernel |
 | `<WorkspaceRoot>/.cog/config/kernel.yaml` | (ConfigDriftInjector).Inject (`os.WriteFile`) | internal/testkernel/experiment/injectors.go:105 | internal:testkernel |
 | `<call:t.TempDir>/.cog/config/identity.yaml` | makeMinimalWorkspace (`os.WriteFile`) | internal/testkernel/testkernel.go:588 | internal:testkernel |
-| `<WorkspaceRoot>/.cog/ledger/<call:pathsafe.SanitizeComponent>` | AppendEvent (`os.MkdirAll`) | pkg/cogblock/ledger.go:206 | pkg:cogblock |
-| `<WorkspaceRoot>/.cog/ledger/<call:pathsafe.SanitizeComponent>/events.jsonl` | AppendEvent (`os.OpenFile`) | pkg/cogblock/ledger.go:249 | pkg:cogblock |
+| `<WorkspaceRoot>/.cog/ledger/<call:pathsafe.SanitizeComponent>` | AppendEvent (`os.MkdirAll`) | pkg/cogblock/ledger.go:218 | pkg:cogblock |
+| `<WorkspaceRoot>/.cog/ledger/<call:pathsafe.SanitizeComponent>/events.jsonl` | AppendEvent (`os.OpenFile`) | pkg/cogblock/ledger.go:261 | pkg:cogblock |
 | `<WorkspaceRoot>/.cog/claims` | CreateClaim (`os.MkdirAll`) | pkg/coordination/coordination.go:66 | pkg:coordination |
 | `<WorkspaceRoot>/.cog/claims/<call:pathToClaim>` | CreateClaim (`os.WriteFile`) | pkg/coordination/coordination.go:93 | pkg:coordination |
 | `<WorkspaceRoot>/.cog/signals/checkpoint/{name}` | CreateCheckpoint (`os.MkdirAll`) | pkg/coordination/coordination.go:197 | pkg:coordination |
