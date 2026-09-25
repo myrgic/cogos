@@ -6,6 +6,7 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	stdhash "hash"
 	"io"
@@ -210,7 +211,14 @@ func AppendEvent(workspaceRoot, sessionID string, envelope *EventEnvelope) error
 	// Get hash algorithm from workspace genesis event
 	hashAlg, err := GetHashAlgorithm(workspaceRoot)
 	if err != nil {
-		// Default to sha256 if no genesis found
+		if !errors.Is(err, ErrNoGenesisEvent) {
+			// The genesis scan itself failed (e.g. aborted by an oversized
+			// line); the configured algorithm is unknown, not absent.
+			// Silently defaulting here risks chaining new events under the
+			// wrong algorithm, so surface the failure instead.
+			return fmt.Errorf("failed to determine hash algorithm: %w", err)
+		}
+		// No genesis event found anywhere: default to sha256.
 		hashAlg = "sha256"
 	}
 
@@ -349,7 +357,19 @@ func setHashAlgorithmCache(workspaceRoot, alg string) {
 	hashAlgCache.byRoot[workspaceRoot] = hashAlgResult{alg: alg}
 }
 
+// ErrNoGenesisEvent indicates GetHashAlgorithm scanned every session ledger
+// and found no workspace.genesis event — a legitimate "use the default"
+// condition. Any other error from GetHashAlgorithm (e.g. a scan aborted by
+// an oversized line) means the genesis event's presence could not be
+// determined and callers must not treat it as "no genesis found".
+var ErrNoGenesisEvent = errors.New("no workspace.genesis event found")
+
 // GetHashAlgorithm retrieves the hash algorithm from the workspace genesis event.
+//
+// Returns ErrNoGenesisEvent if every session ledger was scanned cleanly and
+// none contained a genesis event. Any other error means the scan itself
+// failed (e.g. a directory read error or an aborted bufio.Scanner) and the
+// hash algorithm is genuinely unknown, not merely absent.
 func GetHashAlgorithm(workspaceRoot string) (string, error) {
 	hashAlgCache.mu.RLock()
 	cached, ok := hashAlgCache.byRoot[workspaceRoot]
@@ -365,10 +385,16 @@ func GetHashAlgorithm(workspaceRoot string) (string, error) {
 	if err != nil {
 		// Don't cache environmental errors (e.g. ledger dir not created yet) —
 		// only cache a completed scan's outcome.
-		return "", err
+		return "", fmt.Errorf("reading ledger directory %s: %w", ledgerDir, err)
 	}
 
-	// Search for genesis event in any session
+	// Search for genesis event in any session. A scan abort in one session
+	// (e.g. an oversized line) must not stop the search for the genesis
+	// event in a sibling session — but if the genesis event is never found
+	// anywhere, a prior scan abort means the answer is genuinely unknown,
+	// not "no genesis event present", so remember the first such error and
+	// report it instead of ErrNoGenesisEvent if the full scan comes up empty.
+	var scanErr error
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -380,8 +406,14 @@ func GetHashAlgorithm(workspaceRoot string) (string, error) {
 			continue
 		}
 
-		alg, found := scanForGenesisAlgorithm(f)
+		alg, found, err := scanForGenesisAlgorithm(f)
 		f.Close()
+		if err != nil {
+			if scanErr == nil {
+				scanErr = fmt.Errorf("scanning %s for genesis event: %w", eventsFile, err)
+			}
+			continue
+		}
 		if found {
 			hashAlgCache.mu.Lock()
 			hashAlgCache.byRoot[workspaceRoot] = hashAlgResult{alg: alg}
@@ -390,16 +422,22 @@ func GetHashAlgorithm(workspaceRoot string) (string, error) {
 		}
 	}
 
-	notFound := fmt.Errorf("no workspace.genesis event found")
+	if scanErr != nil {
+		// A scan abort means the genesis event's presence is genuinely
+		// unknown, not "not found" — don't cache this as ErrNoGenesisEvent.
+		return "", scanErr
+	}
 	hashAlgCache.mu.Lock()
-	hashAlgCache.byRoot[workspaceRoot] = hashAlgResult{err: notFound}
+	hashAlgCache.byRoot[workspaceRoot] = hashAlgResult{err: ErrNoGenesisEvent}
 	hashAlgCache.mu.Unlock()
-	return "", notFound
+	return "", ErrNoGenesisEvent
 }
 
 // scanForGenesisAlgorithm reads a JSONL stream looking for a workspace.genesis event
-// and returns its hash_algorithm if found.
-func scanForGenesisAlgorithm(r io.Reader) (string, bool) {
+// and returns its hash_algorithm if found. A non-nil error indicates the scan
+// was aborted (e.g. a line exceeding the scanner's token limit) and the
+// caller must not treat that as "no genesis event present".
+func scanForGenesisAlgorithm(r io.Reader) (string, bool, error) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		var event EventEnvelope
@@ -409,11 +447,14 @@ func scanForGenesisAlgorithm(r io.Reader) (string, bool) {
 
 		if event.HashedPayload.Type == "workspace.genesis" {
 			if alg, ok := event.HashedPayload.Data["hash_algorithm"].(string); ok {
-				return alg, true
+				return alg, true, nil
 			}
 		}
 	}
-	return "", false
+	if err := scanner.Err(); err != nil {
+		return "", false, err
+	}
+	return "", false, nil
 }
 
 // === VERIFICATION ===
@@ -432,7 +473,13 @@ func VerifyLedger(workspaceRoot, sessionID string) error {
 	// Get hash algorithm
 	hashAlg, err := GetHashAlgorithm(workspaceRoot)
 	if err != nil {
-		hashAlg = "sha256" // Default
+		if !errors.Is(err, ErrNoGenesisEvent) {
+			// The genesis scan itself failed; verifying under a guessed
+			// algorithm could produce a spurious "hash mismatch" instead of
+			// reporting the real problem, so propagate it.
+			return fmt.Errorf("failed to determine hash algorithm: %w", err)
+		}
+		hashAlg = "sha256" // No genesis event found: default.
 	}
 
 	var prevHash string

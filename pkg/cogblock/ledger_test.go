@@ -1,7 +1,9 @@
 package cogblock
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -794,5 +796,186 @@ func TestGetHashAlgorithm_CachesNotFoundResultAcrossCalls(t *testing.T) {
 	}
 	if err1.Error() != err2.Error() {
 		t.Fatalf("cached error changed after ledger dir removal: first=%q second=%q", err1, err2)
+	}
+}
+
+// === scanForGenesisAlgorithm ERROR PROPAGATION (cogos#541) ===
+
+// TestScanForGenesisAlgorithm_PropagatesScanError verifies that a scan
+// failure (e.g. a line exceeding bufio's max token size) is surfaced as an
+// error instead of being silently treated as "no genesis event found".
+func TestScanForGenesisAlgorithm_PropagatesScanError(t *testing.T) {
+	// A single line longer than bufio.MaxScanTokenSize forces scanner.Scan()
+	// to fail with bufio.ErrTooLong.
+	oversized := "{\"pad\":\"" + strings.Repeat("x", bufio.MaxScanTokenSize+1) + "\"}\n"
+
+	_, found, err := scanForGenesisAlgorithm(strings.NewReader(oversized))
+	if err == nil {
+		t.Fatalf("scanForGenesisAlgorithm: want non-nil error for oversized line, got nil (found=%v)", found)
+	}
+	if found {
+		t.Fatalf("scanForGenesisAlgorithm: found=true on an aborted scan, want false")
+	}
+}
+
+// TestScanForGenesisAlgorithm_CleanEOFNoError verifies the non-error path is
+// unaffected: a stream with no genesis event still reports found=false, err=nil.
+func TestScanForGenesisAlgorithm_CleanEOFNoError(t *testing.T) {
+	alg, found, err := scanForGenesisAlgorithm(strings.NewReader(`{"hashed_payload":{"type":"tool.call"}}` + "\n"))
+	if err != nil {
+		t.Fatalf("scanForGenesisAlgorithm: unexpected error on clean EOF: %v", err)
+	}
+	if found {
+		t.Fatalf("scanForGenesisAlgorithm: found=true, want false (no genesis event in stream); alg=%q", alg)
+	}
+}
+
+// TestGetHashAlgorithm_PropagatesScanError verifies GetHashAlgorithm does not
+// mask a scan abort as "no workspace.genesis event found" — it must return
+// an error distinguishable from the clean not-found case.
+func TestGetHashAlgorithm_PropagatesScanError(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, ".cog", "ledger", "sess-oversized")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	oversized := "{\"pad\":\"" + strings.Repeat("x", bufio.MaxScanTokenSize+1) + "\"}\n"
+	eventsFile := filepath.Join(sessionDir, "events.jsonl")
+	if err := os.WriteFile(eventsFile, []byte(oversized), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := GetHashAlgorithm(tmpDir)
+	if err == nil {
+		t.Fatalf("GetHashAlgorithm: want error when a session's ledger fails to scan, got nil")
+	}
+	if strings.Contains(err.Error(), "no workspace.genesis event found") {
+		t.Fatalf("GetHashAlgorithm: scan-abort error was masked as not-found: %v", err)
+	}
+	if errors.Is(err, ErrNoGenesisEvent) {
+		t.Fatalf("GetHashAlgorithm: scan-abort error must not satisfy errors.Is(err, ErrNoGenesisEvent): %v", err)
+	}
+}
+
+// oversizedGenesisWorkspace writes a workspace with one session ledger whose
+// events.jsonl contains a single line longer than bufio.MaxScanTokenSize,
+// which aborts scanForGenesisAlgorithm's scan of that file.
+func oversizedGenesisWorkspace(t *testing.T) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, ".cog", "ledger", "sess-oversized")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	oversized := "{\"pad\":\"" + strings.Repeat("x", bufio.MaxScanTokenSize+1) + "\"}\n"
+	if err := os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), []byte(oversized), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	return tmpDir
+}
+
+// TestAppendEvent_PropagatesHashAlgorithmScanError verifies AppendEvent does
+// not silently default to sha256 when GetHashAlgorithm fails for a reason
+// other than "no genesis event found" — a scan-abort on another session's
+// genesis line must not cause new events to be chained under a possibly
+// wrong hash algorithm without any error surfaced to the caller.
+func TestAppendEvent_PropagatesHashAlgorithmScanError(t *testing.T) {
+	tmpDir := oversizedGenesisWorkspace(t)
+
+	envelope := &EventEnvelope{
+		HashedPayload: EventPayload{
+			Type: "test.event",
+			Data: map[string]interface{}{"key": "value"},
+		},
+	}
+
+	err := AppendEvent(tmpDir, "sess-new", envelope)
+	if err == nil {
+		t.Fatalf("AppendEvent: want error when hash algorithm scan aborts, got nil")
+	}
+	if strings.Contains(err.Error(), "no workspace.genesis event found") {
+		t.Fatalf("AppendEvent: scan-abort error was masked as not-found: %v", err)
+	}
+}
+
+// TestVerifyLedger_PropagatesHashAlgorithmScanError verifies VerifyLedger
+// does not silently default to sha256 when GetHashAlgorithm fails for a
+// reason other than "no genesis event found" — verifying under a guessed
+// algorithm could produce a spurious hash-mismatch instead of reporting the
+// real problem.
+func TestVerifyLedger_PropagatesHashAlgorithmScanError(t *testing.T) {
+	tmpDir := oversizedGenesisWorkspace(t)
+
+	// Give the session under test its own valid, appended event so
+	// VerifyLedger gets past opening the file and reaches the hash
+	// algorithm lookup.
+	otherSessionDir := filepath.Join(tmpDir, ".cog", "ledger", "sess-under-test")
+	if err := os.MkdirAll(otherSessionDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	line := `{"hashed_payload":{"type":"test.event","data":{}},"metadata":{"seq":1,"hash":"deadbeef"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(otherSessionDir, "events.jsonl"), []byte(line), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err := VerifyLedger(tmpDir, "sess-under-test")
+	if err == nil {
+		t.Fatalf("VerifyLedger: want error when hash algorithm scan aborts, got nil")
+	}
+	if strings.Contains(err.Error(), "hash mismatch") {
+		t.Fatalf("VerifyLedger: scan-abort was masked as a spurious hash mismatch: %v", err)
+	}
+}
+
+// TestGetHashAlgorithm_ScanAbortInOneSessionDoesNotBlockOthers verifies that
+// a scan abort in one session's ledger (e.g. an oversized line unrelated to
+// the genesis event) does not stop GetHashAlgorithm from finding a genuine
+// workspace.genesis event in a sibling session directory. Session
+// directories are visited in os.ReadDir's sorted order, so "aaa-corrupt" is
+// scanned (and aborts) before "zzz-genesis" is reached.
+func TestGetHashAlgorithm_ScanAbortInOneSessionDoesNotBlockOthers(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	corruptDir := filepath.Join(tmpDir, ".cog", "ledger", "aaa-corrupt")
+	if err := os.MkdirAll(corruptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	oversized := "{\"pad\":\"" + strings.Repeat("x", bufio.MaxScanTokenSize+1) + "\"}\n"
+	if err := os.WriteFile(filepath.Join(corruptDir, "events.jsonl"), []byte(oversized), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	genesisDir := filepath.Join(tmpDir, ".cog", "ledger", "zzz-genesis")
+	if err := os.MkdirAll(genesisDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	genesisLine := `{"hashed_payload":{"type":"workspace.genesis","data":{"hash_algorithm":"sha512"}},"metadata":{"seq":1}}` + "\n"
+	if err := os.WriteFile(filepath.Join(genesisDir, "events.jsonl"), []byte(genesisLine), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	alg, err := GetHashAlgorithm(tmpDir)
+	if err != nil {
+		t.Fatalf("GetHashAlgorithm: want the genesis event in the sibling session to be found despite the scan abort in 'aaa-corrupt', got error: %v", err)
+	}
+	if alg != "sha512" {
+		t.Fatalf("GetHashAlgorithm: alg = %q, want %q", alg, "sha512")
+	}
+}
+
+// TestGetHashAlgorithm_ScanAbortEverywhereReturnsError verifies that when
+// every session directory's scan aborts and the genesis event is never
+// found, GetHashAlgorithm reports the scan error rather than the misleading
+// ErrNoGenesisEvent sentinel.
+func TestGetHashAlgorithm_ScanAbortEverywhereReturnsError(t *testing.T) {
+	tmpDir := oversizedGenesisWorkspace(t)
+
+	_, err := GetHashAlgorithm(tmpDir)
+	if err == nil {
+		t.Fatalf("GetHashAlgorithm: want error when the only session's scan aborts, got nil")
+	}
+	if errors.Is(err, ErrNoGenesisEvent) {
+		t.Fatalf("GetHashAlgorithm: scan-abort error must not satisfy errors.Is(err, ErrNoGenesisEvent): %v", err)
 	}
 }
