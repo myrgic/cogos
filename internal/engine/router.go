@@ -247,6 +247,19 @@ func (r *SimpleRouter) Route(ctx context.Context, req *CompletionRequest) (Provi
 		// configured model. Only the involuntary carry-over into a fallback that
 		// can't serve the override is filtered.
 		canServe := i == 0 || providerCanServe(p, req.ModelOverride)
+		// Per-provider deny policy, enforced at the true routing boundary (not
+		// just the HTTP handlers that build this request): a fallback candidate
+		// that operator policy denies for this model must never be selected,
+		// even though providerCanServe above deliberately treats remote/
+		// aggregator providers as model-agnostic for legitimate frontier
+		// failover. Without this, a denied provider named in cfg.FallbackChain
+		// (or reached via buildCandidateOrder's "remaining providers" tail)
+		// could still serve a request whose ModelOverride/PreferProvider was
+		// denied at admission for a DIFFERENT provider, once the preferred
+		// provider becomes unavailable and Route falls through the chain.
+		if _, denied := DeniedByPolicy(p.Name(), req.ModelOverride); denied {
+			canServe = false
+		}
 
 		score := ProviderScore{
 			Provider:        p.Name(),

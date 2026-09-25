@@ -1458,6 +1458,19 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 			}
 		}
 		if mres := ResolveModelRequest(nil, string(req.Model), ""); mres.PreferProvider != "" {
+			// Post-resolution deny check, mirroring the gateway (serve.go /
+			// serve_anthropic.go): this nil-router dispatch path only consults
+			// the static alias tables, but a future alias entry (or an
+			// operator-authored `routing.deny:` rule that targets an alias's
+			// provider) must still be honoured before a provider is
+			// constructed and called directly — this path never goes through
+			// router.Route's own DeniedByPolicy gate.
+			if reason, denied := DeniedByPolicy(mres.PreferProvider, mres.ModelOverride); denied {
+				return nil, &AgentControllerError{
+					Code:    "policy_denied",
+					Message: fmt.Sprintf("model %q is denied on provider %q: %s", req.Model, mres.PreferProvider, reason),
+				}
+			}
 			pcfg, merr := loadProvidersConfig(c.cfg)
 			if merr == nil {
 				if pc, pok := pcfg.Providers[mres.PreferProvider]; pok && pc.IsEnabled() {

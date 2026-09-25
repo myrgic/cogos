@@ -1126,6 +1126,38 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 
 		mres := ResolveModelRequest(s.router, req.Model, creq.Metadata.RequestID)
+
+		// Post-resolution deny check: deniedModelProvider above only catches an
+		// explicit "<provider>/<model>" composite spelling in the RAW client
+		// string. ResolveModelRequest can also land on a denied provider via
+		// resolveLiveCatalog's registered-provider-name composite match or the
+		// final ProviderForModel exact-match fallback (e.g. an operator's
+		// providers.yaml configures openrouter with
+		// `model: anthropic/claude-fable-5.1`, and a client requests the bare id
+		// "anthropic/claude-fable-5.1" with no provider literally named
+		// "anthropic" registered) — those routes never contain an explicit
+		// "openrouter/" prefix for the pre-resolution check to see, so the
+		// policy must also be re-checked against what actually resolved.
+		if reason, denied := DeniedByPolicy(mres.PreferProvider, mres.ModelOverride); denied {
+			slog.Warn("chat: rejected policy-denied model after resolution at kernel boundary",
+				"request_id", creq.Metadata.RequestID,
+				"model", req.Model,
+				"resolved_provider", mres.PreferProvider,
+				"resolved_model", mres.ModelOverride,
+			)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"type":                "policy_denied",
+					"message":             fmt.Sprintf("model %q is denied on provider %q: %s", req.Model, mres.PreferProvider, reason),
+					"param":               "model",
+					"allowed_alternative": "fable",
+				},
+			})
+			return
+		}
+
 		creq.Metadata.PreferProvider = mres.PreferProvider
 		creq.ModelOverride = mres.ModelOverride
 		// kernel-agent / ollama: auto-inject the kernel's MCP tool registry when
