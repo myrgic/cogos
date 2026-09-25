@@ -2247,7 +2247,7 @@
     },
     {
       "file": "internal/testkernel/testkernel.go",
-      "line": 557,
+      "line": 576,
       "column": 13,
       "primitive": "os.MkdirAll",
       "func": "makeMinimalWorkspace",
@@ -2259,7 +2259,7 @@
     },
     {
       "file": "internal/testkernel/testkernel.go",
-      "line": 564,
+      "line": 583,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "makeMinimalWorkspace",
@@ -2271,7 +2271,7 @@
     },
     {
       "file": "internal/testkernel/testkernel.go",
-      "line": 569,
+      "line": 588,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "makeMinimalWorkspace",
