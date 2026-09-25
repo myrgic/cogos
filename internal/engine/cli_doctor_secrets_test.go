@@ -172,6 +172,77 @@ func TestCredentialKeyPattern_MatchesSuffixStyleNames(t *testing.T) {
 	}
 }
 
+// Regression (reviewer objection on PR #576, second pass): the scanner was
+// structurally line-based and could not see multi-line values at all, so a
+// `private_key: |` YAML block scalar followed by an indented PEM body was
+// invisible — credentialKeyPattern explicitly targets `private[_-]?key`, so
+// this was a real, untested gap against the exact file shape this group
+// exists to catch.
+func TestScanFileForSecrets_FindsMultiLineBlockScalar(t *testing.T) {
+	dir := t.TempDir()
+	p := writeSecretFile(t, dir, "tls.yaml", strings.Join([]string{
+		"service: internal-ca",
+		"private_key: |",
+		"  -----BEGIN PRIVATE KEY-----",
+		"  MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcw" + canarySecret,
+		"  -----END PRIVATE KEY-----",
+		"port: 8443",
+	}, "\n"))
+
+	fs, err := scanFileForSecrets(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs) != 1 {
+		t.Fatalf("got %d findings, want 1 (block-scalar PEM body): %+v", len(fs), fs)
+	}
+	if fs[0].key != "private_key" {
+		t.Errorf("key = %q, want private_key", fs[0].key)
+	}
+	if fs[0].line != 2 {
+		t.Errorf("line = %d, want 2 (the block-scalar opener)", fs[0].line)
+	}
+}
+
+// A block scalar under a non-credential key, or one whose body is empty/short,
+// must not be flagged — the block-scalar pass should not become a new source
+// of false positives.
+func TestScanFileForSecrets_BlockScalarIgnoresNonCredentialKeysAndEmptyBodies(t *testing.T) {
+	dir := t.TempDir()
+	p := writeSecretFile(t, dir, "readme.yaml", strings.Join([]string{
+		"description: |",
+		"  This service does the thing.",
+		"  It has multiple lines of prose.",
+		"private_key: |",
+		"",
+	}, "\n"))
+
+	fs, err := scanFileForSecrets(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs) != 0 {
+		t.Errorf("got %d findings, want 0: %+v", len(fs), fs)
+	}
+}
+
+// Regression (reviewer objection on PR #576, second pass): the unconditional
+// SHOUTY_SNAKE_CASE-is-a-name heuristic in classifyValue misclassified a real,
+// word-shaped secret as an env-var name whenever it had no digits. Narrowed to
+// require the value end in a recognized naming suffix (TOKEN, KEY, SECRET,
+// ...); a secret that does not end that way is no longer exempted.
+func TestClassifyValue_WordShapedSecretWithoutNamingSuffixIsMaterial(t *testing.T) {
+	if !classifyValue("MASTER_PROD_SIGNING_SECRET_VALUE") {
+		t.Error("classifyValue(...) = false (treated as env-var name); want true (material) — does not end in a recognized naming suffix")
+	}
+	// The env-var-NAME shapes this heuristic exists for must still be exempt.
+	for _, v := range []string{"HERMES_ACCESS_TOKEN", "OPENAI_API_KEY", "MY_LONG_ENV_VAR_NAME"} {
+		if classifyValue(v) {
+			t.Errorf("classifyValue(%q) = true; want false (env-var name, ends in a recognized suffix)", v)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // THE LOAD-BEARING TEST: doctor must never print a secret value
 // ---------------------------------------------------------------------------
@@ -309,14 +380,13 @@ func TestCredentialHygiene_NoCandidatesIsUnknownNotOK(t *testing.T) {
 	if g == nil {
 		t.Fatal("group missing")
 	}
-	for _, c := range g.Checks {
-		if c.Status == StatusOK && strings.HasPrefix(c.Name, "credential scan") &&
-			!strings.Contains(c.Detail, "0 file(s)") {
-			continue
-		}
+	// The contract: nothing scanned must never present as a clean bill of
+	// health. With no candidate files found, the single check this group
+	// emits must be UNKNOWN, never OK.
+	if len(g.Checks) != 1 {
+		t.Fatalf("expected exactly one check when no candidates exist, got %d", len(g.Checks))
 	}
-	// The contract: nothing scanned must never present as a clean bill of health.
-	if len(g.Checks) == 1 && g.Checks[0].Status == StatusOK {
+	if g.Checks[0].Status == StatusOK {
 		t.Error("empty scan reported as OK; must be UNKNOWN (a check that could not run learned nothing)")
 	}
 }

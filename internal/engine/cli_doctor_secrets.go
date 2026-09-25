@@ -157,12 +157,47 @@ func classifyValue(v string) bool {
 		strings.HasPrefix(t, "http://") || strings.HasPrefix(t, "https://") {
 		return false
 	}
-	// A bare SHOUTY_SNAKE_CASE token is an env-var NAME, not material.
-	if t == strings.ToUpper(t) && !strings.ContainsAny(t, " /+=") &&
-		strings.Contains(t, "_") && !strings.ContainsAny(t, "0123456789") {
+	// A bare SHOUTY_SNAKE_CASE token that ENDS IN a recognized env-var-name
+	// suffix (TOKEN, KEY, SECRET, ...) is very likely naming where a secret
+	// lives, not the secret itself — e.g. `token: HERMES_ACCESS_TOKEN`.
+	//
+	// This is deliberately narrower than "any all-caps underscored token with
+	// no digits". An earlier version applied unconditionally and was flagged
+	// by review (PR #576, second pass): a real secret that happens to be
+	// word-shaped — `client_secret: MASTER_PROD_SIGNING_SECRET_VALUE` — does
+	// not end in a naming suffix, so it is NOT exempted here and falls
+	// through to be classified as material, same as any other opaque value.
+	if isEnvVarNameShaped(t) {
 		return false
 	}
 	return true
+}
+
+// envVarNameSuffixes are the tail words a SHOUTY_SNAKE_CASE value must end in
+// to be treated as the NAME of an environment variable rather than material
+// held directly in the value. Chosen from the actual env-var-name shapes seen
+// in this codebase's configs (HERMES_ACCESS_TOKEN, OPENAI_API_KEY, ...).
+var envVarNameSuffixes = []string{
+	"_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_CREDENTIAL",
+	"_ENV", "_VAR", "_NAME", "_ID", "_REF", "_PATH", "_FILE",
+}
+
+// isEnvVarNameShaped reports whether t (already trimmed) reads as the NAME of
+// an environment variable rather than as opaque credential material held
+// directly in the value.
+func isEnvVarNameShaped(t string) bool {
+	if t != strings.ToUpper(t) || strings.ContainsAny(t, " /+=") || !strings.Contains(t, "_") {
+		return false
+	}
+	if strings.ContainsAny(t, "0123456789") {
+		return false
+	}
+	for _, sfx := range envVarNameSuffixes {
+		if strings.HasSuffix(t, sfx) {
+			return true
+		}
+	}
+	return false
 }
 
 // isEnvIndirectionKey reports whether the key names an env var rather than
@@ -195,27 +230,86 @@ func isEnvIndirectionKey(k string) bool {
 var kvPairPattern = regexp.MustCompile(
 	`"?([A-Za-z_][A-Za-z0-9_.\-]*)"?\s*[:=]\s*(?:"([^"]*)"|'([^']*)'|([^\s,;{}"'\[\]]+))`)
 
-// scanFileForSecrets reads one file line-by-line and returns findings.
-// Returns an error only when the file cannot be read — the caller reports
-// that as UNKNOWN rather than assuming the file was clean.
+// blockScalarStartPattern matches a YAML block-scalar opener with no inline
+// value on the same line — `key: |`, `key: >-`, `key: |+`, etc. The value
+// lives entirely in the following, more-indented lines.
+var blockScalarStartPattern = regexp.MustCompile(
+	`^(\s*)"?([A-Za-z_][A-Za-z0-9_.\-]*)"?\s*:\s*[|>][+-]?\s*(#.*)?$`)
+
+// indentOf returns the count of leading spaces/tabs on a line.
+func indentOf(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " \t"))
+}
+
+// scanFileForSecrets reads one file and returns findings. Returns an error
+// only when the file cannot be read — the caller reports that as UNKNOWN
+// rather than assuming the file was clean.
+//
+// Two passes over the same line slice: kv pairs on a single physical line
+// (the common case — JSON, .env, inline YAML), and YAML block scalars, whose
+// value spans the following indented lines rather than sharing the key's
+// line. The block-scalar pass exists because the line-based kv scan is
+// structurally blind to it: `private_key: |` followed by an indented PEM
+// body has no `:`/`=` on any of the body lines, so a scanner that only
+// matches KEY: value pairs per line reports OK on a file with a private key
+// committed in plaintext — flagged by review (PR #576, second pass) as an
+// untested gap directly against this group's stated purpose, since
+// `credentialKeyPattern` explicitly targets `private[_-]?key`.
 func scanFileForSecrets(path string) ([]secretFinding, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-
-	var out []secretFinding
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	lineNo := 0
+	var lines []string
 	for sc.Scan() {
-		lineNo++
-		line := sc.Text()
+		lines = append(lines, sc.Text())
+	}
+	scanErr := sc.Err()
+	f.Close()
+	if scanErr != nil {
+		return nil, scanErr
+	}
+
+	var out []secretFinding
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "//") {
 			continue
 		}
+
+		if m := blockScalarStartPattern.FindStringSubmatch(line); m != nil {
+			key := m[2]
+			baseIndent := len(m[1])
+			// Consume the block body: every following line more indented than
+			// the key, or blank (blank lines inside a block scalar are part
+			// of it). The first line at or below baseIndent ends the block.
+			var body strings.Builder
+			j := i + 1
+			for ; j < len(lines); j++ {
+				bl := lines[j]
+				if strings.TrimSpace(bl) != "" && indentOf(bl) <= baseIndent {
+					break
+				}
+				body.WriteString(strings.TrimSpace(bl))
+			}
+			if credentialKeyPattern.MatchString(key) && !isEnvIndirectionKey(key) {
+				content := body.String()
+				if classifyValue(content) {
+					out = append(out, secretFinding{
+						file:   path,
+						line:   i + 1,
+						key:    key,
+						length: len(content),
+					})
+				}
+			}
+			i = j - 1 // resume scanning after the consumed block
+			continue
+		}
+
 		for _, m := range kvPairPattern.FindAllStringSubmatch(line, -1) {
 			key := m[1]
 			if !credentialKeyPattern.MatchString(key) || isEnvIndirectionKey(key) {
@@ -234,14 +328,11 @@ func scanFileForSecrets(path string) ([]secretFinding, error) {
 			}
 			out = append(out, secretFinding{
 				file:   path,
-				line:   lineNo,
+				line:   i + 1,
 				key:    key,
 				length: len(strings.Trim(strings.TrimSpace(val), `"'`)),
 			})
 		}
-	}
-	if err := sc.Err(); err != nil {
-		return nil, err
 	}
 	return out, nil
 }
