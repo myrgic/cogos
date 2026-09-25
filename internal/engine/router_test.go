@@ -997,3 +997,55 @@ func TestMergeProvidersConfig_AllFields(t *testing.T) {
 		}
 	})
 }
+
+// TestRouterRefusesDeniedProviderDefaultModel is the regression test for
+// cog-review round 2 on #624: a bare provider-name request (ModelOverride
+// empty) must not reach a provider whose OWN configured default model is
+// policy-denied. Before this fix, Route()'s deny check only ever looked at
+// req.ModelOverride, so DeniedByPolicy's model=="" short-circuit let a
+// provider serve its denied default model on every request that just named
+// the provider (e.g. an operator's "openrouter" entry configured with
+// `model: anthropic/claude-fable-5.1`, reproducing the exact Max-subscription
+// billing incident this policy exists to block).
+func TestRouterRefusesDeniedProviderDefaultModel(t *testing.T) {
+	t.Parallel()
+	SetProviderModelDeny(nil)
+	t.Cleanup(func() { SetProviderModelDeny(nil) })
+
+	r := NewSimpleRouter(RoutingConfig{Default: "openrouter"})
+	denied := NewStubProvider("openrouter", "reply")
+	denied.model = "anthropic/claude-fable-5.1" // the provider's own configured default
+	r.RegisterProvider(denied)
+
+	req := &CompletionRequest{Metadata: RequestMetadata{RequestID: "r-deny-default"}}
+	_, _, err := r.Route(context.Background(), req)
+	if err == nil {
+		t.Fatal("Route: expected an error (no available provider) when the only candidate's default model is denied; got a selection")
+	}
+}
+
+// TestRouterRefusesDeniedProviderDefaultModel_Fallback covers the same gap
+// on a FALLBACK candidate: the preferred provider is unavailable, and the
+// fallback's own configured default model is denied.
+func TestRouterRefusesDeniedProviderDefaultModel_Fallback(t *testing.T) {
+	t.Parallel()
+	SetProviderModelDeny(nil)
+	t.Cleanup(func() { SetProviderModelDeny(nil) })
+
+	r := NewSimpleRouter(RoutingConfig{
+		Default:       "primary",
+		FallbackChain: []string{"primary", "openrouter"},
+	})
+	primary := NewStubProvider("primary", "reply")
+	primary.available = false
+	r.RegisterProvider(primary)
+	denied := NewStubProvider("openrouter", "reply")
+	denied.model = "anthropic/claude-fable-5.1"
+	r.RegisterProvider(denied)
+
+	req := &CompletionRequest{Metadata: RequestMetadata{RequestID: "r-deny-fallback"}}
+	_, _, err := r.Route(context.Background(), req)
+	if err == nil {
+		t.Fatal("Route: expected an error when the only reachable fallback's default model is denied; got a selection")
+	}
+}

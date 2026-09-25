@@ -1428,6 +1428,19 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 		} else {
 			model = pc.Model
 		}
+		// Per-provider deny policy, checked against the EFFECTIVE model (what
+		// will actually be sent), not just an explicit override: when the
+		// caller named no model, `model` here is the provider's own
+		// configured default (pc.Model) — the exact value a bare
+		// provider-name request resolves to, and the request shape
+		// cog-review round 2 found bypassed every override-only check
+		// (resolve.go DeniedByPolicy short-circuits on model=="").
+		if reason, denied := DeniedByPolicy(req.Provider, model); denied {
+			return nil, &AgentControllerError{
+				Code:    "policy_denied",
+				Message: fmt.Sprintf("model %q is denied on provider %q: %s", model, req.Provider, reason),
+			}
+		}
 		// routeUsed stays empty; ProviderUsed on each slot is the canonical
 		// signal that the named-provider path fired. ServedModel (set from
 		// the provider response's ProviderMeta.Model) is the canonical
@@ -1458,19 +1471,6 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 			}
 		}
 		if mres := ResolveModelRequest(nil, string(req.Model), ""); mres.PreferProvider != "" {
-			// Post-resolution deny check, mirroring the gateway (serve.go /
-			// serve_anthropic.go): this nil-router dispatch path only consults
-			// the static alias tables, but a future alias entry (or an
-			// operator-authored `routing.deny:` rule that targets an alias's
-			// provider) must still be honoured before a provider is
-			// constructed and called directly — this path never goes through
-			// router.Route's own DeniedByPolicy gate.
-			if reason, denied := DeniedByPolicy(mres.PreferProvider, mres.ModelOverride); denied {
-				return nil, &AgentControllerError{
-					Code:    "policy_denied",
-					Message: fmt.Sprintf("model %q is denied on provider %q: %s", req.Model, mres.PreferProvider, reason),
-				}
-			}
 			pcfg, merr := loadProvidersConfig(c.cfg)
 			if merr == nil {
 				if pc, pok := pcfg.Providers[mres.PreferProvider]; pok && pc.IsEnabled() {
@@ -1488,6 +1488,21 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 						model = mres.ModelOverride
 					} else {
 						model = pc.Model
+					}
+					// Post-resolution deny check against the EFFECTIVE model
+					// (mirrors the gateway's serve.go / serve_anthropic.go /
+					// router.go checks): checking mres.ModelOverride alone
+					// would pass every bare-alias request whose provider's own
+					// configured default is the denied id — the request shape
+					// cog-review round 2 found (resolve.go DeniedByPolicy
+					// short-circuits on model==""). This nil-router dispatch
+					// path never goes through router.Route's own gate, so it
+					// must check here before constructing/calling the provider.
+					if reason, denied := DeniedByPolicy(mres.PreferProvider, model); denied {
+						return nil, &AgentControllerError{
+							Code:    "policy_denied",
+							Message: fmt.Sprintf("model %q is denied on provider %q: %s", model, mres.PreferProvider, reason),
+						}
 					}
 					req.Provider = mres.PreferProvider
 					note = fmt.Sprintf("model-routing: model=%s -> provider=%s override=%s", req.Model, mres.PreferProvider, mres.ModelOverride)
@@ -1525,6 +1540,15 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 						} else {
 							model = pc.Model
 							note = fmt.Sprintf("state-routing: state=%s -> provider=%s", c.process.State().String(), stateProvider)
+						}
+						// Per-provider deny policy against the EFFECTIVE model —
+						// see the matching comment on the explicit-provider
+						// branch above (cog-review round 2, resolve.go:115).
+						if reason, denied := DeniedByPolicy(stateProvider, model); denied {
+							return nil, &AgentControllerError{
+								Code:    "policy_denied",
+								Message: fmt.Sprintf("model %q is denied on provider %q: %s", model, stateProvider, reason),
+							}
 						}
 						// Populate req.Provider so dispatchSlot records the
 						// resolved provider name in ProviderUsed — otherwise it
@@ -1590,6 +1614,15 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 				} else {
 					model = pc.Model
 					note = fmt.Sprintf("harness-provider: provider=%s", hp)
+				}
+				// Per-provider deny policy against the EFFECTIVE model — see
+				// the matching comment on the explicit-provider branch above
+				// (cog-review round 2, resolve.go:115).
+				if reason, denied := DeniedByPolicy(hp, model); denied {
+					return nil, &AgentControllerError{
+						Code:    "policy_denied",
+						Message: fmt.Sprintf("model %q is denied on provider %q: %s", model, hp, reason),
+					}
 				}
 				// Populate req.Provider so dispatchSlot records the resolved
 				// provider name in ProviderUsed.
