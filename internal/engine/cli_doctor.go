@@ -441,6 +441,7 @@ func RunDoctor(root string, opts DoctorOptions) *DoctorReport {
 	doctorStoreLiveness(report, root, opts)
 	doctorContextConstruction(report, root, opts)
 	doctorInferenceSurface(report, root, opts)
+	doctorCredentialHygiene(report, root, opts)
 
 	return report
 }
