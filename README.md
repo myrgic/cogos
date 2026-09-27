@@ -424,6 +424,8 @@ as `X-Cogos-Grant`, `Authorization: Bearer`, or `x-api-key`.
 | `POST /v1/messages` | Anthropic Messages proxy (streaming passthrough) |
 | `POST /v1/context/foveated` | Context assembly (the route name predates the current vocabulary) |
 | `GET /v1/context` | Current context state |
+| `GET /v1/models` | Model menu: intent aliases (`foreground`, `deliberation`, `local`) plus every model a registered provider serves, each with its locality tier and context window |
+| `GET /v1/inference` | Inference engines, pinned models, queue, and health on one route |
 | `GET /v1/reconcile/convergence` | Per-reconciler cycle time, anomalies, quarantine |
 | `GET /v1/reconcile/coherence` | Reconcile-loop coherence summary |
 | `POST /v1/reconcile/{type}/resume` | Lift a quarantine by hand |
