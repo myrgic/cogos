@@ -38,7 +38,7 @@ func statusOf(g *DoctorGroup, namePrefix string) DoctorStatus {
 func TestClassifyValue_ReferencesAreNotMaterial(t *testing.T) {
 	refs := []string{
 		"cog:secret/discord/cog",
-		"cog://workspace@darkstar/secret/telegram/cog",
+		"cog://workspace@node-a/secret/telegram/cog",
 		"${DISCORD_TOKEN}",
 		"$(cat /run/secrets/tok)",
 		"env:OPENAI_API_KEY",
@@ -47,7 +47,7 @@ func TestClassifyValue_ReferencesAreNotMaterial(t *testing.T) {
 		"op://vault/item/field",
 		"vault:secret/data/app",
 		"!secret my_value_here_long",
-		"/Users/slowbro/path/to/keyfile.pem",
+		"/home/operator/path/to/keyfile.pem",
 		"https://example.com/callback?token=abc",
 	}
 	for _, v := range refs {
