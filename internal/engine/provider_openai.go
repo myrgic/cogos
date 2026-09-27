@@ -145,6 +145,10 @@ func (p *OpenAICompatProvider) Name() string { return p.name }
 // Model returns the configured model identifier.
 func (p *OpenAICompatProvider) Model() string { return p.model }
 
+// Endpoint returns the configured base URL. Used to tell a loopback backend
+// from one on another host (see localityTier).
+func (p *OpenAICompatProvider) Endpoint() string { return p.endpoint }
+
 // Available reports whether the server is reachable and has a usable model.
 // The result is cached for availCacheTTL so the router's periodic availability
 // probe (and the per-request /v1/providers handler) don't issue a live

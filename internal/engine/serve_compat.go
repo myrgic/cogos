@@ -133,7 +133,7 @@ type compatModelPermission struct {
 // `description` are cogos extensions ignored by standard OpenAI clients.
 //
 // ContextLength is `omitempty` deliberately (#518): most entries (intent
-// aliases, static frontier/eclipse ids, and live ids from a provider with no
+// aliases, static frontier ids, and live ids from a provider with no
 // comparable upstream field) have no known context window. Emitting 0 or a
 // guessed default there would be worse than omitting the field — a client
 // that sees no field can fall back to its own default; one that sees a wrong
@@ -248,11 +248,7 @@ func modelsCacheFor(router Router) *modelsCacheEntry {
 //     claude-sonnet-4-6, claude-opus-4-7, claude-haiku-4-5-20251001. Retained so
 //     existing clients keep working even when the live Anthropic catalog probe
 //     is unavailable.
-//  3. Static eclipse-26b (tier "lan-local") when a provider actually serves the
-//     eclipse-26b model string (ProviderForModel) — retained for the same
-//     reason, and gated on the same predicate that admits it so it is never
-//     advertised-then-rejected.
-//  4. LIVE-enumerated IDs: each registered provider that implements ModelLister
+//  3. LIVE-enumerated IDs: each registered provider that implements ModelLister
 //     is probed (GET /v1/models) with a bounded per-provider timeout,
 //     concurrently. Frontier providers emit their claude ids BARE
 //     (owned_by "anthropic"); OpenAI-compat / local providers emit composite
@@ -323,16 +319,9 @@ func buildModelsList(ctx context.Context, router Router) []compatModel {
 	now := time.Now().Unix()
 
 	// Gate the static/alias entries on real provider availability. All checks
-	// are in-memory map lookups (no I/O) — same pattern as isEclipseConfigured.
+	// are in-memory map lookups (no I/O).
 	frontierConfigured := isFrontierConfigured(router)
 	localConfigured := isLocalConfigured(router)
-	// The static eclipse-26b id is admissible (IsKnownModel true) ONLY when a
-	// provider actually serves the eclipse-26b model string. Gating its emission
-	// on the same predicate keeps emit and admit in lockstep — emitting it merely
-	// because a provider named "eclipse"/"lmstudio" exists (isEclipseConfigured's
-	// broader name match) would advertise an id the kernel then 400s. The real
-	// eclipse model is surfaced via live enumeration as a composite id regardless.
-	eclipseServed := eclipseModelServed(router)
 
 	// Live enumeration first (probe every ModelLister provider concurrently,
 	// each bounded, skipping any that error/time out): the alias entries below
@@ -391,7 +380,7 @@ func buildModelsList(ctx context.Context, router Router) []compatModel {
 		// Capabilities() — provider-scoped, not per-loaded-model, so no live
 		// listing lookup is needed the way context_length needs one.
 		add(withCaps(withCtx(mkCompatModel("local", "cogos", "local-sovereign",
-			"private, no egress (E4B on this node)", now), localAliasContextLength(router, live)),
+			"private, no egress (this node's local provider)", now), localAliasContextLength(router, live)),
 			localAliasCapabilities(router)))
 	}
 	if frontierConfigured {
@@ -405,16 +394,6 @@ func buildModelsList(ctx context.Context, router Router) []compatModel {
 		add(withCaps(withCtx(mkCompatModel("claude-opus-4-7", "anthropic", "frontier-managed", "", now), fctx), fcaps))
 		add(withCaps(withCtx(mkCompatModel("claude-haiku-4-5-20251001", "anthropic", "frontier-managed", "fast, low-cost", now), fctx), fcaps))
 	}
-	if eclipseServed {
-		// Same rule as every other entry: the window is what the serving
-		// provider declares, or omitted when it declares nothing (#518 review
-		// round 2 — this static entry was the last one shipping without it).
-		// Capabilities (#640) follow the identical serving-provider lookup.
-		add(withCaps(withCtx(mkCompatModel("eclipse-26b", "cogos", "lan-local",
-			"LAN-resident 26B model (Eclipse node)", now), servingProviderContextLength(router, "eclipse-26b")),
-			servingProviderCapabilities(router, "eclipse-26b")))
-	}
-
 	for _, m := range live {
 		add(m)
 	}
@@ -777,13 +756,7 @@ func modelEntryFor(p Provider, listing ModelListing, frontier bool, now int64) c
 	} else {
 		name := p.Name()
 		composite := name + "/" + id
-		tier := "frontier-managed"
-		switch {
-		case strings.Contains(strings.ToLower(name), "eclipse"):
-			tier = "lan-local"
-		case p.Capabilities().IsLocal:
-			tier = "local-sovereign"
-		}
+		tier := localityTier(p)
 		m = mkCompatModel(composite, "cogos:"+name, tier, desc, now)
 	}
 	if listing.ContextLength > 0 {
@@ -793,35 +766,22 @@ func modelEntryFor(p Provider, listing ModelListing, frontier bool, now int64) c
 	return m
 }
 
-// eclipseModelServed reports whether some registered provider actually serves
-// the eclipse-26b model string. This is exactly the condition under which
-// IsKnownModel(router, "eclipse-26b") is true (via ProviderForModel), so it is
-// the correct emit-gate for the static eclipse-26b menu entry: emit ⇔ admit.
-// The broader name-based isEclipseConfigured is retained for callers that only
-// need to know an eclipse/lmstudio provider is present, but must NOT gate the
-// static id emission (that would advertise-then-reject).
-func eclipseModelServed(router Router) bool {
-	if router == nil {
-		return false
+// localityTier classifies a live-enumerated provider by where inference
+// runs, from the provider's own declarations, never its name:
+//
+//	local-sovereign  on-device, loopback endpoint
+//	lan-local        on-device, endpoint on another host the operator runs
+//	frontier-managed everything else (hosted APIs, agentic CLIs)
+func localityTier(p Provider) string {
+	if !isOnDevice(p.Capabilities()) {
+		return "frontier-managed"
 	}
-	_, ok := router.ProviderForModel("eclipse-26b")
-	return ok
-}
-
-// isEclipseConfigured returns true when the router has a registered provider
-// that serves the eclipse-26b LAN model. Checks by provider name ("eclipse",
-// "lmstudio") and by model string ("eclipse-26b"). Fast: in-memory lookups only.
-func isEclipseConfigured(router Router) bool {
-	if router == nil {
-		return false
-	}
-	for _, name := range []string{"eclipse", "lmstudio"} {
-		if _, ok := router.ProviderForName(name); ok {
-			return true
+	if ep, ok := p.(interface{ Endpoint() string }); ok {
+		if e := ep.Endpoint(); e != "" && !isLocalEndpoint(e) {
+			return "lan-local"
 		}
 	}
-	_, ok := router.ProviderForModel("eclipse-26b")
-	return ok
+	return "local-sovereign"
 }
 
 // isFrontierConfigured returns true when the router has a registered provider
@@ -851,14 +811,14 @@ func isFrontierConfigured(router Router) bool {
 	return false
 }
 
-// isLocalConfigured returns true when the router has at least one registered
-// provider whose Capabilities().IsLocal is true. Uses FirstLocalProvider so
-// the check requires no concrete type assertion. Fast: in-memory lookup only.
+// isLocalConfigured returns true when the "local" alias can resolve: the
+// router has an on-device provider (router.LocalProvider). Fast: in-memory
+// lookup only.
 func isLocalConfigured(router Router) bool {
 	if router == nil {
 		return false
 	}
-	_, ok := router.FirstLocalProvider()
+	_, ok := router.LocalProvider()
 	return ok
 }
 

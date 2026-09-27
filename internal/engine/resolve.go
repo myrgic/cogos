@@ -16,9 +16,9 @@
 //	haiku/sonnet/opus → claude-oauth, <model id>         (per-model selection)
 //	claude            → claude-oauth, ""                 (generic managed alias)
 //	codex             → codex,        ""
-//	ollama            → ollama,       ""                 (+ injectKernelTools)
-//	kernel-agent      → ollama,       ""                 (+ injectKernelTools)
-//	local             → first local provider, ""
+//	local             → the node's local provider, ""   (router.LocalProvider)
+//	kernel-agent      → the node's local provider, ""   (+ injectKernelTools)
+//	ollama            → same as kernel-agent (legacy spelling)
 //	""                → default routing (all fields empty)
 //
 // For any other string the function falls through to the router:
@@ -177,16 +177,21 @@ var intentAliases = map[string]ModelResolution{
 	"fable":  {PreferProvider: "claude-oauth", ModelOverride: "claude-fable-5"},
 	// Other provider aliases.
 	"codex": {PreferProvider: "codex"},
-	// Local/kernel aliases — injectKernelTools tells the gateway to wire tools.
-	// Repointed from the decommissioned "ollama" provider to "lmstudio-darkstar"
-	// (the live local backend, per PR #417). On a stock install no "ollama"
-	// provider is registered, so the old value resolved to nothing; the "ollama"
-	// alias key is kept as a convenience spelling that now routes to the live
-	// local provider. Installs that still declare an "ollama" provider in
-	// providers.yaml are unaffected — they select it by its provider name, not
-	// via this alias default.
-	"ollama":       {PreferProvider: "lmstudio-darkstar", InjectKernelTools: true},
-	"kernel-agent": {PreferProvider: "lmstudio-darkstar", InjectKernelTools: true},
+	// "local", "kernel-agent" and "ollama" are NOT in this table: they name
+	// whichever on-device provider this node declares, so they resolve at
+	// request time through router.LocalProvider (see localAliases).
+}
+
+// localAliases resolve to the node's local provider (router.LocalProvider,
+// honouring routing.default_local). The kernel never names a provider for
+// them: which backend is "local" is node configuration, not code. "ollama" is
+// a legacy spelling of "kernel-agent" kept for existing clients; an install
+// that still registers a provider literally named "ollama" selects it by that
+// name through the ordinary provider-name match.
+var localAliases = map[string]ModelResolution{
+	"local":        {},
+	"kernel-agent": {InjectKernelTools: true},
+	"ollama":       {InjectKernelTools: true},
 }
 
 // dispatchFrontierAliases maps raw Anthropic model ids to
@@ -304,11 +309,11 @@ func frontierProviderName(router Router) (string, bool) {
 // above); all other strings are unchanged:
 //
 //	""            → {} (empty, default routing)
-//	"local"       → resolved via router.FirstLocalProvider / ProviderForName("lmstudio-darkstar")
+//	"local"       → {router.LocalProvider(), ""}
+//	"kernel-agent"→ {router.LocalProvider(), "", injectKernelTools}
+//	"ollama"      → same as "kernel-agent" (a registered "ollama" provider wins by name)
 //	"claude"      → {claude-oauth, ""}
 //	"codex"       → {codex, ""}
-//	"ollama"      → {lmstudio-darkstar, "", injectKernelTools}
-//	"kernel-agent"→ {lmstudio-darkstar, "", injectKernelTools}
 //	named provider→ {name, ""} (ProviderForName)
 //	model id      → {provider, model} (ProviderForModel + ModelOverride)
 func ResolveModelRequest(router Router, model string, requestID string) ModelResolution {
@@ -316,27 +321,28 @@ func ResolveModelRequest(router Router, model string, requestID string) ModelRes
 		return ModelResolution{}
 	}
 
-	// "local" has dynamic logic that requires a live router.
-	if model == "local" {
+	// Local aliases name whatever on-device provider this node declares, so
+	// they need a live router. With none (dispatch path) they resolve to
+	// nothing and the caller's own fallback (harness_provider, process-state
+	// routing) decides.
+	if base, ok := localAliases[model]; ok {
 		if router == nil {
 			return ModelResolution{}
 		}
-		// Prefer the live local backend (lmstudio-darkstar, per PR #417); fall
-		// back to a still-declared "ollama" provider for installs that kept it,
-		// then to any registered local provider.
-		if name, ok := router.ProviderForName("lmstudio-darkstar"); ok {
-			return ModelResolution{PreferProvider: name}
+		// A provider registered under the alias's own name wins (an install
+		// that still declares a provider called "ollama" keeps it).
+		if name, ok := router.ProviderForName(model); ok {
+			base.PreferProvider = name
+			return base
 		}
-		if name, ok := router.ProviderForName("ollama"); ok {
-			return ModelResolution{PreferProvider: name}
+		if name, ok := router.LocalProvider(); ok {
+			base.PreferProvider = name
+			return base
 		}
-		if name, ok := router.FirstLocalProvider(); ok {
-			return ModelResolution{PreferProvider: name}
-		}
-		slog.Warn("chat: model=local requested but no local provider registered; falling back to default routing",
+		slog.Warn("chat: model="+model+" requested but no on-device provider registered; falling back to default routing",
 			"request_id", requestID,
 		)
-		return ModelResolution{}
+		return base
 	}
 
 	// Alias table lookup — covers fixed managed-frontier aliases, raw model IDs
@@ -405,10 +411,9 @@ func IsKnownModel(router Router, model string) bool {
 	if _, ok := intentAliases[model]; ok {
 		return true
 	}
-	if model == "local" {
-		// "local" is a valid alias; whether a local provider is actually
-		// registered is handled by ResolveModelRequest's fallback-to-default
-		// behaviour, so do not reject it here.
+	if _, ok := localAliases[model]; ok {
+		// Valid aliases; whether an on-device provider is registered is
+		// handled by ResolveModelRequest's fallback-to-default behaviour.
 		return true
 	}
 	if router == nil {
@@ -447,9 +452,15 @@ func AvailableModelIDs(router Router) []string {
 	for _, id := range ids {
 		seen[id] = true
 	}
-	// Append remaining static intent aliases (claude, codex, ollama, etc.)
-	// that are not already in the menu, for completeness.
+	// Append remaining static intent aliases (claude, codex, ...) and the
+	// local aliases (kernel-agent, ollama) not already in the menu.
 	for alias := range intentAliases {
+		if !seen[alias] {
+			ids = append(ids, alias)
+			seen[alias] = true
+		}
+	}
+	for alias := range localAliases {
 		if !seen[alias] {
 			ids = append(ids, alias)
 			seen[alias] = true

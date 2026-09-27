@@ -742,7 +742,7 @@ func TestHandleModels_AllEntriesCarryContextLength(t *testing.T) {
 	local := newContextListerStub("lmstudio-darkstar", true,
 		ModelListing{ID: "gemma-4-26b", ContextLength: 32768},
 	)
-	// The "local" alias resolves to lmstudio-darkstar (resolve.go); its
+	// The "local" alias resolves to the router's local provider; its
 	// configured model determines which live listing the alias inherits.
 	local.capabilities.ModelsAvailable = []string{"gemma-4-26b"}
 
@@ -767,47 +767,6 @@ func TestHandleModels_AllEntriesCarryContextLength(t *testing.T) {
 	}
 	if m, ok := byID["local"]; !ok || m.ContextLength != 32768 {
 		t.Errorf("local alias: ContextLength = %d (present=%v); want 32768 (loaded window of resolved provider)", m.ContextLength, ok)
-	}
-}
-
-// TestHandleModels_EclipseEntryCarriesContextLength closes the last static
-// entry that shipped without a window (#518 review round 2). A provider whose
-// Model() is "eclipse-26b" makes eclipseServed true; its declared window must
-// reach the entry, and MUST be omitted (not zero, not a constant) when the
-// provider declares nothing.
-func TestHandleModels_EclipseEntryCarriesContextLength(t *testing.T) {
-	t.Parallel()
-
-	eclipse := NewStubProvider("lmstudio-eclipse", "resp")
-	eclipse.model = "eclipse-26b"
-	eclipse.capabilities.IsLocal = true
-	const eclipseWindow = 131_072
-	eclipse.capabilities.MaxContextTokens = eclipseWindow
-
-	router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-eclipse"})
-	router.RegisterProvider(eclipse)
-
-	resp := fetchModels(t, freshModelsServer(t, router))
-	m, ok := modelIDSet(resp)["eclipse-26b"]
-	if !ok {
-		t.Fatalf("eclipse-26b entry missing; ids=%v", modelIDKeys(modelIDSet(resp)))
-	}
-	if m.ContextLength != eclipseWindow {
-		t.Fatalf("eclipse-26b ContextLength = %d; want %d = the serving provider's declared window", m.ContextLength, eclipseWindow)
-	}
-
-	// Declares nothing → omitted, never a made-up number. Fresh router +
-	// server: the models response is cached per server, and the router
-	// snapshot must reflect the changed capability.
-	eclipse2 := NewStubProvider("lmstudio-eclipse", "resp")
-	eclipse2.model = "eclipse-26b"
-	eclipse2.capabilities.IsLocal = true
-	eclipse2.capabilities.MaxContextTokens = 0
-	router2 := NewSimpleRouter(RoutingConfig{Default: "lmstudio-eclipse"})
-	router2.RegisterProvider(eclipse2)
-	resp = fetchModels(t, freshModelsServer(t, router2))
-	if m := modelIDSet(resp)["eclipse-26b"]; m.ContextLength != 0 {
-		t.Fatalf("eclipse-26b ContextLength = %d with no declared window; want omitted", m.ContextLength)
 	}
 }
 

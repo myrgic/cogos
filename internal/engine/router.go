@@ -162,15 +162,28 @@ func (r *SimpleRouter) ProviderForModel(model string) (string, bool) {
 	return "", false
 }
 
-// FirstLocalProvider returns the name of the first registered provider whose
-// Capabilities().IsLocal is true. Providers are iterated in registration
-// order (alphabetically sorted by Name). Returns ("", false) when none is
-// registered.
-func (r *SimpleRouter) FirstLocalProvider() (string, bool) {
+// isOnDevice reports whether a provider runs inference on hardware the
+// operator controls. IsLocal alone is not enough: agentic CLI providers
+// (claude-code, codex, pi) run as local processes but forward prompts to a
+// hosted model, so they must never satisfy "local" (advertised as private,
+// no egress).
+func isOnDevice(caps ProviderCapabilities) bool {
+	return caps.IsLocal && !caps.AgenticHarness
+}
+
+// LocalProvider implements Router. See the interface doc.
+func (r *SimpleRouter) LocalProvider() (string, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, p := range r.providers {
-		if p.Capabilities().IsLocal {
+	if want := r.cfg.DefaultLocal; want != "" {
+		if p, ok := r.byName[want]; ok && isOnDevice(p.Capabilities()) {
+			return p.Name(), true
+		}
+		slog.Warn("router: routing.default_local is not a registered on-device provider; falling back to the first one",
+			"default_local", want)
+	}
+	for _, p := range r.providers { // sorted by Name
+		if isOnDevice(p.Capabilities()) {
 			return p.Name(), true
 		}
 	}
@@ -860,6 +873,9 @@ func mergeProviderConfig(base, overlay ProviderConfig) ProviderConfig {
 func mergeRoutingConfig(base, overlay RoutingConfig) RoutingConfig {
 	if overlay.Default != "" {
 		base.Default = overlay.Default
+	}
+	if overlay.DefaultLocal != "" {
+		base.DefaultLocal = overlay.DefaultLocal
 	}
 	if overlay.LocalThreshold != 0 {
 		base.LocalThreshold = overlay.LocalThreshold

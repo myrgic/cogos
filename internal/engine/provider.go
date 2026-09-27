@@ -459,11 +459,13 @@ type Router interface {
 	// ("", false) when no match. Name match takes precedence over model match.
 	ProviderForModel(model string) (string, bool)
 
-	// FirstLocalProvider returns the name of the first registered provider
-	// whose Capabilities().IsLocal is true. Used by the "local" model alias
-	// to pin requests to an on-device provider. Returns ("", false) when no
-	// local provider is registered.
-	FirstLocalProvider() (string, bool)
+	// LocalProvider returns the provider the "local" model alias pins to: the
+	// configured routing.default_local when it names a registered on-device
+	// provider, otherwise the first on-device provider by name. "On-device"
+	// means inference runs on hardware the operator controls (IsLocal) and the
+	// provider is not an agentic CLI that forwards to a hosted model
+	// (AgenticHarness: claude-code, codex, pi). Returns ("", false) when none.
+	LocalProvider() (string, bool)
 
 	// RangeProviders calls fn for each registered provider under a read lock.
 	// Order is by Name(). fn must not call back into the router (no re-entrancy).
@@ -564,7 +566,13 @@ func (pc ProviderConfig) IsEnabled() bool {
 
 // RoutingConfig controls Router behaviour.
 type RoutingConfig struct {
-	Default             string            `yaml:"default" json:"default"`
+	Default string `yaml:"default" json:"default"`
+	// DefaultLocal names the provider the "local", "kernel-agent" and "ollama"
+	// aliases resolve to. Optional: when empty (or not a registered on-device
+	// provider) the router picks the first on-device provider by name. Set it
+	// whenever a node has more than one, so the choice is declared rather than
+	// an accident of alphabetical order.
+	DefaultLocal        string            `yaml:"default_local,omitempty" json:"default_local,omitempty"`
 	LocalThreshold      float64           `yaml:"local_threshold" json:"local_threshold"`
 	FallbackChain       []string          `yaml:"fallback_chain" json:"fallback_chain"`
 	MaxCostPerDayUSD    float64           `yaml:"max_cost_per_day_usd,omitempty" json:"max_cost_per_day_usd,omitempty"`

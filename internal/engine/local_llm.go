@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -159,8 +160,8 @@ func buildLocalProvider(target LocalLLMTarget, model string, timeoutSec int) Pro
 //
 // Lookup order:
 //
-//   - "lmstudio-darkstar" provider entry (the resident LM Studio instance)
-//   - any other enabled provider whose Endpoint resolves to a localhost URL
+//   - the provider named by routing.default_local, when enabled with a timeout
+//   - any enabled provider whose Endpoint resolves to a localhost URL
 //   - 0 (caller falls back to localProviderDefaultTimeoutSec)
 //
 // Returns 0 on missing/unreadable config; callers must tolerate that.
@@ -172,11 +173,21 @@ func resolveLocalProviderTimeout(cfg *Config) int {
 	if err != nil {
 		return 0
 	}
-	// Prefer the named resident LM Studio provider.
-	if pc, ok := pcfg.Providers["lmstudio-darkstar"]; ok && pc.IsEnabled() && pc.Timeout > 0 {
-		return pc.Timeout
+	// Prefer the provider the node declared as its local default.
+	if name := pcfg.Routing.DefaultLocal; name != "" {
+		if pc, ok := pcfg.Providers[name]; ok && pc.IsEnabled() && pc.Timeout > 0 {
+			return pc.Timeout
+		}
 	}
-	for _, pc := range pcfg.Providers {
+	// Sorted, so a node with several localhost providers gets the same answer
+	// on every boot (map order is random).
+	names := make([]string, 0, len(pcfg.Providers))
+	for name := range pcfg.Providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		pc := pcfg.Providers[name]
 		if !pc.IsEnabled() || pc.Timeout <= 0 {
 			continue
 		}
