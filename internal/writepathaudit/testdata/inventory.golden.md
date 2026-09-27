@@ -58,8 +58,8 @@ Total sites: 239  (cog: 97, home: 2, elsewhere: 14, unanchored: 85, dynamic: 41)
 | `{dir}/.cog/docs/generated/CATALOG.md` | generateSkillCatalog (`os.WriteFile`) | internal/engine/docs_generate.go:285 | internal:engine |
 | `{dir}/.cog/docs/generated/INBOX-MANIFEST.md` | generateInboxManifest (`os.WriteFile`) | internal/engine/docs_generate.go:351 | internal:engine |
 | `<WorkspaceRoot>/.cog/VERSION` | RunInit (`os.WriteFile`) | internal/engine/init.go:101 | internal:engine |
-| `<WorkspaceRoot>/.cog/ledger/<call:pathsafe.SanitizeComponent>` | AppendEvent (`os.MkdirAll`) | internal/engine/ledger.go:150 | internal:engine |
-| `<WorkspaceRoot>/.cog/ledger/<call:pathsafe.SanitizeComponent>/events.jsonl` | AppendEvent (`os.OpenFile`) | internal/engine/ledger.go:192 | internal:engine |
+| `<WorkspaceRoot>/.cog/ledger/<call:pathsafe.SanitizeComponent>` | AppendEvent (`os.MkdirAll`) | internal/engine/ledger.go:169 | internal:engine |
+| `<WorkspaceRoot>/.cog/ledger/<call:pathsafe.SanitizeComponent>/events.jsonl` | AppendEvent (`os.OpenFile`) | internal/engine/ledger.go:211 | internal:engine |
 | `dirname(<WorkspaceRoot>/.cog/mem/{path})` | WriteCogDoc (`os.MkdirAll`) | internal/engine/mcp_server.go:1600 | internal:engine |
 | `<WorkspaceRoot>/.cog/mem/{path}` | WriteCogDoc (`os.WriteFile`) | internal/engine/mcp_server.go:1652 | internal:engine |
 | `<WorkspaceRoot>/.cog/.state/constellation.db?mode=ro&_journal_mode=WAL&_busy_timeout=3000` | searchMemoryFTSDriftRepair (`sql.Open(sqlite3)`) | internal/engine/mcp_stubs.go:108 | internal:engine |
@@ -99,8 +99,8 @@ Total sites: 239  (cog: 97, home: 2, elsewhere: 14, unanchored: 85, dynamic: 41)
 | `<WorkspaceRoot>/.cog/config` | (ConfigDriftInjector).Inject (`os.MkdirAll`) | internal/testkernel/experiment/injectors.go:101 | internal:testkernel |
 | `<WorkspaceRoot>/.cog/config/kernel.yaml` | (ConfigDriftInjector).Inject (`os.WriteFile`) | internal/testkernel/experiment/injectors.go:105 | internal:testkernel |
 | `<call:t.TempDir>/.cog/config/identity.yaml` | makeMinimalWorkspace (`os.WriteFile`) | internal/testkernel/testkernel.go:588 | internal:testkernel |
-| `<WorkspaceRoot>/.cog/ledger/<call:pathsafe.SanitizeComponent>` | AppendEvent (`os.MkdirAll`) | pkg/cogblock/ledger.go:207 | pkg:cogblock |
-| `<WorkspaceRoot>/.cog/ledger/<call:pathsafe.SanitizeComponent>/events.jsonl` | AppendEvent (`os.OpenFile`) | pkg/cogblock/ledger.go:257 | pkg:cogblock |
+| `<WorkspaceRoot>/.cog/ledger/<call:pathsafe.SanitizeComponent>` | AppendEvent (`os.MkdirAll`) | pkg/cogblock/ledger.go:230 | pkg:cogblock |
+| `<WorkspaceRoot>/.cog/ledger/<call:pathsafe.SanitizeComponent>/events.jsonl` | AppendEvent (`os.OpenFile`) | pkg/cogblock/ledger.go:280 | pkg:cogblock |
 | `<WorkspaceRoot>/.cog/claims` | CreateClaim (`os.MkdirAll`) | pkg/coordination/coordination.go:66 | pkg:coordination |
 | `<WorkspaceRoot>/.cog/claims/<call:pathToClaim>` | CreateClaim (`os.WriteFile`) | pkg/coordination/coordination.go:93 | pkg:coordination |
 | `<WorkspaceRoot>/.cog/signals/checkpoint/{name}` | CreateCheckpoint (`os.MkdirAll`) | pkg/coordination/coordination.go:197 | pkg:coordination |

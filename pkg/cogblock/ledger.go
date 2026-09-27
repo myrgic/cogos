@@ -164,9 +164,32 @@ func canonicalJSON(v interface{}) ([]byte, error) {
 		}
 		return []byte("[" + strings.Join(parts, ",") + "]"), nil
 
-	default:
-		// Primitives: use standard JSON encoding
+	case string, bool, float64, nil:
+		// The only leaf types the read path produces (json.Unmarshal into
+		// interface{}), so the read side never leaves this branch.
 		return json.Marshal(v)
+	default:
+		// Not a CanonForm change (RFC-0003 Refinement 4): for every input
+		// where the previous code was self-consistent, the output is
+		// byte-identical, so every verifiable "rfc8785-v1" hash is unchanged.
+		// See TestCanonicalJSON_FixPreservesEveryVerifiableV1Hash.
+		//
+		// Anything else exists only on the write side: json.RawMessage (tool
+		// call arguments, verbatim), structs, typed maps and slices, ints.
+		// On read the same value decodes to the generic types above, so
+		// round-trip it through JSON first and canonicalize what the reader
+		// will see. Otherwise the write-time hash (verbatim/field-ordered
+		// bytes) differs from the read-time hash (sorted keys) and a valid
+		// chain link fails verification (cogos#614).
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return nil, err
+		}
+		var decoded interface{}
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return nil, err
+		}
+		return canonicalJSON(decoded)
 	}
 }
 

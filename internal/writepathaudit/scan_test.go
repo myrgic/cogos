@@ -557,9 +557,18 @@ func TestRound3GateFindings_Fixed(t *testing.T) {
 				// The shared AppendEvent primitive site itself (ledger.go's
 				// one real os.OpenFile call) is unaffected by this — it
 				// still reports its own generic, sanitize-hole row.
-				ledger, ok := find("internal/engine/ledger.go", 192)
+				// Located by identity (AppendEvent's os.OpenFile), not by line
+				// number: a pinned line broke on any unrelated edit above it.
+				var ledger Site
+				ok := false
+				for _, s := range report.Sites {
+					if s.File == "internal/engine/ledger.go" && s.Func == "AppendEvent" && strings.Contains(s.Primitive, "os.OpenFile") {
+						ledger, ok = s, true
+						break
+					}
+				}
 				if !ok || ledger.Category != "cog" || !strings.Contains(ledger.Pattern, ".cog/ledger/") {
-					t.Fatalf("internal/engine/ledger.go:192 (the shared AppendEvent primitive all buckets funnel through) = %+v, want a cog-classified .cog/ledger/ site", ledger)
+					t.Fatalf("internal/engine/ledger.go AppendEvent os.OpenFile (the shared primitive all buckets funnel through) = %+v, want a cog-classified .cog/ledger/ site", ledger)
 				}
 			},
 		},
