@@ -3004,7 +3004,7 @@
     },
     {
       "file": "internal/engine/cli_doctor_secrets.go",
-      "line": 343,
+      "line": 382,
       "column": 9,
       "func": "gitTracked",
       "subsystem": "internal:engine",
@@ -3014,7 +3014,7 @@
     },
     {
       "file": "internal/engine/cli_doctor_secrets.go",
-      "line": 350,
+      "line": 389,
       "column": 9,
       "func": "gitIgnored",
       "subsystem": "internal:engine",

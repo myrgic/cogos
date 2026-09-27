@@ -307,8 +307,8 @@ Total subprocess sites: 79
 | `{opts.Cwd}` | `exec.CommandContext(ctx, bin, args...)` | internal/acp/claudecli.go:88 | internal:acp |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "git", args...)` | internal/coherence/coherence.go:95 | internal:coherence |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, binPath, args...)` | internal/engine/cli_doctor_inference.go:313 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("git", "-C", dir, "ls-files", "--error-unmatch", filepath.Base(path))` | internal/engine/cli_doctor_secrets.go:343 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("git", "-C", dir, "check-ignore", "-q", filepath.Base(path))` | internal/engine/cli_doctor_secrets.go:350 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("git", "-C", dir, "ls-files", "--error-unmatch", filepath.Base(path))` | internal/engine/cli_doctor_secrets.go:382 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("git", "-C", dir, "check-ignore", "-q", filepath.Base(path))` | internal/engine/cli_doctor_secrets.go:389 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("git", "rev-parse", "--show-toplevel")` | internal/engine/cli_reconcile.go:271 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "launchctl", "kickstart", "-k", domainTarget)` | internal/engine/cli_selfupdate_unix.go:422 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, binPath, "version")` | internal/engine/cli_selfupdate_unix.go:673 | internal:engine |

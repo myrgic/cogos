@@ -337,6 +337,45 @@ func scanFileForSecrets(path string) ([]secretFinding, error) {
 	return out, nil
 }
 
+// fileInWorkspace reports whether p is root or inside it, for classifying
+// where a found credential lives. Unlike pathWithin (a lexical guard for
+// caller-supplied input, which it delegates to), both sides are first made
+// absolute and symlink-resolved: filepath.Rel on a relative p against an
+// absolute root errored, so `--config .env.local` was reported as external
+// and never failed the run; and a root reached through a symlink (/tmp vs
+// /private/tmp on macOS) made every file under it look external. It also
+// fixes the old HasPrefix(rel, "..") test, which called a root-level file
+// named "..env" external.
+func fileInWorkspace(root, p string) bool {
+	return pathWithin(canonicalPath(root), canonicalPath(p))
+}
+
+// canonicalPath makes x absolute and resolves symlinks in its longest
+// existing prefix, re-appending the rest. EvalSymlinks alone fails on a path
+// that does not exist yet, which would leave one side resolved and the other
+// not.
+func canonicalPath(x string) string {
+	if abs, err := filepath.Abs(x); err == nil {
+		x = abs
+	}
+	x = filepath.Clean(x)
+	var rest []string
+	for cur := x; ; {
+		if real, err := filepath.EvalSymlinks(cur); err == nil {
+			for i := len(rest) - 1; i >= 0; i-- {
+				real = filepath.Join(real, rest[i])
+			}
+			return real
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return x
+		}
+		rest = append(rest, filepath.Base(cur))
+		cur = parent
+	}
+}
+
 // gitTracked reports whether path is tracked by the git repo containing it.
 func gitTracked(path string) bool {
 	dir := filepath.Dir(path)
@@ -434,10 +473,7 @@ func doctorCredentialHygiene(report *DoctorReport, root string, opts DoctorOptio
 	// unrelated file elsewhere on the machine. (This surfaced immediately:
 	// TestDoctorLintExitCodesEndToEnd began failing against a clean temp
 	// workspace because the scan reached the operator's real ~/.hermes config.)
-	inWorkspace := func(p string) bool {
-		rel, err := filepath.Rel(root, p)
-		return err == nil && !strings.HasPrefix(rel, "..")
-	}
+	inWorkspace := func(p string) bool { return fileInWorkspace(root, p) }
 
 	var exposed, contained, external []secretFinding
 	for _, f := range findings {

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -454,5 +455,39 @@ func TestScanFileForSecrets_VaultAppRoleSecretIdIsDetected(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("secret_id carrying real credential material was not detected (findings: %+v); a bare _id suffix exclusion silently misses committed Vault AppRole secrets", fs)
+	}
+}
+
+// Review finding on #647: a relative --config path against an absolute root
+// was classified external, so a tracked secret in it never failed the run.
+// Same class: a root reached through a symlink, and a "..name" file.
+func TestFileInWorkspace(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	cases := []struct {
+		name, root, p string
+		want          bool
+	}{
+		{"relative file under cwd=root", root, ".env.local", true},
+		{"relative nested", root, "sub/x.env", true},
+		{"absolute inside", root, filepath.Join(root, "sub", "x.env"), true},
+		{"root via symlink, file via real path", link, filepath.Join(root, "x.env"), true},
+		{"real root, file via symlink", root, filepath.Join(link, "x.env"), true},
+		{"dot-dot-prefixed name is inside", root, filepath.Join(root, "..env"), true},
+		{"parent is outside", root, filepath.Dir(root), false},
+		{"sibling is outside", root, filepath.Join(filepath.Dir(root), "other", "x.env"), false},
+		{"relative escape", root, "../x.env", false},
+	}
+	for _, c := range cases {
+		if got := fileInWorkspace(c.root, c.p); got != c.want {
+			t.Errorf("%s: fileInWorkspace(%q, %q) = %v; want %v", c.name, c.root, c.p, got, c.want)
+		}
 	}
 }
