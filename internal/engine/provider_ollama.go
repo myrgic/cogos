@@ -110,6 +110,9 @@ func NewOllamaProvider(name string, cfg ProviderConfig) *OllamaProvider {
 func (p *OllamaProvider) Name() string  { return p.name }
 func (p *OllamaProvider) Model() string { return p.model }
 
+// Endpoint returns the configured base URL (see localityTier).
+func (p *OllamaProvider) Endpoint() string { return p.endpoint }
+
 // Available checks if Ollama is running and the configured model is loaded. The
 // result is cached for availCacheTTL so the router's periodic availability probe
 // doesn't issue a live GET /api/tags on every call (#441). The mutex is held

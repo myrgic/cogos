@@ -373,14 +373,16 @@ func buildModelsList(ctx context.Context, router Router) []compatModel {
 			"heavier reasoning (Opus)", now), fctx), fcaps))
 	}
 	if localConfigured {
-		// Intent alias for the local-sovereign tier. Its context window is
-		// whatever is loaded on the provider "local" actually resolves to —
-		// pulled from the live listings, omitted when genuinely unknown (#518).
-		// Capabilities (#640) come from the same resolved provider's
-		// Capabilities() — provider-scoped, not per-loaded-model, so no live
-		// listing lookup is needed the way context_length needs one.
-		add(withCaps(withCtx(mkCompatModel("local", "cogos", "local-sovereign",
-			"private, no egress (this node's local provider)", now), localAliasContextLength(router, live)),
+		// Intent alias for this node's local provider. Tier and description
+		// come from the provider "local" actually resolves to (localityTier),
+		// the same classification its live composite entry gets, so the two
+		// never disagree and "no egress" is only claimed for a loopback
+		// backend. Context window: the loaded window on that provider, from the
+		// live listings, omitted when unknown (#518). Capabilities (#640): the
+		// same provider's Capabilities().
+		tier, desc := localAliasTier(router)
+		add(withCaps(withCtx(mkCompatModel("local", "cogos", tier, desc, now),
+			localAliasContextLength(router, live)),
 			localAliasCapabilities(router)))
 	}
 	if frontierConfigured {
@@ -766,22 +768,45 @@ func modelEntryFor(p Provider, listing ModelListing, frontier bool, now int64) c
 	return m
 }
 
-// localityTier classifies a live-enumerated provider by where inference
-// runs, from the provider's own declarations, never its name:
+// endpointer is implemented by every provider that talks to an inference
+// server over HTTP (OpenAI-compatible, Ollama, supervised MLX).
+type endpointer interface{ Endpoint() string }
+
+// localityTier classifies a provider by where inference runs, from the
+// provider's own declarations, never its name:
 //
-//	local-sovereign  on-device, loopback endpoint
-//	lan-local        on-device, endpoint on another host the operator runs
+//	local-sovereign  on-device and its endpoint is loopback
+//	lan-local        on-device, endpoint on another host (or not declared,
+//	                 so loopback cannot be shown)
 //	frontier-managed everything else (hosted APIs, agentic CLIs)
+//
+// "local-sovereign" is only granted on evidence: an on-device provider that
+// does not expose its endpoint gets the weaker lan-local claim.
 func localityTier(p Provider) string {
 	if !isOnDevice(p.Capabilities()) {
 		return "frontier-managed"
 	}
-	if ep, ok := p.(interface{ Endpoint() string }); ok {
-		if e := ep.Endpoint(); e != "" && !isLocalEndpoint(e) {
-			return "lan-local"
-		}
+	if ep, ok := p.(endpointer); ok && isLocalEndpoint(ep.Endpoint()) {
+		return "local-sovereign"
 	}
-	return "local-sovereign"
+	return "lan-local"
+}
+
+// localAliasTier is the tier and description for the "local" alias, taken
+// from the provider it resolves to.
+func localAliasTier(router Router) (tier, desc string) {
+	tier = "lan-local"
+	if res := ResolveModelRequest(router, "local", ""); res.PreferProvider != "" && router != nil {
+		router.RangeProviders(func(p Provider) {
+			if p.Name() == res.PreferProvider {
+				tier = localityTier(p)
+			}
+		})
+	}
+	if tier == "local-sovereign" {
+		return tier, "private, no egress (this machine)"
+	}
+	return tier, "operator-run, off this machine"
 }
 
 // isFrontierConfigured returns true when the router has a registered provider

@@ -160,6 +160,9 @@ func (p *MLXSupervisedProvider) Name() string { return p.name }
 // Model returns the configured model path.
 func (p *MLXSupervisedProvider) Model() string { return p.inner.Model() }
 
+// Endpoint returns the supervised server's base URL (see localityTier).
+func (p *MLXSupervisedProvider) Endpoint() string { return p.inner.Endpoint() }
+
 // Complete dispatches via the inner OpenAI-compat provider.
 func (p *MLXSupervisedProvider) Complete(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
 	return p.inner.Complete(ctx, req)
