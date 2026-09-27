@@ -2327,8 +2327,11 @@ func (m *MCPServer) startAsyncDispatch(ctx context.Context, dr DispatchRequest) 
 		defer cancel()
 		registry.MarkRunning(jobID)
 		result, err := QueryDispatchToHarnessRouted(detached, agentController, clusterRouter, dr)
+		// Ordering: the job.completed ledger event is written BEFORE the job
+		// is published as terminal. A poller that sees done/failed may rely on
+		// the event already being in the ledger, and nothing in this goroutine
+		// touches the workspace after the terminal transition.
 		if err != nil {
-			registry.Fail(jobID, err.Error())
 			_ = EmitLedgerEvent(cfg, map[string]any{
 				"type":   "harness.dispatch.job.completed",
 				"source": "mcp-dispatch-async",
@@ -2338,6 +2341,7 @@ func (m *MCPServer) startAsyncDispatch(ctx context.Context, dr DispatchRequest) 
 					"error":  err.Error(),
 				},
 			})
+			registry.Fail(jobID, err.Error())
 			return
 		}
 		// A nil error means the BATCH ran, not that the work succeeded.
@@ -2352,7 +2356,6 @@ func (m *MCPServer) startAsyncDispatch(ctx context.Context, dr DispatchRequest) 
 			// FailWithResult, not Fail: a partially-failed batch still holds
 			// the output of the slots that succeeded, and a poller must be
 			// able to retrieve it. Fail() records only the error string.
-			registry.FailWithResult(jobID, summary.errMsg, result)
 			_ = EmitLedgerEvent(cfg, map[string]any{
 				"type":   "harness.dispatch.job.completed",
 				"source": "mcp-dispatch-async",
@@ -2365,9 +2368,9 @@ func (m *MCPServer) startAsyncDispatch(ctx context.Context, dr DispatchRequest) 
 					"total_slots":  summary.total,
 				},
 			})
+			registry.FailWithResult(jobID, summary.errMsg, result)
 			return
 		}
-		registry.Complete(jobID, result)
 		_ = EmitLedgerEvent(cfg, map[string]any{
 			"type":   "harness.dispatch.job.completed",
 			"source": "mcp-dispatch-async",
@@ -2377,6 +2380,7 @@ func (m *MCPServer) startAsyncDispatch(ctx context.Context, dr DispatchRequest) 
 				"total_slots": summarizeDispatchOutcome(result).total,
 			},
 		})
+		registry.Complete(jobID, result)
 	}()
 
 	receipt := dispatchJobReceipt{JobID: jobID, Status: string(DispatchJobPending)}
