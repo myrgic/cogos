@@ -467,7 +467,7 @@ routing:
 	}
 	// WithoutAutoDiscovery keeps the test hermetic: otherwise BuildRouter live-
 	// probes LM Studio on :1234 and, when one is running on the host, registers
-	// "lmstudio" ahead of the configured mlx-gemma, breaking FirstLocalProvider.
+	// "lmstudio" ahead of the configured mlx-gemma, breaking LocalProvider.
 	router, err := BuildRouter(cfg, WithoutAutoDiscovery())
 	if err != nil {
 		t.Fatalf("BuildRouter: %v", err)
@@ -476,13 +476,13 @@ routing:
 	if !ok || name != "mlx-gemma" {
 		t.Errorf("ProviderForName(mlx-gemma): got %q, %v; want mlx-gemma, true", name, ok)
 	}
-	// Also verify it is a local provider via FirstLocalProvider.
-	localName, localOK := router.FirstLocalProvider()
+	// Also verify it is an on-device provider via LocalProvider.
+	localName, localOK := router.LocalProvider()
 	if !localOK {
-		t.Error("FirstLocalProvider: got false; want true (mlx-supervised IsLocal=true)")
+		t.Error("LocalProvider: got false; want true (mlx-supervised is on-device)")
 	}
 	if localName != "mlx-gemma" {
-		t.Errorf("FirstLocalProvider: got %q; want mlx-gemma", localName)
+		t.Errorf("LocalProvider: got %q; want mlx-gemma", localName)
 	}
 }
 

@@ -1407,7 +1407,7 @@
     },
     {
       "file": "internal/engine/provider_mlx_supervised.go",
-      "line": 432,
+      "line": 435,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "(*MLXSupervisedProvider).writePlist",
@@ -1419,7 +1419,7 @@
     },
     {
       "file": "internal/engine/provider_mlx_supervised.go",
-      "line": 458,
+      "line": 461,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "(*MLXSupervisedProvider).writePlist",

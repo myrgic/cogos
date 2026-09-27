@@ -126,8 +126,8 @@ Total sites: 239  (cog: 97, home: 2, elsewhere: 14, unanchored: 85, dynamic: 41)
 
 | pattern | writer func | file:line | subsystem |
 |---|---|---|---|
-| `dirname(<Home>/Library/LaunchAgents/<call:optStr>.plist)` | (*MLXSupervisedProvider).writePlist (`os.MkdirAll`) | internal/engine/provider_mlx_supervised.go:432 | internal:engine |
-| `<Home>/Library/LaunchAgents/<call:optStr>.plist` | (*MLXSupervisedProvider).writePlist (`os.WriteFile`) | internal/engine/provider_mlx_supervised.go:458 | internal:engine |
+| `dirname(<Home>/Library/LaunchAgents/<call:optStr>.plist)` | (*MLXSupervisedProvider).writePlist (`os.MkdirAll`) | internal/engine/provider_mlx_supervised.go:435 | internal:engine |
+| `<Home>/Library/LaunchAgents/<call:optStr>.plist` | (*MLXSupervisedProvider).writePlist (`os.WriteFile`) | internal/engine/provider_mlx_supervised.go:461 | internal:engine |
 
 ## Elsewhere (root positively resolved to a literal or known non-.cog anchor)
 

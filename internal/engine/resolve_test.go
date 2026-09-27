@@ -12,8 +12,7 @@
 // G2 tests:
 //   - /v1/models returns the both-menu in declared order with tier+description.
 //   - Intent aliases are present with correct tiers.
-//   - eclipse-26b absent when provider not configured.
-//   - eclipse-26b present when eclipse or lmstudio provider is registered.
+//   - No static model id or tier is derived from a provider's name.
 package engine
 
 import (
@@ -56,7 +55,7 @@ func (r *stubRouter) addProvider(name string, model string, isLocal bool) *stubR
 }
 
 // Router interface stubs — only ProviderForName / ProviderForModel /
-// FirstLocalProvider are exercised by ResolveModelRequest.
+// LocalProvider are exercised by ResolveModelRequest.
 func (r *stubRouter) ProviderForName(name string) (string, bool) {
 	n, ok := r.byName[name]
 	return n, ok
@@ -65,7 +64,7 @@ func (r *stubRouter) ProviderForModel(model string) (string, bool) {
 	n, ok := r.byModel[model]
 	return n, ok
 }
-func (r *stubRouter) FirstLocalProvider() (string, bool) {
+func (r *stubRouter) LocalProvider() (string, bool) {
 	if len(r.local) > 0 {
 		return r.local[0], true
 	}
@@ -127,51 +126,58 @@ func TestResolveModelRequest_Codex(t *testing.T) {
 	}
 }
 
-func TestResolveModelRequest_OllamaInjectTools(t *testing.T) {
+// The kernel names no provider for the local aliases: they resolve to the
+// router's LocalProvider, whatever this node calls it. The provider name here
+// is deliberately arbitrary so a hard-coded default cannot pass.
+func TestResolveModelRequest_KernelAgent_ResolvesToLocalProvider(t *testing.T) {
 	t.Parallel()
-	// The "ollama" alias is a convenience spelling that now routes to the live
-	// local backend (lmstudio-darkstar) after PR #417 decommissioned Ollama.
-	res := ResolveModelRequest(nil, "ollama", "req-3")
-	if res.PreferProvider != "lmstudio-darkstar" {
-		t.Errorf("ollama: PreferProvider = %q; want lmstudio-darkstar", res.PreferProvider)
-	}
-	if !res.InjectKernelTools {
-		t.Error("ollama: InjectKernelTools should be true")
-	}
-}
-
-func TestResolveModelRequest_KernelAgentInjectTools(t *testing.T) {
-	t.Parallel()
-	res := ResolveModelRequest(nil, "kernel-agent", "req-4")
-	if res.PreferProvider != "lmstudio-darkstar" {
-		t.Errorf("kernel-agent: PreferProvider = %q; want lmstudio-darkstar", res.PreferProvider)
-	}
-	if !res.InjectKernelTools {
-		t.Error("kernel-agent: InjectKernelTools should be true")
-	}
-}
-
-func TestResolveModelRequest_Local_PrefersLMStudioDarkstar(t *testing.T) {
-	t.Parallel()
-	// When both the live default (lmstudio-darkstar) and a legacy "ollama"
-	// provider are registered, "local" must prefer lmstudio-darkstar.
 	r := newStubRouter().
-		addProvider("lmstudio-darkstar", "", true).
-		addProvider("ollama", "", true)
-	res := ResolveModelRequest(r, "local", "req-5b")
-	if res.PreferProvider != "lmstudio-darkstar" {
-		t.Errorf("local: PreferProvider = %q; want lmstudio-darkstar", res.PreferProvider)
+		addProvider("cloud", "", false).
+		addProvider("node-backend-7", "", true)
+	for _, alias := range []string{"kernel-agent", "ollama"} {
+		res := ResolveModelRequest(r, alias, "req-3")
+		if res.PreferProvider != "node-backend-7" {
+			t.Errorf("%s: PreferProvider = %q; want node-backend-7 (the router's local provider)", alias, res.PreferProvider)
+		}
+		if !res.InjectKernelTools {
+			t.Errorf("%s: InjectKernelTools should be true", alias)
+		}
 	}
 }
 
-func TestResolveModelRequest_Local_WithOllama(t *testing.T) {
+// With no live router (the dispatch path) the local aliases cannot know the
+// node's provider, so they resolve to nothing and the dispatcher's own
+// fallback (harness_provider, process-state routing) decides. They must not
+// return a baked-in provider name.
+func TestResolveModelRequest_LocalAliases_NilRouter(t *testing.T) {
 	t.Parallel()
-	// An install that still declares an "ollama" provider (no lmstudio-darkstar)
-	// keeps its behavior: "local" falls back to it.
-	r := newStubRouter().addProvider("ollama", "", true)
-	res := ResolveModelRequest(r, "local", "req-5")
+	for _, alias := range []string{"local", "kernel-agent", "ollama"} {
+		res := ResolveModelRequest(nil, alias, "req-4")
+		if res.PreferProvider != "" {
+			t.Errorf("%s with nil router: PreferProvider = %q; want empty", alias, res.PreferProvider)
+		}
+	}
+}
+
+// A provider registered under the alias's own name wins: an install that
+// still declares a provider called "ollama" keeps selecting it.
+func TestResolveModelRequest_Ollama_RegisteredByNameWins(t *testing.T) {
+	t.Parallel()
+	r := newStubRouter().
+		addProvider("node-backend-7", "", true).
+		addProvider("ollama", "", true)
+	res := ResolveModelRequest(r, "ollama", "req-5b")
 	if res.PreferProvider != "ollama" {
-		t.Errorf("local: PreferProvider = %q; want ollama", res.PreferProvider)
+		t.Errorf("ollama: PreferProvider = %q; want ollama (registered by name)", res.PreferProvider)
+	}
+}
+
+func TestResolveModelRequest_Local_UsesLocalProvider(t *testing.T) {
+	t.Parallel()
+	r := newStubRouter().addProvider("node-backend-7", "", true)
+	res := ResolveModelRequest(r, "local", "req-5")
+	if res.PreferProvider != "node-backend-7" {
+		t.Errorf("local: PreferProvider = %q; want node-backend-7", res.PreferProvider)
 	}
 }
 
@@ -443,8 +449,7 @@ func TestModelsMenu_OrderAndTier(t *testing.T) {
 	t.Parallel()
 
 	// Wire a router with both a frontier provider (anthropic) and a local
-	// provider (ollama stub) so all tiers appear. Eclipse is intentionally
-	// absent to keep the assertion list stable.
+	// provider (ollama stub) so all tiers appear.
 	frontierStub := newCloudStub("anthropic", "frontier response")
 	localStub := NewStubProvider("ollama", "local response") // IsLocal = true by default
 	router := NewSimpleRouter(RoutingConfig{Default: "anthropic"})
@@ -516,76 +521,23 @@ func TestModelsMenu_IntentAliasesHaveDescriptions(t *testing.T) {
 	}
 }
 
-func TestModelsMenu_Eclipse26B_AbsentWhenNotConfigured(t *testing.T) {
+// No model id or tier may be derived from a provider's NAME: a provider serving
+// some model gets it advertised only as the live composite id, with a tier
+// from its declared capabilities.
+func TestModelsMenu_NoNameDerivedEntries(t *testing.T) {
 	t.Parallel()
-
-	srv := newTestServer(t) // no router
-	body, _ := json.Marshal(fetchModels(t, srv))
-
-	if bytes.Contains(body, []byte("eclipse-26b")) {
-		t.Errorf("eclipse-26b should NOT appear when no eclipse provider is registered; body: %s", body)
-	}
-}
-
-func TestModelsMenu_Eclipse26B_PresentWhenModelServed(t *testing.T) {
-	t.Parallel()
-
-	// A provider that actually SERVES the eclipse-26b model string. This is the
-	// only condition under which IsKnownModel(router,"eclipse-26b") is true, so it
-	// is the only condition under which the static eclipse-26b id may be emitted
-	// (emit ⇔ admit — the admission-parity invariant). A provider merely NAMED
-	// "eclipse"/"lmstudio" that serves some other model must NOT surface it (see
-	// TestModelsMenu_Eclipse26B_AbsentWhenNameOnly).
-	eclipseStub := NewStubProvider("eclipse", "eclipse response")
-	eclipseStub.model = "eclipse-26b"
-	router := NewSimpleRouter(RoutingConfig{Default: "eclipse"})
-	router.RegisterProvider(eclipseStub)
-
-	srv := newTestServerWithRouter(t, router)
-	resp := fetchModels(t, srv)
-
-	var found bool
+	named := NewStubProvider("lan-backend", "resp") // on-device stub, no endpoint
+	named.model = "some-model"
+	router := NewSimpleRouter(RoutingConfig{Default: "lan-backend"})
+	router.RegisterProvider(named)
+	resp := fetchModels(t, newTestServerWithRouter(t, router))
 	for _, m := range resp.Data {
-		if m.ID == "eclipse-26b" {
-			found = true
-			if m.Tier != "lan-local" {
-				t.Errorf("eclipse-26b tier = %q; want lan-local", m.Tier)
-			}
-			if m.OwnedBy != "cogos" {
-				t.Errorf("eclipse-26b owned_by = %q; want cogos", m.OwnedBy)
-			}
+		if m.Tier == "lan-local" {
+			t.Errorf("entry %q: tier lan-local derived without a remote endpoint (name-sniffing?)", m.ID)
 		}
-	}
-	if !found {
-		t.Errorf("eclipse-26b model entry not found in response Data: %+v", resp.Data)
-	}
-
-	// Admission parity: the advertised id must satisfy IsKnownModel.
-	if !IsKnownModel(router, "eclipse-26b") {
-		t.Error("eclipse-26b advertised but IsKnownModel returned false (advertise-then-reject)")
-	}
-}
-
-func TestModelsMenu_Eclipse26B_AbsentWhenNameOnly(t *testing.T) {
-	t.Parallel()
-
-	// Provider named "lmstudio"/"eclipse" but serving a DIFFERENT model — the
-	// pre-existing name-detection would have emitted eclipse-26b here, but the
-	// kernel boundary would then 400 a client selecting it (IsKnownModel false).
-	// Emit-gate is now ProviderForModel("eclipse-26b"), so it must NOT appear.
-	lmsStub := NewStubProvider("lmstudio", "lms response")
-	lmsStub.model = "ornith-1.0-35b"
-	router := NewSimpleRouter(RoutingConfig{Default: "lmstudio"})
-	router.RegisterProvider(lmsStub)
-
-	srv := newTestServerWithRouter(t, router)
-	body, _ := json.Marshal(fetchModels(t, srv))
-
-	if bytes.Contains(body, []byte("eclipse-26b")) {
-		t.Errorf("eclipse-26b must NOT be advertised when no provider serves it (IsKnownModel would 400 it); body: %s", body)
-	}
-	if IsKnownModel(router, "eclipse-26b") {
-		t.Error("IsKnownModel(eclipse-26b) should be false when no provider serves that model")
+		if m.OwnedBy == "cogos" && m.ID != "local" && m.ID != "foreground" && m.ID != "deliberation" {
+			t.Errorf("unexpected static cogos entry %q", m.ID)
+		}
 	}
 }
 
@@ -665,8 +617,7 @@ func TestModelsMenu_EmptyWhenNoRouter(t *testing.T) {
 // availability gating (issue #316) handleModels emits nothing when no provider
 // is registered, so frontier + local stubs are wired so the menu is non-empty
 // and the test actually exercises alias↔resolver coherence (not vacuously).
-// "local" is router-dynamic (requires FirstLocalProvider walk); "eclipse-26b"
-// is hardware-gated and absent from the static alias table by design.
+// "local" is router-dynamic (requires a LocalProvider lookup).
 func TestModelsMenu_AliasesMatchResolver(t *testing.T) {
 	t.Parallel()
 
@@ -683,7 +634,7 @@ func TestModelsMenu_AliasesMatchResolver(t *testing.T) {
 	// Guard against vacuous pass: the menu must contain the cogos-owned aliases.
 	var cogosAliases int
 	for _, m := range resp.Data {
-		if m.OwnedBy == "cogos" && m.ID != "eclipse-26b" {
+		if m.OwnedBy == "cogos" {
 			cogosAliases++
 		}
 	}
@@ -701,9 +652,6 @@ func TestModelsMenu_AliasesMatchResolver(t *testing.T) {
 	for _, m := range resp.Data {
 		if m.OwnedBy != "cogos" {
 			continue
-		}
-		if m.ID == "eclipse-26b" {
-			continue // hardware-gated; not in static alias table by design
 		}
 		res := ResolveModelRequest(r, m.ID, "test")
 		if res.PreferProvider == "" {
@@ -849,49 +797,6 @@ func TestFrontierProviderName_MatchesEmitGate(t *testing.T) {
 	rPref.RegisterProvider(NewStubProvider("claude-oauth", "r"))
 	if name, ok := frontierProviderName(rPref); !ok || name != "claude-oauth" {
 		t.Errorf("frontierProviderName preference = (%q,%v); want (claude-oauth,true)", name, ok)
-	}
-}
-
-// ── isEclipseConfigured unit tests ───────────────────────────────────────────
-
-func TestIsEclipseConfigured_NilRouter(t *testing.T) {
-	t.Parallel()
-	if isEclipseConfigured(nil) {
-		t.Error("nil router should not report eclipse configured")
-	}
-}
-
-func TestIsEclipseConfigured_NoEclipse(t *testing.T) {
-	t.Parallel()
-	r := newStubRouter().addProvider("ollama", "", true)
-	if isEclipseConfigured(r) {
-		t.Error("no eclipse provider: should return false")
-	}
-}
-
-func TestIsEclipseConfigured_EclipseName(t *testing.T) {
-	t.Parallel()
-	r := newStubRouter().addProvider("eclipse", "", false)
-	if !isEclipseConfigured(r) {
-		t.Error("eclipse provider registered: should return true")
-	}
-}
-
-func TestIsEclipseConfigured_LMStudioName(t *testing.T) {
-	t.Parallel()
-	r := newStubRouter().addProvider("lmstudio", "", false)
-	if !isEclipseConfigured(r) {
-		t.Error("lmstudio provider registered: should return true")
-	}
-}
-
-func TestIsEclipseConfigured_ModelMatch(t *testing.T) {
-	t.Parallel()
-	r := newStubRouter()
-	r.byModel["eclipse-26b"] = "my-eclipse-provider"
-	r.byName["my-eclipse-provider"] = "my-eclipse-provider"
-	if !isEclipseConfigured(r) {
-		t.Error("eclipse-26b model match: should return true")
 	}
 }
 

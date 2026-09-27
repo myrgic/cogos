@@ -417,12 +417,10 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	case "codex":
 		creq.Metadata.PreferProvider = "codex"
 	case "ollama":
-		// "ollama" is kept as a convenience spelling that routes to the live
-		// local backend (lmstudio-darkstar) after PR #417 decommissioned the
-		// Ollama provider. On a stock install no "ollama" provider exists, so
-		// the old value routed to nothing; installs that still declare an
-		// "ollama" provider select it by its provider name via the default arm.
-		creq.Metadata.PreferProvider = "lmstudio-darkstar"
+		// Legacy spelling of the node's local provider: resolve it the same way
+		// the OpenAI-compatible gateway does (a provider registered as "ollama"
+		// wins by name, otherwise router.LocalProvider).
+		creq.Metadata.PreferProvider = ResolveModelRequest(s.router, oaiReq.Model, creq.Metadata.RequestID).PreferProvider
 	default:
 		creq.ModelOverride = oaiReq.Model
 	}

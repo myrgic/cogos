@@ -11,8 +11,11 @@ import (
 
 // StubProvider is an in-memory Provider for testing.
 type StubProvider struct {
-	name     string
-	model    string // reported by Model(); empty by default
+	name  string
+	model string // reported by Model(); empty by default
+	// endpoint is reported by Endpoint(). Loopback by default, matching the
+	// default IsLocal=true: an in-memory stub runs on this machine.
+	endpoint string
 	response string
 	// usage, when set, is reported on Complete() and on the final Stream chunk
 	// so tests can prove the kernel forwards provider accounting (incl. cache).
@@ -37,6 +40,7 @@ type StubProvider struct {
 func NewStubProvider(name, response string) *StubProvider {
 	return &StubProvider{
 		name:      name,
+		endpoint:  "http://127.0.0.1",
 		response:  response,
 		available: true,
 		capabilities: ProviderCapabilities{
@@ -50,6 +54,7 @@ func NewStubProvider(name, response string) *StubProvider {
 
 func (s *StubProvider) Name() string                       { return s.name }
 func (s *StubProvider) Model() string                      { return s.model }
+func (s *StubProvider) Endpoint() string                   { return s.endpoint }
 func (s *StubProvider) Available(_ context.Context) bool   { return s.available }
 func (s *StubProvider) Capabilities() ProviderCapabilities { return s.capabilities }
 
