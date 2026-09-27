@@ -649,57 +649,34 @@ func TestOpenAICompatListModelsWithContext_FallsBackToPlainListingOnNonLMStudio(
 // little time to complete and silently dropping the provider from /v1/models
 // (logged at slog.Debug, where nobody looks).
 //
-// This test reproduces exactly that shape with a ctx budget generous enough
-// to complete a NORMAL fallback call, but too tight to survive a slow probe
-// PLUS the fallback both drawing from the same pool:
-//   - total ctx budget:            1200ms
-//   - /api/v0/models (the probe):  sleeps 1000ms, then 404s
-//   - /v1/models (the fallback):   sleeps 500ms, then succeeds
-//
-// Pre-fix: the probe alone consumes ~1000ms of the shared 1200ms ctx, leaving
-// ~200ms for a fallback call that needs 500ms — it times out and
-// ListModelsWithContext returns an error, exactly the "silently vanishes"
-// failure the review flagged. Post-fix: the probe is capped at its own
-// apiV0ModelsProbeTimeout sub-budget (modelsPerProviderTimeout/4 = 500ms in
-// production), so it is canceled well before its fake 1000ms sleep completes;
-// the fallback then runs against the ORIGINAL ctx, which still has the
-// majority of the 1200ms left — comfortably more than the 500ms it needs.
+// This test reproduces that shape with a probe that never answers: uncapped,
+// it holds the whole budget and ListModelsWithContext returns an error (the
+// "silently vanishes" failure the review flagged). Capped at
+// apiV0ModelsProbeTimeout, the probe is canceled and the fallback runs
+// against the ORIGINAL ctx and succeeds.
 func TestOpenAICompatListModelsWithContext_SlowProbeDoesNotStarveFallback(t *testing.T) {
 	t.Parallel()
 
-	// Budget headroom. The property under test is "the capped probe leaves
-	// enough of the shared budget for the fallback", which needs
-	// probeCap + fallbackWait < totalBudget with room to spare. The original
-	// 1200/1000/500 left only ~200ms of slack after the 500ms cap, and this
-	// test is t.Parallel() on shared CI runners — it flaked on two unrelated
-	// branches (#605, #608) with "context deadline exceeded". Scaling the
-	// budget up while keeping the SAME shape (probe sleeps 2x its cap;
-	// fallback needs half the budget) preserves the assertion and its
-	// pre-fix failure: uncapped, the 2000ms probe still starves a 1000ms
-	// fallback inside 2400ms.
-	const (
-		totalBudget  = 2400 * time.Millisecond
-		probeDelay   = 2000 * time.Millisecond
-		fallbackWait = 1000 * time.Millisecond
-	)
+	// Structural, not a timing race. The previous version slept fixed
+	// durations inside a shared wall-clock budget (2400/2000/1000ms) and still
+	// flaked under -race on loaded CI runners (#605, #608, #622). The property
+	// is: the probe is cut off at its own cap and the fallback then gets the
+	// caller's remaining budget. So the probe never answers on its own (it
+	// blocks until its request is canceled), the fallback answers instantly,
+	// and the budget is large. Correct code finishes in about
+	// apiV0ModelsProbeTimeout; an uncapped probe would hold the whole budget
+	// and the fallback would never run.
+	const totalBudget = 10 * time.Second
 
+	probeCanceled := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v0/models":
-			// Simulate a non-LM-Studio server that is slow to answer 404 (a
-			// loaded proxy, a remote/off-LAN host) rather than an instant one.
-			select {
-			case <-time.After(probeDelay):
-			case <-r.Context().Done():
-				return
-			}
-			http.NotFound(w, r)
+			// A non-LM-Studio server that never answers the probe (a loaded
+			// proxy, a remote host). Only cancellation ends it.
+			<-r.Context().Done()
+			close(probeCanceled)
 		case "/v1/models":
-			select {
-			case <-time.After(fallbackWait):
-			case <-r.Context().Done():
-				return
-			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(openaiModelsResponseJSON("llama-3-8b"))
 		default:
@@ -713,13 +690,24 @@ func TestOpenAICompatListModelsWithContext_SlowProbeDoesNotStarveFallback(t *tes
 	ctx, cancel := context.WithTimeout(context.Background(), totalBudget)
 	defer cancel()
 
+	start := time.Now()
 	listings, err := p.ListModelsWithContext(ctx)
+	elapsed := time.Since(start)
 	if err != nil {
-		t.Fatalf("ListModelsWithContext: %v; the slow probe starved the fallback's share of the shared %s budget (probe delay %s, fallback needs %s)",
-			err, totalBudget, probeDelay, fallbackWait)
+		t.Fatalf("ListModelsWithContext: %v after %s; the probe was not capped and starved the fallback", err, elapsed)
 	}
 	if len(listings) != 1 || listings[0].ID != "llama-3-8b" {
 		t.Fatalf("listings = %v; want 1 entry with id llama-3-8b", listings)
+	}
+	select {
+	case <-probeCanceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe request was never canceled; its cap did not fire")
+	}
+	// Generous bound: only catches a probe that ran to (near) the whole
+	// budget, which is the defect. Scheduling noise is milliseconds.
+	if elapsed >= totalBudget/2 {
+		t.Fatalf("took %s of a %s budget; the probe cap (%s) did not bound it", elapsed, totalBudget, apiV0ModelsProbeTimeout)
 	}
 }
 
