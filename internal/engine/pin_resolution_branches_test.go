@@ -138,7 +138,7 @@ routing:
 	_, dispErr := ctrl.DispatchToHarness(context.Background(), DispatchRequest{
 		Task:           "explicit-provider overridden pin test",
 		Provider:       "bench",
-		Model:          DispatchModel("ornith-1.0-35b"),
+		Model:          DispatchModel("example-35b"),
 		N:              1,
 		TimeoutSeconds: 10,
 	})
@@ -258,12 +258,12 @@ func TestDispatchToHarness_HarnessProvider_PinReasonTyped(t *testing.T) {
 	defer srv.Close()
 
 	writeTestFile(t, filepath.Join(root, ".cog", "config", "providers.yaml"), `providers:
-  lmstudio-darkstar:
+  lmstudio-local:
     type: openai
     endpoint: `+srv.URL+`
     model: gemma-content-hash-id
 `)
-	cfg.HarnessProvider = "lmstudio-darkstar"
+	cfg.HarnessProvider = "lmstudio-local"
 
 	proc := NewProcess(cfg, makeNucleus("Cog", "tester"))
 	testSrv := NewServer(cfg, makeNucleus("Cog", "tester"), proc)
@@ -299,7 +299,7 @@ func TestDispatchToHarness_HarnessProvider_PinReasonTyped(t *testing.T) {
 		resetPinResolutionsForTest()
 		_, dispErr := ctrl.DispatchToHarness(context.Background(), DispatchRequest{
 			Task:           "harness-provider overridden pin test",
-			Model:          DispatchModel("ornith-1.0-35b"),
+			Model:          DispatchModel("example-35b"),
 			N:              1,
 			TimeoutSeconds: 10,
 		})
@@ -397,7 +397,7 @@ routing:
 		resetPinResolutionsForTest()
 		_, dispErr := ctrl.DispatchToHarness(context.Background(), DispatchRequest{
 			Task:           "state-routing overridden pin test",
-			Model:          DispatchModel("ornith-1.0-35b"),
+			Model:          DispatchModel("example-35b"),
 			N:              1,
 			TimeoutSeconds: 10,
 		})

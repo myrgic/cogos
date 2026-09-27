@@ -94,7 +94,7 @@ func healthDisagrees(live bool, st reconcile.ResourceStatus) bool {
 }
 
 // reconcilerProviderName strips the "<type>/" prefix from a registry key
-// (e.g. "lms-model-state/lmstudio-eclipse" → "lmstudio-eclipse"). Keys
+// (e.g. "lms-model-state/lmstudio-remote" → "lmstudio-remote"). Keys
 // without a slash are returned unchanged.
 func reconcilerProviderName(key string) string {
 	if i := strings.IndexByte(key, '/'); i >= 0 {
