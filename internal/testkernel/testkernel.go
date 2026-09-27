@@ -199,6 +199,11 @@ func (k *Kernel) Endpoint() string {
 	return k.endpoint
 }
 
+// SessionReaperRunning reports whether the kernel's session TTL reaper runs.
+func (k *Kernel) SessionReaperRunning() bool {
+	return k.kernel.SessionReaperRunning()
+}
+
 // WorkspaceRoot returns the workspace root path used by this kernel.
 func (k *Kernel) WorkspaceRoot() string {
 	return k.kernel.WorkspaceRoot()

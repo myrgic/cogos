@@ -41,6 +41,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1594,5 +1595,231 @@ func TestRegisterThenListRoundTrip(t *testing.T) {
 	}
 	if !foundNote {
 		t.Errorf("peer-awareness did not return anti_echo_mvp note: notes=%v", peerBody.Notes)
+	}
+}
+
+// ─── 27. TestSessionRegistry_ReapStale ───────────────────────────────────────
+//
+// Regression guard for cogos#423: sessions that never get an explicit
+// POST /v1/sessions/{id}/end (crash, kill -9, dropped client) must not
+// persist with Ended=false forever. Exercises SessionRegistry.ReapStale
+// directly against the four cases called out in the issue's fix sketch.
+func TestSessionRegistry_ReapStale(t *testing.T) {
+	t.Parallel()
+
+	const ttl = time.Hour
+	now := time.Now().UTC()
+
+	seed := func(t *testing.T, reg *SessionRegistry, id string, lastSeen time.Time, ended bool) {
+		t.Helper()
+		state := SessionState{
+			SessionID: id, Workspace: "w", Role: "r",
+			RegisteredAt: lastSeen, LastSeen: lastSeen,
+		}
+		if _, _, err := reg.ApplyRegister(state, time.Minute, lastSeen, nil); err != nil {
+			t.Fatalf("seed register %s: %v", id, err)
+		}
+		if ended {
+			if _, _, err := reg.ApplyEnd(id, "test-seed", "", lastSeen, nil); err != nil {
+				t.Fatalf("seed end %s: %v", id, err)
+			}
+		}
+	}
+
+	t.Run("past-TTL row is ended and emits a bus event", func(t *testing.T) {
+		reg := NewSessionRegistry()
+		seed(t, reg, "stale-zombie-a", now.Add(-2*ttl), false)
+
+		var appended []string
+		reaped := reg.ReapStale(ttl, now, func(id string) error {
+			appended = append(appended, id)
+			return nil
+		})
+
+		if len(reaped) != 1 || reaped[0] != "stale-zombie-a" {
+			t.Fatalf("reaped = %v, want [stale-zombie-a]", reaped)
+		}
+		if len(appended) != 1 || appended[0] != "stale-zombie-a" {
+			t.Fatalf("appendFn calls = %v, want one call for stale-zombie-a", appended)
+		}
+		row, ok := reg.Get("stale-zombie-a")
+		if !ok {
+			t.Fatal("row disappeared after reap")
+		}
+		if !row.Ended {
+			t.Error("row.Ended = false, want true after reap")
+		}
+		if row.EndReason != sessionReapEndReason {
+			t.Errorf("row.EndReason = %q, want %q", row.EndReason, sessionReapEndReason)
+		}
+	})
+
+	t.Run("within-TTL row is left untouched", func(t *testing.T) {
+		reg := NewSessionRegistry()
+		seed(t, reg, "fresh-session-b", now.Add(-ttl/2), false)
+
+		reaped := reg.ReapStale(ttl, now, func(string) error {
+			t.Fatal("appendFn should not be called for a fresh row")
+			return nil
+		})
+
+		if len(reaped) != 0 {
+			t.Fatalf("reaped = %v, want none", reaped)
+		}
+		row, _ := reg.Get("fresh-session-b")
+		if row.Ended {
+			t.Error("fresh row was ended by the reaper")
+		}
+	})
+
+	t.Run("already-ended row is skipped", func(t *testing.T) {
+		reg := NewSessionRegistry()
+		seed(t, reg, "already-done-c", now.Add(-2*ttl), true)
+
+		reaped := reg.ReapStale(ttl, now, func(string) error {
+			t.Fatal("appendFn should not be called for an already-ended row")
+			return nil
+		})
+
+		if len(reaped) != 0 {
+			t.Fatalf("reaped = %v, want none (already ended)", reaped)
+		}
+	})
+
+	t.Run("appendFn failure leaves the row unmutated", func(t *testing.T) {
+		reg := NewSessionRegistry()
+		seed(t, reg, "bus-append-fails-d", now.Add(-2*ttl), false)
+		before, _ := reg.Get("bus-append-fails-d")
+
+		appendErr := errors.New("simulated bus append failure")
+		reaped := reg.ReapStale(ttl, now, func(string) error { return appendErr })
+
+		if len(reaped) != 0 {
+			t.Fatalf("reaped = %v, want none on appendFn failure", reaped)
+		}
+		after, _ := reg.Get("bus-append-fails-d")
+		if after.Ended {
+			t.Error("row was ended despite appendFn failure")
+		}
+		if !after.LastSeen.Equal(before.LastSeen) {
+			t.Errorf("LastSeen mutated on appendFn failure: before=%v after=%v",
+				before.LastSeen, after.LastSeen)
+		}
+	})
+
+	t.Run("sweep does not hold the registry lock continuously across the whole batch", func(t *testing.T) {
+		// The registry has a single mutex, not one per row, so a
+		// concurrent caller is necessarily blocked for the duration of
+		// whichever single row's append is currently in flight — that part
+		// is unavoidable and matches ApplyEnd's existing single-row
+		// contract. What must NOT happen is the lock being held
+		// continuously for the sum of every row's append in the sweep: a
+		// concurrent caller must get a turn in the gaps between rows.
+		//
+		// Structural, not timed. Row 1's append blocks until released while
+		// a reader queues on the lock. sync.Mutex hands the lock to a waiter
+		// in FIFO order once it has waited >1ms (starvation mode), so on
+		// release: with a per-row hold, row 1 unlocks and the reader runs
+		// BEFORE row 2's append starts; with a whole-sweep hold, the reader
+		// cannot run until every append is done. The old version measured
+		// read latency against an 80ms-per-row budget and could flake on a
+		// loaded runner.
+		const rowCount = 3
+		reg := NewSessionRegistry()
+		for i := 0; i < rowCount; i++ {
+			seed(t, reg, fmt.Sprintf("stale-batch-%d", i), now.Add(-2*ttl), false)
+		}
+
+		inFirst := make(chan struct{})
+		release := make(chan struct{})
+		readDone := make(chan struct{})
+		calls := 0
+		readerBeforeSecond := false
+		sweepDone := make(chan struct{})
+		go func() {
+			defer close(sweepDone)
+			reg.ReapStale(ttl, now, func(string) error {
+				calls++ // appends run sequentially inside one sweep
+				switch calls {
+				case 1:
+					close(inFirst)
+					<-release
+				case 2:
+					select {
+					case <-readDone:
+						readerBeforeSecond = true
+					default:
+					}
+				}
+				return nil
+			})
+		}()
+
+		<-inFirst // sweep holds the lock inside row 1's append
+		go func() {
+			reg.Get("stale-batch-0")
+			close(readDone)
+		}()
+		// Let the reader queue on the lock long enough (>1ms) that the
+		// mutex switches to FIFO handoff.
+		time.Sleep(20 * time.Millisecond)
+		close(release)
+		<-sweepDone
+		<-readDone
+		if calls != rowCount {
+			t.Fatalf("appendFn called %d times; want %d", calls, rowCount)
+		}
+		if !readerBeforeSecond {
+			t.Error("a reader queued during row 1 did not run before row 2's append; " +
+				"the registry lock is held across the whole sweep instead of per row")
+		}
+	})
+}
+
+// Review finding on #622: the reaper was started in NewServer, so every
+// constructed Server (hundreds in tests) leaked an unstoppable ticker
+// goroutine. It now belongs to the serving lifetime: none after NewServer,
+// one after startBackground (what Start calls), none after stopBackground
+// (what Shutdown calls), and both are idempotent.
+func TestSessionReaper_LifetimeIsServingNotConstruction(t *testing.T) {
+	srv := newTestServer(t)
+	if srv.reaperStop != nil {
+		t.Fatal("NewServer started the session reaper; it must start with Start")
+	}
+	srv.startBackground()
+	srv.reaperMu.Lock()
+	first := srv.reaperStop
+	srv.reaperMu.Unlock()
+	if first == nil {
+		t.Fatal("startBackground did not start the reaper")
+	}
+	srv.startBackground() // idempotent: must not start a second loop
+	srv.reaperMu.Lock()
+	same := fmt.Sprintf("%p", srv.reaperStop) == fmt.Sprintf("%p", first)
+	srv.reaperMu.Unlock()
+	if !same {
+		t.Fatal("second startBackground replaced the running reaper")
+	}
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	if srv.reaperStop != nil {
+		t.Fatal("Shutdown did not stop the reaper")
+	}
+	srv.stopBackground() // idempotent
+}
+
+// The loop itself exits on cancel instead of ranging over the ticker
+// forever: with a 1ms interval it would otherwise sweep continuously.
+func TestSessionReaper_ExitsOnCancel(t *testing.T) {
+	srv := newTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	srv.startSessionReaperNotify(ctx, time.Hour, time.Millisecond, done)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reaper goroutine did not exit after cancel")
 	}
 }

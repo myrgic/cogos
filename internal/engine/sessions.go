@@ -62,6 +62,24 @@ const (
 	// 600s matches the bridge's default; both are tunable per-call via the
 	// active_within_seconds query param.
 	defaultActiveWithinSeconds = 600
+
+	// sessionReapEndReason is the EndReason recorded for rows ReapStale
+	// force-ends. Emitted on BusSessions as an EvtSessionEnd event so replay
+	// (ReplaySessionRegistry) treats reaped sessions identically to
+	// explicitly-ended ones — no new event type needed.
+	sessionReapEndReason = "ttl_reaper"
+
+	// defaultSessionReapTTL is deliberately much larger than
+	// defaultActiveWithinSeconds (600s) so the reaper never fights normal
+	// heartbeat gaps — it only force-ends rows that have been silent far
+	// longer than any live client's heartbeat cadence. cogos#423 observed
+	// rows going un-reaped for two+ months.
+	defaultSessionReapTTL = 24 * time.Hour
+
+	// defaultSessionReapInterval is the sweep cadence for the background
+	// reaper goroutine started in serve.go, mirroring
+	// BusEventBroker.StartReaper's busSSEReaperInterval pattern.
+	defaultSessionReapInterval = 60 * time.Second
 )
 
 // sessionIDPattern enforces the three-component hyphen-separated lowercase
@@ -335,6 +353,86 @@ func (r *SessionRegistry) ApplyEnd(
 	row.LastSeen = now // treat end as implicit last contact
 	cp := *row
 	return &cp, true, nil
+}
+
+// ReapStale is the TTL reaper for cogos#423: sessions that were never
+// explicitly ended (crash, kill -9, dropped client) otherwise persist with
+// Ended=false forever, since ApplyEnd only ever runs from the explicit
+// POST /v1/sessions/{id}/end path. ReapStale finds every unended row whose
+// LastSeen is older than ttl (relative to now) and force-ends it.
+//
+// Same append-before-mutate invariant as ApplyEnd: for each stale row,
+// appendFn(id) is called first, under the registry lock, so the caller can
+// emit a session.end bus event preserving the bus-is-ground-truth
+// contract. If appendFn errors for a given row, that row is left
+// unmutated and simply retried on the next sweep — one row's append
+// failure must not block reaping the rest of the sweep. Returns the
+// session_ids that were successfully reaped.
+//
+// Unlike ApplyEnd, a sweep can touch many rows at once (the #423 backlog
+// was 387), and each row's appendFn does a synchronous disk-writing bus
+// append. Holding the write lock across that whole loop would block every
+// concurrent register/heartbeat/end call from real, live sessions for the
+// duration of the sweep — exactly the traffic this reaper must not disturb.
+// So the lock is only held (a) briefly, to snapshot which rows currently
+// look stale, and (b) per-row, to re-validate and mutate that single row —
+// never across the appendFn calls for more than one row at a time. Because
+// the row is re-validated under lock immediately before mutating it, a row
+// that got ended or refreshed by a concurrent call between the snapshot and
+// its turn is correctly skipped rather than double-reaped.
+func (r *SessionRegistry) ReapStale(ttl time.Duration, now time.Time, appendFn func(id string) error) []string {
+	if ttl <= 0 {
+		return nil
+	}
+
+	r.mu.RLock()
+	candidates := make([]string, 0, len(r.rows))
+	for id, row := range r.rows {
+		if row.Ended {
+			continue
+		}
+		if row.LastSeen.IsZero() || now.Sub(row.LastSeen) <= ttl {
+			continue
+		}
+		candidates = append(candidates, id)
+	}
+	r.mu.RUnlock()
+
+	var reaped []string
+	for _, id := range candidates {
+		if r.reapOne(id, ttl, now, appendFn) {
+			reaped = append(reaped, id)
+		}
+	}
+	return reaped
+}
+
+// reapOne re-validates and, if still stale, force-ends a single row. It
+// acquires the registry write lock only for this one row's check-append-
+// mutate sequence, so a multi-row sweep never blocks concurrent callers for
+// longer than a single row's append takes.
+func (r *SessionRegistry) reapOne(id string, ttl time.Duration, now time.Time, appendFn func(id string) error) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	row, ok := r.rows[id]
+	if !ok || row.Ended {
+		return false
+	}
+	if row.LastSeen.IsZero() || now.Sub(row.LastSeen) <= ttl {
+		// Refreshed by a concurrent heartbeat since the snapshot: no longer stale.
+		return false
+	}
+	if appendFn != nil {
+		if err := appendFn(id); err != nil {
+			return false
+		}
+	}
+	row.Ended = true
+	row.EndedAt = now
+	row.EndReason = sessionReapEndReason
+	row.LastSeen = now
+	return true
 }
 
 // ─── Handoff registry ────────────────────────────────────────────────────────

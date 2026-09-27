@@ -98,7 +98,7 @@ Total sites: 239  (cog: 97, home: 2, elsewhere: 14, unanchored: 85, dynamic: 41)
 | `<WorkspaceRoot>/.cog/mem/semantic/<call:fmt.Sprintf>` | (WorktreeDivergenceInjector).Inject (`os.WriteFile`) | internal/testkernel/experiment/injectors.go:79 | internal:testkernel |
 | `<WorkspaceRoot>/.cog/config` | (ConfigDriftInjector).Inject (`os.MkdirAll`) | internal/testkernel/experiment/injectors.go:101 | internal:testkernel |
 | `<WorkspaceRoot>/.cog/config/kernel.yaml` | (ConfigDriftInjector).Inject (`os.WriteFile`) | internal/testkernel/experiment/injectors.go:105 | internal:testkernel |
-| `<call:t.TempDir>/.cog/config/identity.yaml` | makeMinimalWorkspace (`os.WriteFile`) | internal/testkernel/testkernel.go:588 | internal:testkernel |
+| `<call:t.TempDir>/.cog/config/identity.yaml` | makeMinimalWorkspace (`os.WriteFile`) | internal/testkernel/testkernel.go:593 | internal:testkernel |
 | `<WorkspaceRoot>/.cog/ledger/<call:pathsafe.SanitizeComponent>` | AppendEvent (`os.MkdirAll`) | pkg/cogblock/ledger.go:230 | pkg:cogblock |
 | `<WorkspaceRoot>/.cog/ledger/<call:pathsafe.SanitizeComponent>/events.jsonl` | AppendEvent (`os.OpenFile`) | pkg/cogblock/ledger.go:280 | pkg:cogblock |
 | `<WorkspaceRoot>/.cog/claims` | CreateClaim (`os.MkdirAll`) | pkg/coordination/coordination.go:66 | pkg:coordination |
@@ -139,7 +139,7 @@ Total sites: 239  (cog: 97, home: 2, elsewhere: 14, unanchored: 85, dynamic: 41)
 | `<TempDir>` | (*modalityProxy).playAudio (`os.CreateTemp`) | internal/engine/mcp_modality_proxy.go:853 | internal:engine |
 | `<TempDir>` | streamFetch (`os.CreateTemp`) | internal/engine/remote_hydrate_spike.go:195 | internal:engine |
 | `<TempDir>` | streamFetch (`io.Copy`) | internal/engine/remote_hydrate_spike.go:204 | internal:engine |
-| `<TempDir>` | (*Server).handleChat (`os.MkdirTemp`) | internal/engine/serve.go:1261 | internal:engine |
+| `<TempDir>` | (*Server).handleChat (`os.MkdirTemp`) | internal/engine/serve.go:1357 | internal:engine |
 | `<TempDir>` | (*Server).handleBlockPut (`os.CreateTemp`) | internal/engine/serve_blocks.go:184 | internal:engine |
 | `<TempDir>` | (*Server).handleBlockPut (`io.Copy`) | internal/engine/serve_blocks.go:195 | internal:engine |
 | `<TempDir>` | writeTempMCPConfig (`os.CreateTemp`) | internal/engine/serve_claude_code.go:460 | internal:engine |
@@ -218,7 +218,7 @@ These sites structurally resolved (the shape of the path is known) but the ROOT 
 | `{p.TargetPath}` | (ProjectionSymlinkInjector).Inject (`os.Symlink`) | internal/testkernel/experiment/injectors.go:129 | internal:testkernel |
 | `{root}/first-instruments-runs/{runID}` | RunDir (`os.MkdirAll`) | internal/testkernel/experiment/manifest.go:41 | internal:testkernel |
 | `{root}/first-instruments-runs/{runID}/observations.jsonl` | NewObservationWriter (`os.OpenFile`) | internal/testkernel/experiment/manifest.go:103 | internal:testkernel |
-| `{d}` | makeMinimalWorkspace (`os.MkdirAll`) | internal/testkernel/testkernel.go:576 | internal:testkernel |
+| `{d}` | makeMinimalWorkspace (`os.MkdirAll`) | internal/testkernel/testkernel.go:581 | internal:testkernel |
 | `dirname({m.nodeDir}/aliases.yaml)` | writeFile (`os.MkdirAll`) | pkg/alias/alias.go:323 | pkg:alias |
 | `{m.nodeDir}/aliases.yaml` | writeFile (`os.Rename`) | pkg/alias/alias.go:331 | pkg:alias |
 | `{path}` | WriteAbstractToFrontmatter (`os.WriteFile`) | pkg/cogdoc_review/abstract.go:446 | pkg:cogdoc_review |
@@ -279,7 +279,7 @@ These sites write to disk but this tool could not structurally resolve their pat
 | `<expr>` | (*ProjectionReconciler).ApplyPlan (`os.Rename`) | internal/engine/projection_reconciler.go:436 | internal:engine |
 | `<call:fmt.Sprintf>` | (*rotatingWriter).rotateLocked (`os.Rename`) | internal/engine/rotating_writer.go:130 | internal:engine |
 | `{dst}/<call:filepath.Rel>` | func literal (line 939) (`os.MkdirAll`) | internal/providers/site/site.go:949 | provider:site |
-| `<call:t.TempDir>/projects/cog_lab_package/identities/identity_test.md` | makeMinimalWorkspace (`os.WriteFile`) | internal/testkernel/testkernel.go:583 | internal:testkernel |
+| `<call:t.TempDir>/projects/cog_lab_package/identities/identity_test.md` | makeMinimalWorkspace (`os.WriteFile`) | internal/testkernel/testkernel.go:588 | internal:testkernel |
 | `{m.nodeDir}/aliases.yaml.tmp.<call:fmt.Sprintf>` | writeFile (`os.WriteFile`) | pkg/alias/alias.go:328 | pkg:alias |
 | `<call:bep.ExpandCertDir>` | runGen (`os.MkdirAll`) | pkg/substrate/bep/cmd/bep-cert/main.go:103 | pkg:substrate |
 | `dirname({path})/<call:fmt.Sprintf>` | writeFileAtomic (`os.OpenFile`) | pkg/substrate/bep/tls.go:124 | pkg:substrate |
