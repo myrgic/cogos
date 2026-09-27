@@ -64,10 +64,10 @@ func newTestRouterWith(ps ...Provider) *SimpleRouter {
 // said Degraded. The join must flag that as disagreement.
 func TestInferenceView_HealthDisagreement(t *testing.T) {
 	resetPinResolutionsForTest()
-	router := newTestRouterWith(&inferenceStubProvider{name: "lmstudio-eclipse", model: "m", live: true})
+	router := newTestRouterWith(&inferenceStubProvider{name: "lmstudio-remote", model: "m", live: true})
 	list, get := isolatedReconcilers(map[string]reconcile.Reconcilable{
-		lmsModelStateType + "/lmstudio-eclipse": &stubProvider{
-			name: "lmstudio-eclipse",
+		lmsModelStateType + "/lmstudio-remote": &stubProvider{
+			name: "lmstudio-remote",
 			status: reconcile.ResourceStatus{
 				Sync:      reconcile.SyncStatusOutOfSync,
 				Health:    reconcile.HealthDegraded,
@@ -125,11 +125,11 @@ func TestInferenceView_PinReasonTyped(t *testing.T) {
 	t.Cleanup(resetPinResolutionsForTest)
 
 	_, note := func() (string, string) {
-		m, _, n := resolveDispatchLocalModel([]string{"ornith-1.5-35b"}, "gemma4:e4b", DispatchModelE4B)
+		m, _, n := resolveDispatchLocalModel([]string{"example-35b"}, "gemma4:e4b", DispatchModelE4B)
 		return m, n
 	}()
-	recordPinResolution("dispatch", "gemma4:e4b", "ornith-1.5-35b", note)
-	recordPinResolution("assess", "ornith-1.5-35b", "ornith-1.5-35b", "")
+	recordPinResolution("dispatch", "gemma4:e4b", "example-35b", note)
+	recordPinResolution("assess", "example-35b", "example-35b", "")
 
 	view := buildInferenceView(context.Background(), nil, func() []string { return nil }, reconcile.GetProvider)
 	if len(view.Pins) != 2 {
@@ -143,7 +143,7 @@ func TestInferenceView_PinReasonTyped(t *testing.T) {
 	if d.Site != "dispatch" || d.Reason != "fallback:not-loaded" {
 		t.Fatalf("dispatch pin = %+v, want reason fallback:not-loaded", d)
 	}
-	if d.Requested != "gemma4:e4b" || d.Resolved != "ornith-1.5-35b" {
+	if d.Requested != "gemma4:e4b" || d.Resolved != "example-35b" {
 		t.Fatalf("dispatch requested/resolved = %q/%q", d.Requested, d.Resolved)
 	}
 	if d.Detail == "" {
@@ -199,28 +199,28 @@ func TestInferenceView_EnginesFromReconcilerCache(t *testing.T) {
 	ctxLen := 65536
 	par := 4
 	msp := &LMSModelStateProvider{
-		name:       "lmstudio-eclipse",
-		host:       "192.168.10.191",
-		target:     lmsModelStateConfig{Manage: true, Model: "ornith-1.5-35b"},
+		name:       "lmstudio-remote",
+		host:       "192.0.2.10",
+		target:     lmsModelStateConfig{Manage: true, Model: "example-35b"},
 		lastProbed: time.Now(),
 		lastLive: []lmsModelRow{
-			{ID: "ornith-1.5-35b-a3b-mlx", State: "loaded", LoadedContextLength: &ctxLen, MaxContextLength: 262144, Parallel: &par},
+			{ID: "example-35b-a3b-mlx", State: "loaded", LoadedContextLength: &ctxLen, MaxContextLength: 262144, Parallel: &par},
 			{ID: "gemma4:e4b", State: "not-loaded"},
 			{ID: "other", State: "loading"},
 		},
 	}
 	list, get := isolatedReconcilers(map[string]reconcile.Reconcilable{
-		lmsModelStateType + "/lmstudio-eclipse": msp,
+		lmsModelStateType + "/lmstudio-remote": msp,
 	})
 	view := buildInferenceView(context.Background(), nil, list, get)
 	if len(view.Engines) != 2 {
 		t.Fatalf("engines = %d, want 2 (not-loaded rows excluded): %+v", len(view.Engines), view.Engines)
 	}
 	e := view.Engines[0]
-	if e.Model != "ornith-1.5-35b-a3b-mlx" || e.State != "loaded" || !e.Target {
+	if e.Model != "example-35b-a3b-mlx" || e.State != "loaded" || !e.Target {
 		t.Fatalf("engine[0] = %+v", e)
 	}
-	if e.Node != "192.168.10.191" || e.LoadedContextLength == nil || *e.LoadedContextLength != ctxLen || e.Parallel == nil || *e.Parallel != par {
+	if e.Node != "192.0.2.10" || e.LoadedContextLength == nil || *e.LoadedContextLength != ctxLen || e.Parallel == nil || *e.Parallel != par {
 		t.Fatalf("engine[0] fields = %+v", e)
 	}
 	if view.Engines[1].State != "loading" || view.Engines[1].Target {
