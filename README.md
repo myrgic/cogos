@@ -1,6 +1,154 @@
 # CogOS
 
-A cognitive daemon for AI agents. Written in Go. Runs locally.
+**A reconciler for the environment around your AI tools.**
+
+You declare the state you want: which model is loaded on which machine, at what
+context length; which agent worktrees should exist; what version the daemon
+runs; what a site should serve; which derived views of your notes should be
+current. CogOS is one local Go daemon that keeps pulling reality back to that
+declaration, and says plainly when it can't.
+
+It is the Kubernetes controller pattern (declare, observe, diff, apply, report
+health) pointed at an AI workstation instead of a cluster. No cluster, no VM,
+no etcd: one binary, and the declared state lives in files in your workspace.
+
+```
+declared (.cog/config, workspace files)
+        │
+        ▼
+  LoadConfig ─► FetchLive ─► ComputePlan ─► ApplyPlan ─► Health
+                   ▲            (pure diff,     │
+                   │             no inference)  │
+                   └────────── every 30s, plus event triggers
+```
+
+## See it converge
+
+Declare that a model should stay loaded in LM Studio
+(`.cog/config/providers.local.yaml`):
+
+```yaml
+providers:
+  lmstudio-local:
+    type: openai
+    endpoint: http://localhost:1234
+    options:
+      model_state:
+        manage: true
+        model: qwen3-30b-a3b
+        context_length: 262144
+        parallel: 1
+```
+
+Then take it away by hand and watch it come back:
+
+```sh
+lms unload qwen3-30b-a3b
+sleep 45 && lms ps          # loaded again, same context length
+curl -s localhost:6931/v1/reconcile/convergence | jq '.providers[] | select(.provider | startswith("lms-model-state"))'
+```
+
+On the author's machine the model is back within one 30-second cycle. To take it
+out on purpose you change the declaration (`manage: false`), not the machine.
+That is the whole idea: the file is the source of truth, and the machine is
+brought into line with it.
+
+## What it reconciles today
+
+Every row implements one seven-method contract
+([`pkg/substrate/reconcile`](pkg/substrate/reconcile/types.go)) and is driven by
+one daemon loop ([daemon reconcile loop driver](docs/adrs/095-daemon-reconcile-loop-driver.md)).
+A live kernel on the author's node runs 28 instances. They split honestly into
+two kinds.
+
+**Converging** (15 instances): the plan is applied, so reality changes.
+
+| Declared state | Reconciler | Design doc |
+|---|---|---|
+| Which model is loaded on which LM Studio backend, at what context length (local or over LAN) | `lms-model-state/<backend>` | [lms-model-state reconciler](docs/adrs/104-lms-model-state-reconciler.md) |
+| The kernel's own version, from GitHub releases (SHA-256 checked) | `self-update` | `internal/providers/selfupdate` |
+| Static sites: content-hash drift, then deploy (runs [myrgic.com](https://myrgic.com)) | `site` | `internal/providers/site` |
+| Agent git worktrees: alive, orphaned, or reclaimable | `worktree-reconciler/<repo>` | [worktree reconciler](docs/adrs/096-worktree-reconciler.md) |
+| The archive of agent conversations, from every harness that writes them | `conversations` | `internal/conversations` |
+| Derived views of the notes corpus (lineage, decision graph, open questions) | `projection-compiler`, `lineage-projection-*` | [lineage observatory](docs/adrs/094-lineage-observatory.md) |
+| Signals from a GitHub repo turned into wake events for an agent | `margin-bridge` | `internal/providers/marginbridge` |
+
+A supervised `mlx_lm.server` (`mlx-inference/<name>`) and a Discord server
+layout (`discord`) are full reconcilers too; neither is active on the author's
+node right now.
+
+**Observed** (13 instances): health is probed every cycle and reported, but
+nothing is applied yet. Agents, identity, MCP tools, services, external
+gateways, evaluation, workspace components (drift is reported, not fixed),
+workspace pins, and node health history (which records and compacts on its own
+schedule, outside plan/apply), plus the aggregate `lms-model-state`
+and `mlx-inference` entries that summarize their per-backend reconcilers.
+
+Promoting an observed row to a converging one means writing its plan and apply
+steps; the loop, backoff, and reporting come for free. Memory and context
+assembly are not reconciled; they are services the kernel runs.
+
+## How it fails
+
+A control loop is only as good as its behaviour when reality won't cooperate.
+These are the decisions that took the most iterations to get right:
+
+- **Five health states, not two.** `Healthy`, `Degraded`, `Progressing`,
+  `Missing`, `Suspended`. Self-heal acts on `Degraded`, `Missing`, and out-of-sync. A backend
+  that is simply switched off or off the LAN is `Suspended`, not `Degraded`, so
+  the daemon doesn't spend the night trying to load a model onto a laptop that's
+  asleep ([lms-model-state reconciler, §2](docs/adrs/104-lms-model-state-reconciler.md)).
+- **One provider can't take down the others.** Each cycle is isolated; a panic
+  or error in one provider is logged and counted, and the loop keeps ticking.
+- **Backoff, then quarantine, then automatic release.** Consecutive failures
+  back off exponentially with jitter (up to 32 ticks, ~16 minutes). After 12 in a
+  row, roughly two hours, the daemon stops *acting* on that provider but keeps
+  observing it. Quarantine lifts on its own when the provider's config
+  fingerprint changes, i.e. when someone has actually changed what was failing.
+- **A persistent condition is one anomaly, not one per tick.** Anomalies are
+  tracked as episodes that open and close, so a stuck provider shows up once in
+  the log instead of 700 times ([one condition, one anomaly](https://github.com/myrgic/cogos/pull/524)).
+- **Convergence, not a metronome.** A reconciler that "fixes" something every
+  cycle is itself a bug; the conversations reconciler did exactly that until
+  [it was made to converge](https://github.com/myrgic/cogos/pull/480).
+- **Observable.** `GET /v1/reconcile/convergence` reports per-provider cycle
+  time, over-budget cycles, degraded cycles, open anomaly episodes, and
+  quarantine.
+
+**Known gaps, stated rather than hidden** (as of this writing):
+
+- There are no leases yet. An experiment that needs the GPU must flip the
+  declaration off and restart the kernel; a plain `lms unload` is undone within
+  a cycle.
+- A remote LM Studio backend with a bad credential fails every load. After
+  12 failed cycles it is quarantined, as designed: the loop is working and the
+  credential is not.
+- The aggregate `lms-model-state` health entry reports `Degraded` while the
+  per-backend entries are healthy: a reporting bug, not a serving one.
+- Two reconcilers (`conversations`, one worktree instance) regularly exceed
+  their cycle-time budget.
+
+## Why this shape
+
+The author spent a decade operating production infrastructure, most of it on
+Kubernetes. The mapping is deliberate:
+
+| Kubernetes ecosystem | CogOS |
+|---|---|
+| Controller / operator | `Reconcilable` provider |
+| Flux / Argo CD (watch declared state, apply, detect drift) | The reconcile daemon |
+| Helm charts | Skills (packaged procedures an agent loads) |
+| Resource status and conditions | Health + operation phase, `/v1/reconcile/convergence` |
+
+The one real difference: Kubernetes keeps its view of the world in etcd, a store
+that can itself drift from reality. CogOS's declared state is plain files in the
+workspace, usually committed to git, so the source of truth and the history of
+every change to it can be the same thing. (Node-local settings with credentials,
+like `providers.local.yaml`, stay out of git by design.)
+
+---
+
+## Install
 
 ```sh
 make build && ./cogos serve --workspace ~/my-project
@@ -64,29 +212,19 @@ Other architectures (linux/arm64) are available on the [Releases page](https://g
 
 ---
 
-## What this is
-
-`cogos` is a Go daemon that runs locally and gives AI tools persistent workspace memory, scored context per prompt, and cross-session continuity. Claude Code, Cursor, and any tool that can call a local endpoint or run a hook can plug into it.
-
-The kernel owns workspace state. It intercepts each prompt before the model sees it, scores all workspace documents by relevance, and injects a focused context window. Externalized attention: the substrate decides what's relevant, not the model. It routes inference through local or cloud providers. It keeps a hash-chained ledger of every decision. It runs reconcilers that maintain workspace invariants (plan, apply, drift detection, topological ordering), the same shape as Kubernetes-era control loops, applied to AI workspace state.
-
-Your codebase or project directory sits untouched. CogOS adds a `.cog/` overlay alongside `.git/`, or in a directory by itself. Everything runs on your machine. Nothing leaves unless you choose.
-
----
-
-## Architecture
+## Architecture (the rest of the kernel)
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  Your AI tools                                          │
-│  Claude Code · Cursor · custom agents · Ollama · ...    │
+│  Claude Code · Codex · Cursor · custom agents · ...     │
 └────────────────────┬────────────────────────────────────┘
                      │ hooks · MCP · HTTP
                      ▼
 ┌─────────────────────────────────────────────────────────┐
 │  CogOS kernel  (local Go daemon)                        │
-│  Owns workspace state. Hosts subsystems. Exposes        │
-│  protocol surfaces for whatever AI tool plugs in.       │
+│  Owns workspace state. Runs the reconcile loop.         │
+│  Exposes protocol surfaces for whatever plugs in.       │
 └────────────────────┬────────────────────────────────────┘
                      │ reads & writes
                      ▼
@@ -96,65 +234,77 @@ Your codebase or project directory sits untouched. CogOS adds a `.cog/` overlay 
 │    your-project/                                        │
 │    ├─ src/  docs/  ...    ← your stuff, untouched       │
 │    ├─ .git/               ← code history (optional)     │
-│    └─ .cog/               ← cognitive overlay           │
-│       ├─ mem/    cogdocs (memory)                       │
-│       ├─ run/    bus events, traces                     │
+│    └─ .cog/               ← CogOS overlay               │
+│       ├─ config/ declared state                         │
+│       ├─ mem/    memory documents                       │
+│       ├─ run/    bus events, traces, logs               │
 │       └─ ledger/ hash-chained record                    │
 └─────────────────────────────────────────────────────────┘
 ```
 
-Three pieces:
-
-- **Your AI tools** speak to the kernel through hooks, MCP, and HTTP. Anything that can call a local endpoint or run a hook can plug in.
-- **The CogOS kernel** is one local Go daemon. It owns workspace state, hosts subsystems (context assembly, inference routing, reconcilers, event bus, ledger), and exposes the protocol surfaces.
-- **The workspace** is any directory you point the kernel at. CogOS adds a `.cog/` overlay alongside whatever else is there. Same shape regardless of what's in the directory.
+- **Your AI tools** talk to the kernel through hooks, MCP, and HTTP.
+- **The kernel** is one local Go daemon. It owns workspace state, runs the
+  reconcile loop, and hosts context assembly, inference routing, the event bus,
+  and the ledger.
+- **The workspace** is any directory you point the kernel at. CogOS adds a
+  `.cog/` overlay alongside whatever else is there.
 
 ### How the kernel is organized internally
 
-The kernel has three internal layers:
-
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  API Layer         HTTP API · MCP Server · Provider Router   │
-│                    Event Broker (SSE) · Config API           │
+│  API Layer         HTTP API · MCP Server · Inference Router  │
+│                    Anthropic proxy · Event Broker (SSE)      │
 ├──────────────────────────────────────────────────────────────┤
-│  Workspace         Context Engine · Memory · Ledger          │
-│                    Salience Scorer · Blob Store · Traces     │
-│                    Conversation Sidecars · Kernel Slog       │
+│  Workspace         Context Assembly · Memory · Ledger        │
+│                    Salience · Blob Store · Traces            │
+│                    Conversation Sidecars · Kernel Log        │
 ├──────────────────────────────────────────────────────────────┤
-│  Process Core      Process Loop · Identity · State FSM       │
-│                    Agent Harness · CogBus · Tool-call Gate   │
+│  Process Core      Process Loop · Identity · Reconcile Loop  │
+│                    Maintenance Agent · Event Bus · Tool Gate │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**API Layer** is the kernel's HTTP and MCP surface. Serves OpenAI and Anthropic-compatible chat endpoints, the always-on MCP Streamable HTTP server, the Anthropic Messages API proxy, the event broker with SSE streaming, and the config mutation API. Routes inference requests to local or cloud providers. Binds to `127.0.0.1:6931` by default; `--bind` or `bind_addr` in YAML relaxes CORS when set to a non-loopback interface.
+**API Layer** is the kernel's HTTP and MCP surface: OpenAI- and
+Anthropic-compatible chat endpoints, the MCP Streamable HTTP server, an
+Anthropic Messages proxy, the event broker, and the config API. It routes each
+inference request to a local or cloud provider. Binds to `127.0.0.1:6931` by
+default.
 
-**Workspace** is where state lives. The context engine scores documents and arranges them into stability zones optimized for KV cache reuse. The ledger is append-only and hash-chained. Traces capture attention, proprioceptive state, and internal request metabolites. Conversation sidecars persist full turn text. Memory persists across sessions.
+**Workspace** is where state lives: memory documents, the append-only
+hash-chained ledger, per-session conversation sidecars, traces, and the blob
+store. Context assembly reads from here.
 
-**Process Core** is the kernel's control loop. Runs continuously through four states (Active, Receptive, Consolidating, Dormant). Manages identity, consolidation, workspace lifecycle, the homeostatic agent harness, the tool-call hallucination gate, and emits to the kernel slog (stderr tee plus `.cog/run/kernel.log.jsonl`).
+**Process Core** keeps the kernel running between requests: a continuous loop
+through four states (Active, Receptive, Consolidating, Dormant), node identity,
+the reconcile loop, and a small maintenance agent that only wakes when
+something is unhealthy (see below).
 
 ---
 
-## How foveated context works
+## Context assembly
 
-When you submit a prompt in Claude Code, the `UserPromptSubmit` hook fires and calls the CogOS daemon. The term "foveated" is borrowed from the eye, where the fovea is the high-resolution center: the context engine places what matters most in front of the model and lets the rest recede.
+When you submit a prompt in Claude Code, the `UserPromptSubmit` hook calls the
+kernel, which:
 
-The context engine:
+1. Ranks workspace documents by keyword relevance to the prompt, combined
+   with git-derived salience (how recently and how often a file has been
+   edited). An optional learned ranker can be loaded; it is off unless
+   configured.
+2. Assembles a context window in a fixed order, arranged so the parts that
+   change least come first and the prompt cache stays warm:
 
-1. Scores all workspace documents using a ~2.3M-parameter Mamba SSM trained as a context retrieval model, combined with git-derived salience
-2. Ranks by a composite signal (edit recency, semantic match, structural importance)
-3. Assembles a context window organized into stability zones:
+| Order | Contents | Behavior |
+|-------|----------|----------|
+| 1 | Identity card | Always present, most stable |
+| 2 | The client's own system prompt | Stable for the session |
+| 3 | Conversation history | Scored by recency and relevance; evictable |
+| 4 | Selected workspace documents | Re-ranked every turn, so placed late |
+| 5 | The current message | Always present |
 
-| Zone | Contents | Behavior |
-|------|----------|----------|
-| 0: Core | Identity, system config | Always present, never evicted |
-| 1: Knowledge | Workspace docs, indexed memory | Shifts slowly, high cache hit rate |
-| 2: History | Conversation turns | Scored by relevance, evictable |
-| 3: Current | The current message | Always present |
+3. Injects the result before the prompt reaches the model.
 
-4. Injects the assembled context into the prompt before it reaches the model
-
-The model sees a pre-focused window instead of everything-or-nothing. Zone ordering is tuned for KV cache reuse: stable content stays at the front of the window across prompts, reducing cache misses. See [docs/EVALUATION.md](docs/EVALUATION.md) for the retrieval methodology.
+The model sees a focused window instead of everything or nothing.
 
 ---
 
@@ -162,199 +312,182 @@ The model sees a pre-focused window instead of everything-or-nothing. Zone order
 
 ### Context and memory
 
-- **Externalized attention.** The kernel intercepts each prompt, scores workspace documents by relevance, and injects a focused context window before the model sees it. Relevance scoring is done by the substrate, not the model.
-- **Foveated context assembly.** A live `UserPromptSubmit` hook fires on every prompt. Documents are ranked and arranged into stability zones optimized for KV cache reuse.
-- **Workspace memory.** Hierarchical memory with salience scoring and temporal attention. Your workspace remembers across sessions, models, and tools. Switch from Claude Code to Cursor and back. Same memory, same context.
-- **Conversation persistence.** `turn.completed` ledger events plus a per-session sidecar at `.cog/run/turns/<sessionID>.jsonl` preserve full prompt and response text.
+- **Context assembly** on every prompt, via a Claude Code hook or the HTTP API.
+- **Workspace memory.** Markdown memory documents with frontmatter, full-text
+  search (SQLite FTS5), and salience ranking. Memory lives in the workspace, so
+  it is the same across sessions, models, and tools.
+- **Conversation persistence.** `turn.completed` ledger events plus a
+  per-session sidecar at `.cog/run/turns/<sessionID>.jsonl` keep full prompt and
+  response text.
 
 ### Inference and routing
 
-- **Multi-provider routing.** OpenAI-compatible and Anthropic Messages-compatible HTTP API. Works with Ollama, LM Studio, Claude, and any OpenAI-compatible endpoint. Local models preferred by default.
-- **Anthropic Messages API proxy.** Transparent proxy at `POST /v1/messages` that forwards to the Anthropic API with streaming SSE passthrough. Enables `cog claude` to route Claude Code through the kernel via `ANTHROPIC_BASE_URL`.
+- **Multi-provider routing.** OpenAI- and Anthropic-compatible endpoints in
+  front of LM Studio, MLX, Anthropic, Claude Code, Codex, and any
+  OpenAI-compatible server. Local models are preferred when available.
+- **Anthropic Messages proxy** at `POST /v1/messages`, with streaming, so
+  Anthropic-API clients can run through the kernel.
 
 ### Observability
 
-- **Hash-chained ledger.** CogBlock protocol for content-addressed, hash-chained records. Every routing decision, context assembly, state transition, turn completion, tool call, and config mutation is recorded in an append-only ledger (SHA-256, RFC 8785) with optional chain verification.
-- **Three observability lanes.** The kernel exposes ledger (durable hash-chained events), traces (client metabolites + attention + proprioceptive state), and kernel slog (structured runtime logs) as non-overlapping surfaces. Each has a dedicated MCP tool, HTTP endpoint, and on-disk format.
-- **Live event bus.** `AppendEvent` fans into an in-process broker with SSE streaming at `/v1/bus/:id/events/stream`. Subscribers see writes in real time; offline writers go straight to JSONL.
+- **Hash-chained ledger.** Routing decisions, context assemblies, state
+  transitions, turns, tool calls, and config changes are appended to a
+  content-addressed ledger (SHA-256, RFC 8785 canonical JSON) with optional
+  chain verification.
+- **Three separate lanes:** the ledger (durable events), traces (attention and
+  tool-call activity, internal requests), and the kernel log (structured runtime
+  logs). Each has an MCP tool, an HTTP endpoint, and an on-disk file.
+- **Live event bus** with SSE streaming at `/v1/bus/:id/events/stream`.
+- **Reconcile health** at `/v1/reconcile/convergence` (see the top of this file).
 
 ### Coordination
 
-- **Reconcilers.** A generic plan/apply control loop (in `pkg/reconcile`) runs 27 registered providers: 11 core kernel functions (agent, discord, eval, identity, mcp-tools, openclaw-agents, openclaw-cron, openclaw-gateway, pin, self-update, service), 8 workspace and integration providers (component, conversations, site, margin-bridge, lms-model-state, mlx-inference, vitals-retention, and one worktree reconciler per managed repo), and 8 corpus-observatory reconcilers (projection-compiler plus 7 lineage-projection kinds). Run `cogos reconcile --help` for the current live list. Each provider implements `Reconcilable` (seven methods: Type, LoadConfig, FetchLive, ComputePlan, ApplyPlan, BuildState, Health). The orchestrator handles plan, apply, drift detection, topological ordering (Kahn's sort), and three-axis status (Sync, Health, Operation) for all providers.
-- **Kernel-native session management.** `SessionRegistry` + `HandoffRegistry` with atomic-claim semantics: first-wins enforced at the bus boundary, not just in the in-memory cache. Bus stays ground truth; the registries are derived views rebuilt from seq-sorted replay on startup.
-- **Native agent harness.** A homeostatic assessment loop runs as a goroutine inside the kernel. Calls a local model via Ollama with six kernel-native tools. Adaptive interval (5m-30m) based on assessment urgency, with panic recovery.
-- **MCP Streamable HTTP.** Full MCP transport at `POST /mcp` with JSON-RPC 2.0, session management, and 30-minute expiry. Always-on (no build tag). 54 tools spanning observability, agent control, config, memory, sessions, handoffs, voice, and conversation search.
-- **Config mutation API.** `cog_read_config` / `cog_write_config` / `cog_rollback_config` MCP tools and matching REST surface. RFC 7396 merge-patch semantics with atomic writes and rotating backups.
-
-For endpoint and tool counts, see the HTTP API and MCP tools tables below.
+- **Reconcilers.** See [What it reconciles today](#what-it-reconciles-today).
+  `cogos reconcile --help` lists what your build registers.
+- **Sessions and handoffs.** A session registry and a handoff registry with
+  atomic first-wins claims, enforced at the bus. The bus is the source of truth;
+  the registries are rebuilt from it on startup.
+- **MCP Streamable HTTP** at `POST /mcp` (JSON-RPC 2.0, sessions with a
+  30-minute idle expiry). Frequently used tools are listed directly; the rest
+  are discoverable through `cog_tool_search` and callable through
+  `cog_tool_invoke`.
+- **Config API.** Read, merge-patch (RFC 7396), and roll back config over MCP
+  or REST, with atomic writes and rotating backups.
 
 ---
 
 ## Exposure surfaces
 
-Three non-overlapping observability lanes, each with an MCP tool, HTTP endpoint, and on-disk artifact:
-
-| Lane | What it captures | MCP tool | HTTP | On-disk |
+| Lane | What it captures | MCP tool | HTTP | On disk |
 |------|------------------|----------|------|---------|
-| **Ledger** | Durable hash-chained events (turns, config mutations, tool calls, state changes) | `cog_read_ledger` | `GET /v1/ledger` (optional `?verify_chain=true`) | Append-only CogBlock chain |
-| **Traces** | Client metabolites, attention, proprioceptive state, internal requests | `cog_search_traces` | `GET /v1/traces` (legacy `/v1/proprioceptive` preserved) | Trace files |
-| **Kernel slog** | Structured runtime logs via `teeHandler` | `cog_tail_kernel_log` | `GET /v1/kernel-log` | stderr + `.cog/run/kernel.log.jsonl` |
+| **Ledger** | Durable hash-chained events (turns, config changes, tool calls, state changes) | `cog_read_ledger` | `GET /v1/ledger` (`?verify_chain=true`) | Append-only chain |
+| **Traces** | Attention events, tool-call activity, internal requests | `cog_search_traces` | `GET /v1/traces` | `.cog/run/*.jsonl` |
+| **Kernel log** | Structured runtime logs | `cog_tail_kernel_log` | `GET /v1/kernel-log` | `.cog/run/kernel.log.jsonl` |
 
-The live event bus is a fourth surface for real-time subscribers: SSE at `/v1/bus/:id/events/stream`, plus `cog_tail_events` and `cog_read_events` MCP tools. All `AppendEvent` writes fan through the broker.
+The event bus is a fourth surface for real-time subscribers: SSE at
+`/v1/bus/:id/events/stream`, plus the `cog_tail_events` and `cog_read_events`
+MCP tools.
 
 ---
 
 ## Library packages (pkg/)
 
-Eight importable Go packages extracted into a `go.work` multi-module workspace. Each has its own `go.mod` and can be imported independently of the kernel. Six are stdlib-only; `pkg/bep` requires `google.golang.org/protobuf`.
+Importable Go packages in a `go.work` multi-module workspace. The ones most
+useful outside the kernel:
 
 | Package | What it provides |
 |---------|-----------------|
-| `pkg/cogblock` | Content-addressed block format, CogBlockKind enum, provenance/trust types, EventEnvelope, ledger (RFC 8785 canonicalization, hash chain, verify) |
-| `pkg/coordination` | Claim/Handoff/Broadcast types, 13 coordination functions, AgentID |
-| `pkg/bep` | BEP wire protocol types, TLS/DeviceID, index/version vectors, events, Engine/SyncProvider interfaces |
-| `pkg/reconcile` | Reconcilable interface (7 methods), State/Plan/Action types, registry, Kahn's topological sort, meta-orchestrator |
-| `pkg/modality` | Module interface, Bus, wire protocol (D2), events, salience tracker, channels, ProcessSupervisor |
-| `pkg/cogfield` | Node/Edge/Graph types, Block, BlockAdapter interface, conditions, signals, sessions, documents |
-| `pkg/uri` | URI struct, Parse/Format, 35 namespaces, ExtractInlineRefs, error types |
-| `pkg/substrate` | Umbrella re-export module for substrate-shaped packages (uri, cogfield, bep); ADR-100 extraction target |
+| `pkg/reconcile` | The `Reconcilable` interface, plan/action types, registry, topological ordering |
+| `pkg/cogblock` | Content-addressed block format and the hash-chained ledger (canonicalization, chain verify) |
+| `pkg/coordination` | Claim, handoff, and broadcast primitives |
+| `pkg/bep` | Block Exchange Protocol types for node-to-node sync |
+| `pkg/modality` | Module interface, bus, and channels for voice and other media |
+| `pkg/cogfield` | Graph types over workspace documents |
+| `pkg/uri` | `cog:` URI parsing and namespaces |
+| `pkg/skills` | Skill discovery and frontmatter parsing |
+| `pkg/substrate` | Umbrella module re-exporting the substrate-shaped packages |
+
+Smaller utilities: `pkg/alias`, `pkg/filelock`, `pkg/pathsafe`,
+`pkg/cogdoc_review`.
 
 ---
 
-## Agent harness
+## Maintenance agent
 
-The native Go agent harness runs a homeostatic assessment loop inside the kernel process:
+Most of the time nothing intelligent happens. Each tick, the kernel probes every
+reconciler and runs deterministic self-heal on the unhealthy ones (plans are
+pure diffs, no model involved). Only if something stays unhealthy, or a trigger
+is pending, does it escalate to a small agent running inside the process:
 
-- Calls a local model via Ollama's native `/api/chat` (with `think: false`)
-- Adaptive interval: 5m idle, scales to 30m when assessment urgency is low
-- Panic recovery: a crash in the agent goroutine doesn't take down the kernel
-- State and loop control over MCP (`cog_list_agents`, `cog_get_agent_state`, `cog_trigger_agent_loop`) and REST (`/v1/agents[/...]`). The singular `/v1/agent/{status,traces,trigger}` routes are preserved byte-for-byte for the embedded dashboard.
-
-Six kernel-native tools are available to the agent itself:
-
-| Tool | Description |
-|------|-------------|
-| `memory_search` | Search CogDocs by query |
-| `memory_read` | Read a specific memory document |
-| `memory_write` | Write or update a memory document |
-| `coherence_check` | Run drift detection on the workspace |
-| `bus_emit` | Emit an event to the CogBus |
-| `workspace_status` | Get workspace health and metrics |
+- It calls the local model named by `harness_provider` in config (for example
+  an LM Studio backend).
+- It assesses the situation and picks one of `sleep`, `observe`, `consolidate`,
+  `repair`, `propose`, or `escalate`, then may act using the kernel's own tools
+  (memory search and read/write, URI resolution, coherence check, event emit,
+  file read and grep, state and field queries).
+- A crash in the agent goroutine doesn't take down the kernel.
+- It is controllable over MCP (`cog_list_agents`, `cog_get_agent_state`,
+  `cog_trigger_agent_loop`, `cog_dispatch_to_harness`) and REST
+  (`/v1/agents[/...]`).
 
 ---
 
 ## HTTP API
 
+Inference, MCP, and most write routes require a grant. The kernel mints one at
+first boot and writes it to `~/.cog/vault/node-root-grant` (mode 0600). Send it
+as `X-Cogos-Grant`, `Authorization: Bearer`, or `x-api-key`.
+
 | Endpoint | Description |
 |----------|-------------|
-| `POST /v1/chat/completions` | OpenAI-compatible chat (streaming + non-streaming) |
-| `POST /v1/messages` | Anthropic Messages API proxy (streaming SSE passthrough) |
-| `POST /v1/context/foveated` | Foveated context assembly |
-| `POST /v1/context/build` | Context engine without inference step |
-| `GET /v1/context` | Current attentional field |
-| `GET /v1/ledger` | Read hash-chained ledger; `?verify_chain=true` walks the chain |
-| `GET /v1/traces` | Client metabolites, attention, proprioceptive, internal requests |
-| `GET /v1/proprioceptive` | Legacy byte-compatible trace subset |
-| `GET /v1/kernel-log` | Structured kernel slog tail |
-| `GET /v1/conversation` | Turn history with full prompt/response text |
+| `POST /v1/chat/completions` | OpenAI-compatible chat (streaming and non-streaming) |
+| `POST /v1/messages` | Anthropic Messages proxy (streaming passthrough) |
+| `POST /v1/context/foveated` | Context assembly (the route name predates the current vocabulary) |
+| `GET /v1/context` | Current context state |
+| `GET /v1/reconcile/convergence` | Per-reconciler cycle time, anomalies, quarantine |
+| `GET /v1/reconcile/coherence` | Reconcile-loop coherence summary |
+| `POST /v1/reconcile/{type}/resume` | Lift a quarantine by hand |
+| `GET /v1/ledger` | Read the ledger; `?verify_chain=true` walks the chain |
+| `GET /v1/traces` | Search traces |
+| `GET /v1/proprioceptive` | Legacy trace view, kept byte-compatible for the dashboard |
+| `GET /v1/kernel-log` | Kernel log tail |
+| `GET /v1/vitals` | Node health history |
+| `GET /v1/conversation` | Turn history with full prompt and response text |
 | `GET /v1/tool-calls` | Tool-call records and correlation state |
-| `GET /v1/config` · `PATCH /v1/config` | Read or RFC 7396 merge-patch configuration |
-| `POST /v1/config/rollback` | Roll back to a previous atomic backup |
-| `GET /v1/agents` · `GET /v1/agents/:id/state` · `POST /v1/agents/:id/trigger` | Plural agent control surface |
-| `GET /v1/agent/status` · `GET /v1/agent/traces` · `POST /v1/agent/trigger` | Singular agent routes (preserved for dashboard byte-compat) |
-| `POST /v1/sessions/register` | Register a session on `bus_sessions` (kernel validates id + mints in-memory state) |
-| `POST /v1/sessions/{id}/heartbeat` · `POST /v1/sessions/{id}/end` | Lifecycle (409 on ended-session heartbeat; no side effects on rejection) |
-| `GET /v1/sessions/presence` | Aggregated roster with active-within-window flag (in-memory derived view) |
-| `POST /v1/handoffs/offer` | Mint a handoff offer with kernel-side id; payload validated, TTL enforced |
-| `POST /v1/handoffs/{id}/claim` | Atomic first-wins claim under registry lock; bus append before in-memory commit |
-| `POST /v1/handoffs/{id}/complete` | Complete a claimed handoff; optional `next_handoff_id` links recursive relays |
-| `GET /v1/handoffs` | List handoffs; filter by `state` (open, claimed, complete) and `for_session` |
-| `GET /v1/hud/state` | Claude Code HUD state snapshot (identity, session, context pressure) |
-| `GET /v1/claude-code/projects` · `GET /v1/claude-code/projects/{project}/sessions` · `POST /v1/claude-code/spawn` | ACP-client surface: enumerate Claude Code projects, list sessions in a project, spawn or resume a Claude Code subprocess wired into mod3 via a generated temp `.mcp.json` |
-| `GET /v1/bus/:id/events/stream` | SSE stream of broker events |
-| `GET /health` | Liveness probe (identity, state, trust) |
-| `GET /dashboard` | Embedded web dashboard |
-| `POST /mcp` · `DELETE /mcp` | MCP Streamable HTTP (JSON-RPC 2.0, session lifecycle) |
+| `GET /v1/config` · `PATCH /v1/config` | Read or merge-patch configuration |
+| `POST /v1/config/rollback` | Restore a previous backup |
+| `GET /v1/agents` · `GET /v1/agents/:id/state` · `POST /v1/agents/:id/trigger` | Agent control |
+| `GET /v1/dispatch-jobs/{id}` | Poll a dispatched job |
+| `POST /v1/sessions/register` · `POST /v1/sessions/{id}/heartbeat` · `POST /v1/sessions/{id}/end` | Session lifecycle |
+| `GET /v1/sessions/presence` | Active-session roster |
+| `POST /v1/handoffs/offer` · `POST /v1/handoffs/{id}/claim` · `POST /v1/handoffs/{id}/complete` · `GET /v1/handoffs` | Handoffs between sessions (first claim wins) |
+| `GET /v1/claude-code/projects` · `POST /v1/claude-code/spawn` | List Claude Code projects and sessions; spawn or resume one |
+| `GET /v1/bus/:id/events/stream` | SSE stream of bus events |
+| `GET /health` | Liveness (identity, state, trust); no grant needed |
+| `GET /` | Embedded dashboard |
+| `POST /mcp` · `DELETE /mcp` | MCP Streamable HTTP |
 
-All endpoints serve on port **6931** by default. `--bind <addr>` (or `bind_addr` in YAML) overrides; CORS is strict on loopback and relaxed on non-loopback binds.
+### MCP tools
 
-### MCP tools (54 total)
-
-The always-on MCP server groups tools by surface. The `mcpserver` build tag was removed in #9. MCP ships in every binary.
-
-| Category | Tool | Purpose |
-|----------|------|---------|
-| **Observability** | `cog_read_ledger` | Read hash-chained ledger events (optional chain verify) |
-| | `cog_search_traces` | Query client metabolites + attention + proprioceptive + internal-request traces |
-| | `cog_tail_kernel_log` | Stream the structured kernel slog |
-| | `cog_tail_events` | Tail the live event bus |
-| | `cog_read_events` | Filter event bus records by predicate |
-| **Conversation / tool calls** | `cog_read_conversation` | Read turn sidecars with full prompt/response text |
-| | `cog_read_tool_calls` | Read tool-call records + correlation state |
-| | `cog_tail_tool_calls` | Live stream of tool-call activity |
-| **Agent control** | `cog_list_agents` | Enumerate running agents |
-| | `cog_get_agent_state` | State snapshot for an agent |
-| | `cog_trigger_agent_loop` | Manually trigger an assessment cycle |
-| | `cog_dispatch_to_harness` | Dispatch a prompt directly to the agent harness |
-| **Config** | `cog_read_config` | Read the live config |
-| | `cog_write_config` | RFC 7396 merge-patch (atomic write, rotating backups, `requires_restart=true` in v1) |
-| | `cog_rollback_config` | Restore a prior atomic backup |
-| **Sessions** | `cog_register_session` | Register a session on `bus_sessions` (kernel validates id, mints in-memory state) |
-| | `cog_heartbeat_session` | Emit a heartbeat; rejected with 409 on ended sessions (no side effects) |
-| | `cog_end_session` | Graceful shutdown marker; optional `handoff_id` links the chain |
-| | `cog_list_sessions` | Aggregated roster with active-within-window flag |
-| | `cog_fork_session` | Substrate-native session fork (RFC-0005); vLLM PagedAttention-aware KV hand-off |
-| **Handoffs** | `cog_offer_handoff` | Mint an offer with kernel-side id; payload validated, TTL enforced |
-| | `cog_claim_handoff` | Atomic first-wins claim under registry lock; bus append before in-memory commit |
-| | `cog_complete_handoff` | Complete a claimed handoff; `next_handoff_id` links recursive relays |
-| | `cog_list_handoffs` | List handoffs by `state` (open, claimed, complete) and `for_session` |
-| **Memory** | `cog_search_memory` | Search CogDocs by query |
-| | `cog_read_cogdoc` | Read a memory document |
-| | `cog_write_cogdoc` | Write or update a memory document |
-| | `cog_patch_frontmatter` | Patch frontmatter fields on an existing cogdoc |
-| | `cog_check_coherence` | Drift detection across the workspace |
-| | `cog_memory_toc` | Table of contents for workspace memory |
-| | `cog_memory_index` | Index or re-index workspace memory |
-| **Context and ingestion** | `cog_assemble_context` | Assemble a foveated context window |
-| | `cog_ingest` | Ingest external material (URLs, documents, conversations) |
-| | `cog_query_field` | Query the cogfield graph |
-| | `cog_get_state` | Get the current kernel state snapshot |
-| | `cog_emit_event` | Emit an event to the CogBus |
-| | `cog_read_file` | Read a file from the workspace |
-| | `cog_grep_files` | Grep files in the workspace |
-| | `cog_render_peer_awareness_packet` | Render a peer-awareness context packet |
-| **Conversations Observatory** | `cog_search_conversations` | Full-text search across indexed conversation turns |
-| | `cog_get_conversation_turn` | Retrieve a specific turn from a conversation |
-| | `cog_list_conversations` | List indexed conversation sessions |
-| **Eval / experiments** | `cog_run_experiment` | Run a registered evaluation experiment |
-| | `cog_list_experiments` | List available experiments |
-| | `cog_get_experiment_status` | Get the status of a running experiment |
-| | `cog_pin_baseline` | Pin the current workspace state as a baseline for future comparison |
-| **Voice (Mod3 bridge)** | `mod3_speak` · `mod3_stop` · `mod3_voices` · `mod3_status` | TTS and voice channel control |
-| | `mod3_tail_logs` | Tail chat-flow events from the mod3 ring buffer |
-| | `mod3_register_session` · `mod3_deregister_session` · `mod3_list_sessions` | Mod3 channel session management |
-
-Sessions are created on `initialize` and expire after 30 minutes of inactivity.
+| Group | Tools |
+|-------|-------|
+| **Observability** | `cog_read_ledger`, `cog_search_traces`, `cog_tail_kernel_log`, `cog_tail_events`, `cog_read_events`, `cog_vitals_window` |
+| **Conversations and tool calls** | `cog_read_conversation`, `cog_read_tool_calls`, `cog_tail_tool_calls`, `cog_search_conversations`, `cog_get_conversation_turn`, `cog_list_conversations` |
+| **Agents and dispatch** | `cog_list_agents`, `cog_get_agent_state`, `cog_trigger_agent_loop`, `cog_dispatch_to_harness`, `cog_poll_dispatch` |
+| **Config** | `cog_read_config`, `cog_write_config`, `cog_rollback_config` |
+| **Sessions and handoffs** | `cog_register_session`, `cog_heartbeat_session`, `cog_end_session`, `cog_list_sessions`, `cog_fork_session`, `cog_offer_handoff`, `cog_claim_handoff`, `cog_complete_handoff`, `cog_list_handoffs` |
+| **Memory** | `cog_search_memory`, `cog_read_cogdoc`, `cog_write_cogdoc`, `cog_patch_frontmatter`, `cog_check_coherence`, `cog_memory_toc`, `cog_memory_index`, `cog_resolve_uri` |
+| **Architecture docs** (decision records, found by name) | `cog_architecture_search`, `cog_architecture_list`, `cog_architecture_read`, `cog_architecture_resolve`, `cog_architecture_propose`, `cog_architecture_write`, `cog_architecture_audit`, `cog_architecture_project` |
+| **Context and workspace** | `cog_assemble_context`, `cog_ingest`, `cog_query_field`, `cog_get_state`, `cog_emit_event`, `cog_read_file`, `cog_grep_files`, `cog_render_peer_awareness_packet` |
+| **Experiments** | `cog_run_experiment`, `cog_list_experiments`, `cog_get_experiment_status`, `cog_pin_baseline` |
+| **Catalog** | `cog_tool_search`, `cog_tool_invoke` |
+| **Voice (Mod³ bridge)** | `mod3_speak`, `mod3_stop`, `mod3_voices`, `mod3_status`, `mod3_tail_logs`, `mod3_register_session`, `mod3_deregister_session`, `mod3_list_sessions` |
 
 ### Providers
 
-Ships with adapters for Anthropic, Ollama, Claude Code, Codex, and vLLM (PagedAttention scaffolding). New providers implement [six methods](docs/writing-a-provider.md). Providers support `default_options` in config for per-provider request shaping (e.g. foveal vs peripheral inference profiles).
+Adapters for OpenAI-compatible servers (LM Studio and others), a supervised MLX
+server, Anthropic, Claude via local OAuth, Claude Code, Codex, and pi, plus
+vLLM scaffolding. New providers implement
+[a small interface](docs/writing-a-provider.md); `default_options` in config
+shapes requests per provider.
 
 ---
 
 ## CLI
 
-`cog` wraps the daemon with subcommands for the common lifecycle plus the event bus:
-
 ```sh
-cog serve               # Start the daemon (--bind <addr> to expose beyond loopback)
-cog claude              # Launch Claude Code with ANTHROPIC_BASE_URL set to the kernel
-cog emit ...            # Write an event through the engine (no more silent drops)
-cog bus watch|tail|list # Read the event bus
-cog bus send ...        # Write to the bus. Direct JSONL by default; --http for SSE broadcast
+cogos init --workspace ~/my-project   # create the .cog/ overlay
+cogos serve                            # run the daemon in the foreground
+cogos start | stop | restart | status  # manage the background daemon
+cogos health | doctor                  # liveness, and a full diagnostic
+cogos reconcile <type> [--dry-run]     # run or preview one reconciler
+cogos self-update                      # update from GitHub releases
+cogos emit ...                         # write an event through the kernel
+cogos logs | version | mcp | agents    # and more: cogos help
 ```
 
-`cog emit` was migrated to the engine in #23 (Track 5 Phase 1): the root `cmdEmit` is retained for compat but the engine path fixes the silent-drop bug where hooks returned success without writing to the ledger.
+`scripts/cog` is a thin wrapper that finds the workspace from your current
+directory and forwards to `cogos`.
 
 ---
 
@@ -363,7 +496,8 @@ cog bus send ...        # Write to the bus. Direct JSONL by default; --http for 
 ### Requirements
 
 - Go 1.25+
-- macOS, Linux, or Windows
+- macOS or Linux. Windows binaries build and run, but Windows is not a
+  supported daemon target (no FTS5 search in that build).
 
 ### Build and run
 
@@ -372,81 +506,69 @@ git clone https://github.com/myrgic/cogos.git
 cd cogos
 make build
 
-# Initialize a workspace
 ./cogos init --workspace ~/my-project
-
-# Start the daemon
 ./cogos serve --workspace ~/my-project
 
-# Verify it's running
 curl -s http://localhost:6931/health | jq .
 ```
 
 ### Cross-compile
 
 ```sh
-make build-linux-amd64
-make build-linux-arm64    # Unblocked in #31 (syscall.Dup2 -> unix.Dup2)
-make build-darwin-arm64
-make build-windows-amd64  # Added in #15; see docs for install steps
+make linux-amd64
+make linux-arm64
+make darwin-arm64
+make darwin-amd64
+make windows-amd64
 ```
 
-### Route Claude Code through the kernel
+### Route Anthropic-API clients through the kernel
 
 ```sh
-cog claude
-# Sets ANTHROPIC_BASE_URL to http://localhost:6931 and starts Claude Code
+export ANTHROPIC_BASE_URL=http://localhost:6931
+export ANTHROPIC_API_KEY="$(cat ~/.cog/vault/node-root-grant)"
+claude
 ```
 
 ### Developer setup
 
 ```sh
-./scripts/setup-dev.sh    # Build, install to ~/.cog/bin, configure PATH
+./scripts/setup-dev.sh    # build, install to ~/.cog/bin, configure PATH
+make hooks                # install the repo's git hooks
 ```
 
 ### Docker
 
 ```sh
-make image        # Build production image
-make run          # Run with workspace volume mount
-make e2e          # Build + run full cold-start test in a container
+make image        # build the production image
+make run          # run with a workspace volume mount
+make e2e          # build and run the full cold-start test in a container
 ```
-
-A Docker Compose topology with `bridge-{primary,secondary}` and `tailscale-{primary,secondary}` siblings landed in #19.
 
 ---
 
 ## Logs and troubleshooting
 
-The kernel writes structured logs (JSON, one record per line) to:
-
-```
-<workspace>/.cog/run/kernel.log.jsonl
-```
-
-Quick tail:
+The kernel writes structured logs (JSON, one record per line) to
+`<workspace>/.cog/run/kernel.log.jsonl`:
 
 ```sh
-# Unix
 tail -f /your/workspace/.cog/run/kernel.log.jsonl | jq -c .
-
-# Windows (PowerShell)
-Get-Content "$HOME\my-project\.cog\run\kernel.log.jsonl" -Wait | ForEach-Object { $_ | ConvertFrom-Json }
 ```
 
-The same log is exposed over MCP (`cog_tail_kernel_log`) and HTTP (`GET /v1/kernel-log`) so any connected tool can read it without touching the file directly.
+The same log is available over MCP (`cog_tail_kernel_log`) and HTTP
+(`GET /v1/kernel-log`). `cogos doctor` checks build tags, providers, endpoints,
+and credentials in one pass.
 
 ---
 
 ## Testing
 
 ```sh
-make test         # Unit tests (with -race)
-make e2e-local    # Full cold-start lifecycle test
-make e2e          # Containerized e2e (Docker)
+make test         # unit tests (with -race)
+make e2e-local    # full cold-start lifecycle test
+make e2e          # containerized e2e (Docker)
 ```
-
-Ledger and sync-watcher tests are stable under `-count>=2` (#30).
 
 ---
 
@@ -454,96 +576,85 @@ Ledger and sync-watcher tests are stable under `-count>=2` (#30).
 
 ```
 cmd/cogos/              Entry point (thin; delegates to internal/engine)
-internal/engine/        Kernel sources and tests
+internal/engine/        Kernel: API, context assembly, reconcile daemon, agent
+internal/providers/     Reconcilers (site, self-update, pin, vitals, ...)
+internal/conversations/ Conversation archive and its reconciler
 pkg/                    Importable library packages (go.work multi-module)
-  cogblock/             Content-addressed blocks and ledger
-  coordination/         Agent coordination primitives
-  bep/                  BEP wire protocol types
-  reconcile/            Reconciliation framework
-  modality/             Modality bus and channel types
-  cogfield/             Field graph types
-  uri/                  URI parsing and namespaces
-  substrate/            Umbrella re-export module (ADR-100)
 sdk/                    Go SDK for CogOS clients
-docs/                   Specs, architecture docs, provider guide
-scripts/                Setup, CLI wrapper, e2e tests, experiment harnesses
+docs/                   Specs, design records, provider guide
+scripts/                Setup, CLI wrapper, e2e tests
 ```
 
 ---
 
 ## Status
 
-**v3 kernel.** Ground-up rewrite after a year of daily use across Claude Code, Cursor, and custom agent harnesses.
+**v3 kernel**, in daily use on the author's machines across Claude Code, Codex,
+Hermes, and voice.
 
 ### Working
 
-- Continuous process daemon with four-state FSM
-- Foveated context assembly with a ~2.3M-parameter Mamba SSM context retrieval model
-- Hash-chained append-only ledger with optional chain verification
-- Three-lane observability: ledger, traces, kernel slog
-- Live event bus with in-process broker and SSE streaming
-- Conversation persistence (turn sidecars + ledger `turn.completed` events)
-- Tool-call observability with pending-call correlation cache (1024 / 10min)
-- Config mutation API (MCP + REST, merge-patch, atomic write, rollback)
-- Agent state and loop control over MCP and REST (singular routes preserved)
-- Multi-provider routing (Ollama, Anthropic, Claude Code, Codex)
-- Always-on MCP Streamable HTTP server (54 tools, sessions, JSON-RPC 2.0)
-- Kernel-native session management with atomic handoff claim (bus-level first-wins via append-before-apply; seq-sorted replay on startup)
-- Anthropic Messages API proxy with streaming SSE
-- Native Go agent harness with adaptive interval and 6 kernel tools
-- Embedded web dashboard with agent status, cycle history, and decomposition panel
-- Library extraction: 8 packages in pkg/ (ADR-100; pkg/substrate added)
-- Content-addressed blob store
-- Git-derived salience scoring
-- Tool-call hallucination gate (activated by `NormalizeMCPRequest` path in #25)
-- Digestion pipeline (Claude Code + OpenClaw adapters) wired into the process loop
-- Memory consolidation
-- OpenAI and Anthropic API compatibility
-- `cog bus send` subcommand for write-side symmetry (direct JSONL or opt-in SSE)
-- `--bind` flag with non-loopback CORS relaxation
-- Windows cross-compile (`make build-windows-amd64`) and linux/arm64
-- End-to-end test suite
+- Reconcile daemon with backoff, quarantine, anomaly episodes, and a
+  convergence endpoint; the reconcilers listed at the top of this file
+- Self-update from GitHub releases, driven by its own reconciler
+- Continuous process loop with four states
+- Context assembly on every prompt
+- Hash-chained ledger with chain verification
+- Three observability lanes plus a live event bus
+- Conversation persistence and a searchable conversation archive
+- Multi-provider inference routing with local-first preference
+- MCP Streamable HTTP server, with a searchable tool catalog
+- Sessions and handoffs with atomic claims
+- Anthropic Messages proxy
+- In-process maintenance agent, escalated to only when something is unhealthy
+- Grant-based auth on inference and MCP routes
+- Embedded dashboard
 - OpenTelemetry instrumentation
-- Port consolidation on 6931
+- End-to-end test suite
 
 ### Next
 
-- Direct import of the `myrgic/constellation` L1 trust-node protocol via the `ConstellationBridge` seam (the kernel already embeds `sdk/constellation/` for the Constellation memory graph of cogdocs; the external L1 peer protocol is the piece not yet wired)
-- Multi-agent process management (the agent controller API is forward-compatible; only the `primary` instance is registered today)
-- Further agent state surface (beyond the v1 trigger/state/list)
+- Leases, so experiments can borrow a managed resource without editing config
+- Wiring the `myrgic/constellation` trust protocol through the kernel's
+  `ConstellationBridge` seam (the seam exists; the external peer protocol is not
+  yet connected)
+- Multi-agent process management (the controller API is ready; only the
+  `primary` agent is registered today)
+- A human-readable view and revert over the ledger
 
 ---
 
 ## Ecosystem
 
-CogOS is one piece of a larger system. Each component is its own repo with independent releases:
-
 | Repo | Purpose | Status |
 |------|---------|--------|
 | **[cogos](https://github.com/myrgic/cogos)** | The daemon (this repo) | Active |
-| [constellation](https://github.com/myrgic/constellation) | L1 trust-node protocol for the Constellation substrate. Git-backed hash-chained ledger, ECDSA P-256 identity, EMA-weighted peer trust. Consumed via the kernel's `ConstellationBridge` seam. | Active |
-| [mod3](https://github.com/myrgic/mod3) | Modality bus: voice I/O, TTS, channel multiplexing | Active |
-| [plugins](https://github.com/myrgic/plugins) | Agent skill and plugin library (Claude Code compatible) | Active |
+| [constellation](https://github.com/myrgic/constellation) | Trust protocol between nodes: git-backed hash-chained ledger, ECDSA P-256 identity, signed heartbeats | Active |
+| [mod3](https://github.com/myrgic/mod3) | Voice for agents: speech in and out, multiple TTS engines, turn-taking | Active |
+| [plugins](https://github.com/myrgic/plugins) | Agent skills and plugins (Claude Code compatible) | Active |
 | [charts](https://github.com/myrgic/charts) | Helm charts and Docker Compose for deployment | Active |
 
 ---
 
 ## Releases & Changelog
 
-Per-release summaries: the [Releases page](https://github.com/myrgic/cogos/releases) (auto-generated from PR titles since the previous tag). See [CHANGELOG.md](CHANGELOG.md) for the policy and the historical entries (pre-v0.4.0).
+Per-release summaries are on the [Releases page](https://github.com/myrgic/cogos/releases),
+generated from PR titles. [CHANGELOG.md](CHANGELOG.md) holds the policy and
+entries before v0.4.0.
 
 ---
 
 ## Design documents
 
-- [System Specification](docs/SYSTEM-SPEC.md): Multi-level spec from ontology to deployment
-- [Architectural Principles](docs/architecture/principles.md): Core engineering constraints
-- [Writing a Provider](docs/writing-a-provider.md): How to add a new inference provider
-- [MCP Specification](docs/MCP-SPEC.md): MCP server contract
-- [Provider Specification](docs/PROVIDER-SPEC.md): Provider interface contract
-- [Architecture Diagrams](docs/architecture-diagram-source.md): Kernel layer diagrams, topology views
-- [Cognitive GitOps](docs/architecture/cognitive-gitops.md): Substrate-coordinated repo model
-- [E2E Test Plan](docs/E2E-TEST-PLAN.md): End-to-end test strategy
+- [System Specification](docs/SYSTEM-SPEC.md): the whole system, from concepts to deployment
+- [Architectural Principles](docs/architecture/principles.md): core engineering constraints
+- [Design records](docs/adrs/): one file per decision, found by name
+- [Writing a Provider](docs/writing-a-provider.md): adding an inference provider
+- [MCP Specification](docs/MCP-SPEC.md): the MCP server contract
+- [Provider Specification](docs/PROVIDER-SPEC.md): the provider interface
+- [Architecture Diagrams](docs/architecture-diagram-source.md): kernel layers and topology
+- [Cognitive GitOps](docs/architecture/cognitive-gitops.md): how repos coordinate through the workspace
+- [E2E Test Plan](docs/E2E-TEST-PLAN.md): end-to-end test strategy
 
 ---
 
