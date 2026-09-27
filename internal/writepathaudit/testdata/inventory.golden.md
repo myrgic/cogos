@@ -324,7 +324,7 @@ Total subprocess sites: 79
 | _(not set — inherits the process's own working directory)_ | `exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH")` | internal/engine/daemon_stop_windows.go:77 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "python3", cmdArgs...)` | internal/engine/mcp_architecture.go:156 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command(player, args...)` | internal/engine/mcp_modality_proxy.go:879 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, rgPath, args...)` | internal/engine/mcp_server.go:3264 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, rgPath, args...)` | internal/engine/mcp_server.go:3268 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command(cogScript, "memory", "search", query)` | internal/engine/memory.go:21 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port))` | internal/engine/node_cmd.go:132 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("ps", "-o", "etime=", "-p", pid)` | internal/engine/node_cmd.go:144 | internal:engine |

@@ -5,6 +5,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -524,8 +525,8 @@ func TestStartAsyncDispatch_ReceiptAndLedgerCarryNonEmptyCycleID(t *testing.T) {
 // elapses (test failure on timeout). Use this after waitForTerminalJob when a
 // test also needs to observe (or simply outlive) a ledger write that a
 // background goroutine performs strictly after the registry reaches a
-// terminal state — see startAsyncDispatch's Complete/Fail-then-EmitLedgerEvent
-// ordering.
+// terminal state. startAsyncDispatch now emits BEFORE the terminal
+// transition, so after waitForTerminalJob this returns on its first read.
 func waitForLedgerEvent(t *testing.T, workspaceRoot, eventType, jobID string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -579,6 +580,23 @@ func TestQueryDispatchToHarness_SyncPathUnaffectedByAsyncField(t *testing.T) {
 // soon as the test function returns, and a still-running goroutine writing
 // to the workspace's .cog/ledger/ races that cleanup (see the comment in
 // TestToolDispatchToHarness_AsyncReturnsImmediateJobHandle).
+// ledgerHasEvent reports whether the ledger already holds an event of the
+// given type for jobID (one read, no waiting).
+func ledgerHasEvent(t *testing.T, workspaceRoot, eventType, jobID string) bool {
+	t.Helper()
+	res, err := QueryLedger(workspaceRoot, LedgerQuery{EventType: eventType, Limit: 20})
+	if err != nil {
+		return false
+	}
+	for _, ev := range res.Events {
+		payload, _ := ev.Data["payload"].(map[string]any)
+		if id, _ := payload["job_id"].(string); id == jobID {
+			return true
+		}
+	}
+	return false
+}
+
 func waitForTerminalJob(t *testing.T, server *MCPServer, jobID string) dispatchJobStatusResponse {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -608,6 +626,7 @@ type blockingDispatcher struct {
 	fakeAgentController
 	release chan struct{}
 	canned  *DispatchBatchResult
+	err     error // returned instead of canned when set
 }
 
 func (b *blockingDispatcher) DispatchToHarness(ctx context.Context, req DispatchRequest) (*DispatchBatchResult, error) {
@@ -615,6 +634,9 @@ func (b *blockingDispatcher) DispatchToHarness(ctx context.Context, req Dispatch
 	case <-b.release:
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+	if b.err != nil {
+		return nil, b.err
 	}
 	return b.canned, nil
 }
@@ -842,5 +864,43 @@ func TestDispatchJobRegistry_FailWithResultKeepsBatch(t *testing.T) {
 	again, _ := reg.Get(jobID)
 	if again.Result.Results[0].Content != "kept" {
 		t.Error("Get() returned an aliased batch — mutating the caller's copy corrupted the registry")
+	}
+}
+
+// Ordering contract: by the time a job is observable as terminal, its
+// job.completed ledger event is already written, and the background
+// goroutine does no further workspace I/O. The reverse order raced
+// t.TempDir cleanup ("unlinkat ...: directory not empty") and let a poller
+// see "done" before the ledger said so.
+func TestStartAsyncDispatch_LedgerEventWrittenBeforeTerminal(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		canned *DispatchBatchResult
+		err    error
+	}{
+		{"done", &DispatchBatchResult{Results: []DispatchResult{{Index: 0, Success: true, Content: "ok"}}}, nil},
+		{"failed slot", &DispatchBatchResult{Results: []DispatchResult{{Index: 0, Success: false, Error: "timeout"}}}, nil},
+		{"hard error", nil, errors.New("boom")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := makeWorkspace(t)
+			cfg := makeConfig(t, root)
+			process := NewProcess(cfg, makeNucleus("Cog", "tester"))
+			block := make(chan struct{})
+			disp := &blockingDispatcher{release: block, canned: tc.canned, err: tc.err}
+			server := NewMCPServerWithAgentController(cfg, makeNucleus("Cog", "tester"), process, disp)
+			result, _, err := server.toolDispatchToHarness(context.Background(), nil, dispatchToHarnessInput{Task: "t", Async: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var receipt dispatchJobReceipt
+			decodeMCPJSONForAgentTests(t, result, &receipt)
+			close(block)
+			waitForTerminalJob(t, server, receipt.JobID)
+			if !ledgerHasEvent(t, root, "harness.dispatch.job.completed", receipt.JobID) {
+				t.Fatal("job is terminal but its job.completed ledger event is not written yet")
+			}
+		})
 	}
 }

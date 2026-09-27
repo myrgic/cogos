@@ -3174,7 +3174,7 @@
     },
     {
       "file": "internal/engine/mcp_server.go",
-      "line": 3264,
+      "line": 3268,
       "column": 10,
       "func": "(*MCPServer).toolGrepFiles",
       "subsystem": "internal:engine",
