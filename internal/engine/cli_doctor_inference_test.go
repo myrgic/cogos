@@ -588,7 +588,7 @@ func TestCollectCodexTOMLTargets_Fixture(t *testing.T) {
 // regression guard for the false-positive doctor FAIL that blocked the
 // pre-push hook on this branch.
 //
-// Observed on Darkstar before the fix:
+// Observed on the author's node before the fix:
 //
 //	[FAIL] external client: ~/.codex/config.toml ([mcp_servers.cogos-v3])
 //	       kernel auth: HTTP 401 (missing_grant), credential(s) sent:
@@ -767,7 +767,7 @@ func TestDoctorProviderEndpoints_SendsAPIKeyEnv(t *testing.T) {
 	t.Setenv("DOCTOR_TEST_LMS_KEY", "sekrit")
 	root := t.TempDir()
 	// Base declares the provider; the LOCAL overlay carries api_key_env — the
-	// shape darkstar actually uses. The overlay merge must carry the field.
+	// shape a real node config uses. The overlay merge must carry the field.
 	writeProvidersYAMLRaw(t, root, "providers:\n  lms:\n    type: openai\n    endpoint: "+srv.URL+"\n    model: m1\n")
 	if err := os.WriteFile(filepath.Join(root, ".cog", "config", "providers.local.yaml"), []byte("providers:\n  lms:\n    api_key_env: DOCTOR_TEST_LMS_KEY\n"), 0644); err != nil {
 		t.Fatal(err)

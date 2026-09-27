@@ -46,7 +46,7 @@ const defaultLocalPiProvider = "lmstudio"
 
 // defaultLocalModel is the model used when a PiProvider config does not specify
 // one. The resident local model is google/gemma-4-26b-a4b via LM Studio
-// (lmstudio-darkstar), consistent with defaults/providers.yaml (PR #417).
+// (lmstudio-local), consistent with defaults/providers.yaml (PR #417).
 const defaultLocalModel = "google/gemma-4-26b-a4b"
 
 // PiProvider implements Provider by spawning pi CLI processes.

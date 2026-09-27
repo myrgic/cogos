@@ -7,7 +7,7 @@
 #
 # It does NOT model claude's actual protocol semantics or session-resume
 # behavior — that is exactly the question this fake cannot answer. See
-# cancellation_test.go's *_LiveClaude tests (skipped pending the Darkstar
+# cancellation_test.go's *_LiveClaude tests (skipped pending the author's
 # OAuth fix — see testdata/README.md) for the real question: does claude
 # itself leave a resumable session after SIGINT / stdin-close?
 

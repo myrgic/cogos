@@ -128,11 +128,11 @@ func TestQueryDispatchToHarness_ConfiguredCapHonored(t *testing.T) {
 // the caller's intent right here, before routing ever saw it.
 func TestQueryDispatchToHarness_ExplicitModelPreservedAsRequestedModel(t *testing.T) {
 	disp := &fakeAgentDispatcher{cannedOk: true}
-	req := DispatchRequest{Task: "x", Model: DispatchModel("ornith-1.0-35b")}
+	req := DispatchRequest{Task: "x", Model: DispatchModel("example-35b")}
 	if _, err := QueryDispatchToHarness(context.Background(), disp, req); err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	if got := disp.lastReq.RequestedModel; got != "ornith-1.0-35b" {
+	if got := disp.lastReq.RequestedModel; got != "example-35b" {
 		t.Errorf("explicit model not preserved in RequestedModel, got %q", got)
 	}
 }

@@ -612,7 +612,7 @@ func TestBinarySprawlIgnoresNonExecutableAndUnrelatedFiles(t *testing.T) {
 func TestPathLikeRegexIgnoresURLsAndModelIDs(t *testing.T) {
 	notPaths := []string{
 		"https://api.anthropic.com/v1",
-		"lmstudio-eclipse/google/gemma-4-e4b",
+		"lmstudio-remote/google/gemma-4-e4b",
 		"/v1/synthesize",
 		"nikolaik/python-nodejs:python3.11-nodejs20",
 	}
@@ -1182,7 +1182,7 @@ func TestDuplicateToolsetRegistrationsAcrossScopes(t *testing.T) {
 	writeFile(t, filepath.Join(home, ".claude.json"), `{
 		"mcpServers": {"browseros": {"type": "http", "url": "http://127.0.0.1:9000/mcp"}}
 	}`)
-	writeFile(t, filepath.Join(home, ".hermes", "profiles", "darkstar", "config.yaml"), `
+	writeFile(t, filepath.Join(home, ".hermes", "profiles", "node", "config.yaml"), `
 mcp_servers:
   browseros:
     url: http://127.0.0.1:9000/mcp

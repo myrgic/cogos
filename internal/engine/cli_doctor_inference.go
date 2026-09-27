@@ -883,7 +883,7 @@ func codexTargetName(source string) string {
 
 // collectHermesProfileTargets reads every ~/.hermes/profiles/*/config.yaml
 // for a top-level providers.cogos entry (base_url + api_key), per #631's
-// scope. Sibling provider entries (darkstar-lms, eclipse-lms, etc.) are out
+// scope. Sibling provider entries (local-lms, remote-lms, etc.) are out
 // of scope for this check — it targets client->kernel auth specifically.
 func collectHermesProfileTargets(home string) []externalClientTarget {
 	pattern := filepath.Join(home, ".hermes", "profiles", "*", "config.yaml")

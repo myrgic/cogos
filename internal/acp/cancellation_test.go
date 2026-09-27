@@ -23,7 +23,7 @@ import (
 //
 //   - *_LiveClaude: the real questions — does SIGINT (or stdin-close)
 //     leave claude's own session file in a state `claude --resume` can
-//     continue from? These are currently SKIPPED: Darkstar's `claude` CLI
+//     continue from? These are currently SKIPPED: the author's installed `claude` CLI
 //     is hitting "OAuth session expired and could not be refreshed" on
 //     every invocation as of 2026-08-28 (see testdata/README.md). Remove
 //     the t.Skip once that is fixed; the bodies are complete and ready to

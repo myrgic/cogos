@@ -298,8 +298,8 @@ node-config change (`harnesses.yaml`), not a runtime MCP mutation.
 ### 5.1 RFC-0007 (dispatch provider override)
 
 Provider selection and harness selection are orthogonal axes that compose:
-`harness=hermes, provider=lmstudio-darkstar` means "run the Hermes CLI
-adapter, and inside it Hermes talks to the lmstudio-darkstar provider."
+`harness=hermes, provider=lmstudio-local` means "run the Hermes CLI
+adapter, and inside it Hermes talks to the lmstudio-local provider."
 `harness` (this RFC) picks the controller; `provider` (RFC-0007) picks what
 that controller's own inference call resolves to. Neither field implies a
 value for the other; `LocalHarnessController`'s 4-path provider resolution

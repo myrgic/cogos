@@ -190,7 +190,7 @@ func TestAnthropicCompleteFallsBackToConfiguredMaxTokens(t *testing.T) {
 	}
 }
 
-// ── ClaudeOAuthProvider (OAuth bearer path — the live Darkstar seat) ──────────
+// ── ClaudeOAuthProvider (OAuth bearer path — the common interactive seat) ──────────
 
 // newSentinelOAuthProvider builds an OAuth provider whose CONFIGURED budget is
 // secondSentinelMaxTokens, so a test asserting sentinelMaxTokens on the wire
@@ -228,7 +228,7 @@ func TestClaudeOAuthCompleteSendsRequestMaxTokens(t *testing.T) {
 		t.Fatalf("Complete: %v", err)
 	}
 	if got != sentinelMaxTokens {
-		t.Errorf("wire max_tokens = %d; want %d (request budget dropped on the OAuth Complete path — this is the live Darkstar seat)",
+		t.Errorf("wire max_tokens = %d; want %d (request budget dropped on the OAuth Complete path — this is the common interactive seat)",
 			got, sentinelMaxTokens)
 	}
 }

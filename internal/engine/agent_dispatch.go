@@ -5,7 +5,7 @@
 // The cog_dispatch_to_harness MCP tool surfaces this transport. It is the
 // foveal -> peripheral handoff: a big external Claude session can offload a
 // piece of cognitive work (validation, rewriting, modality matching) onto the
-// resident LM Studio instance (lmstudio-darkstar, gemma-4-26b at 127.0.0.1:1234)
+// resident LM Studio instance (lmstudio-local, gemma-4-26b at 127.0.0.1:1234)
 // without burning Anthropic tokens.
 //
 // This file owns the *contract* — the request and result types and the
@@ -25,17 +25,17 @@ import "context"
 
 // DispatchModel selects the inference backend. "e4b" and "26b" are legacy
 // enum values retained for backward compatibility; both now route to the
-// LM Studio provider (lmstudio-darkstar, 127.0.0.1:1234). The preferred
-// path is to set DispatchRequest.Provider = "lmstudio-darkstar" explicitly.
+// LM Studio provider (lmstudio-local, 127.0.0.1:1234). The preferred
+// path is to set DispatchRequest.Provider = "lmstudio-local" explicitly.
 // Empty string routes through process-state or harness_provider config, which
-// should also resolve to lmstudio-darkstar on this node.
+// should also resolve to lmstudio-local on this node.
 type DispatchModel string
 
 const (
 	// DispatchModelE4B is retained for backward compatibility. Ollama has been
 	// decommissioned; dispatches using this value route through the legacy
 	// local-LLM probe which resolves to the LM Studio provider when Ollama is
-	// absent. Prefer Provider="lmstudio-darkstar" for new callers.
+	// absent. Prefer Provider="lmstudio-local" for new callers.
 	DispatchModelE4B DispatchModel = "e4b"
 	DispatchModel26B DispatchModel = "26b"
 )

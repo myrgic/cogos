@@ -83,7 +83,7 @@ func TestHandleModels_CompositeAndBare(t *testing.T) {
 	t.Parallel()
 
 	// OpenAI-compat local lister serving two ids → composite "<name>/<id>".
-	openai := newListerStub("lmstudio-darkstar", true, "gemma-4-26b", "qwen-3-14b")
+	openai := newListerStub("lmstudio-local", true, "gemma-4-26b", "qwen-3-14b")
 	// Frontier lister (claude-oauth) → bare claude ids.
 	claude := newListerStub("claude-oauth", false, "claude-opus-4-8", "claude-haiku-4-5-20251001")
 	// A non-lister local provider — contributes only via alias/static paths.
@@ -99,14 +99,14 @@ func TestHandleModels_CompositeAndBare(t *testing.T) {
 	byID := modelIDSet(resp)
 
 	// Composite ids for the OpenAI-compat lister.
-	for _, want := range []string{"lmstudio-darkstar/gemma-4-26b", "lmstudio-darkstar/qwen-3-14b"} {
+	for _, want := range []string{"lmstudio-local/gemma-4-26b", "lmstudio-local/qwen-3-14b"} {
 		m, ok := byID[want]
 		if !ok {
 			t.Errorf("composite id %q missing; got ids %v", want, modelIDKeys(byID))
 			continue
 		}
-		if m.OwnedBy != "cogos:lmstudio-darkstar" {
-			t.Errorf("%q owned_by = %q; want cogos:lmstudio-darkstar", want, m.OwnedBy)
+		if m.OwnedBy != "cogos:lmstudio-local" {
+			t.Errorf("%q owned_by = %q; want cogos:lmstudio-local", want, m.OwnedBy)
 		}
 		if !IsKnownModel(router, want) {
 			t.Errorf("ADMISSION PARITY: advertised %q but IsKnownModel=false", want)
@@ -186,11 +186,11 @@ func TestHandleModels_FrontierNonClaudeIDFallsToComposite(t *testing.T) {
 func TestHandleModels_ListerErrorSkipped(t *testing.T) {
 	t.Parallel()
 
-	good := newListerStub("lmstudio-darkstar", true, "gemma-4-26b")
-	bad := newListerStub("lmstudio-eclipse", true, "ornith-1.0-35b")
+	good := newListerStub("lmstudio-local", true, "gemma-4-26b")
+	bad := newListerStub("lmstudio-remote", true, "example-35b")
 	bad.listErr = errors.New("boom: upstream 401")
 
-	router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-darkstar"})
+	router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-local"})
 	router.RegisterProvider(good)
 	router.RegisterProvider(bad)
 
@@ -198,10 +198,10 @@ func TestHandleModels_ListerErrorSkipped(t *testing.T) {
 	resp := fetchModels(t, srv) // fetchModels already asserts 200
 	byID := modelIDSet(resp)
 
-	if _, ok := byID["lmstudio-darkstar/gemma-4-26b"]; !ok {
+	if _, ok := byID["lmstudio-local/gemma-4-26b"]; !ok {
 		t.Errorf("healthy provider's id missing after peer error; got %v", modelIDKeys(byID))
 	}
-	if _, ok := byID["lmstudio-eclipse/ornith-1.0-35b"]; ok {
+	if _, ok := byID["lmstudio-remote/example-35b"]; ok {
 		t.Error("errored provider's id should have been skipped")
 	}
 	if bad.calls == 0 {
@@ -214,15 +214,15 @@ func TestHandleModels_ListerErrorSkipped(t *testing.T) {
 func TestHandleModels_EmbeddingTagged(t *testing.T) {
 	t.Parallel()
 
-	openai := newListerStub("lmstudio-darkstar", true, "text-embedding-nomic", "gemma-4-26b")
-	router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-darkstar"})
+	openai := newListerStub("lmstudio-local", true, "text-embedding-nomic", "gemma-4-26b")
+	router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-local"})
 	router.RegisterProvider(openai)
 
 	srv := freshModelsServer(t, router)
 	resp := fetchModels(t, srv)
 	byID := modelIDSet(resp)
 
-	emb, ok := byID["lmstudio-darkstar/text-embedding-nomic"]
+	emb, ok := byID["lmstudio-local/text-embedding-nomic"]
 	if !ok {
 		t.Fatalf("embedding id missing; got %v", modelIDKeys(byID))
 	}
@@ -230,7 +230,7 @@ func TestHandleModels_EmbeddingTagged(t *testing.T) {
 		t.Errorf("embedding id description = %q; want %q", emb.Description, "embedding")
 	}
 	// Non-embedding id must NOT be tagged.
-	chat, ok := byID["lmstudio-darkstar/gemma-4-26b"]
+	chat, ok := byID["lmstudio-local/gemma-4-26b"]
 	if !ok {
 		t.Fatalf("chat id missing; got %v", modelIDKeys(byID))
 	}
@@ -406,7 +406,7 @@ func compatModelIDs(ms []compatModel) map[string]bool {
 func TestComposeModelsList_CancelledCallerDoesNotPoisonCache(t *testing.T) {
 	// No t.Parallel: reasons about the per-router package cache entry. The entry
 	// is keyed by this router alone, so it does not race other tests.
-	lister := newListerStub("lmstudio-darkstar", true, "gemma-4-26b", "qwen-3-14b")
+	lister := newListerStub("lmstudio-local", true, "gemma-4-26b", "qwen-3-14b")
 	frontier := newListerStub("claude-oauth", false, "claude-opus-4-8")
 
 	router := NewSimpleRouter(RoutingConfig{Default: "claude-oauth"})
@@ -418,14 +418,14 @@ func TestComposeModelsList_CancelledCallerDoesNotPoisonCache(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	first := compatModelIDs(composeModelsList(cancelled, router))
-	if first["lmstudio-darkstar/gemma-4-26b"] {
+	if first["lmstudio-local/gemma-4-26b"] {
 		t.Fatalf("precondition failed: cancelled-caller probe should have been skipped; got %v", first)
 	}
 
 	// Second call under a healthy context: because the cancelled build was NOT
 	// cached, this must rebuild cleanly and surface the healthy lister's models.
 	second := compatModelIDs(composeModelsList(context.Background(), router))
-	for _, want := range []string{"lmstudio-darkstar/gemma-4-26b", "lmstudio-darkstar/qwen-3-14b"} {
+	for _, want := range []string{"lmstudio-local/gemma-4-26b", "lmstudio-local/qwen-3-14b"} {
 		if !second[want] {
 			t.Errorf("cache poisoned by cancelled caller: %q missing after healthy rebuild; got %v", want, second)
 		}
@@ -466,17 +466,17 @@ func (l *contextListerStub) ListModelsWithContext(ctx context.Context) ([]ModelL
 func TestHandleModels_ContextLengthPropagated(t *testing.T) {
 	t.Parallel()
 
-	lister := newContextListerStub("lmstudio-eclipse", true,
-		ModelListing{ID: "ornith-1.0-35b", ContextLength: 32768},
+	lister := newContextListerStub("lmstudio-remote", true,
+		ModelListing{ID: "example-35b", ContextLength: 32768},
 	)
-	router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-eclipse"})
+	router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-remote"})
 	router.RegisterProvider(lister)
 
 	srv := freshModelsServer(t, router)
 	resp := fetchModels(t, srv)
 	byID := modelIDSet(resp)
 
-	m, ok := byID["lmstudio-eclipse/ornith-1.0-35b"]
+	m, ok := byID["lmstudio-remote/example-35b"]
 	if !ok {
 		t.Fatalf("composite id missing; got %v", modelIDKeys(byID))
 	}
@@ -496,11 +496,11 @@ func TestHandleModels_ContextLengthAbsentIsOmitted(t *testing.T) {
 	// A plain ModelLister (no context metadata available at all) alongside a
 	// ModelContextLister entry that itself reports an unknown (0) window —
 	// both must omit the field on the wire.
-	plain := newListerStub("lmstudio-darkstar", true, "gemma-4-26b")
+	plain := newListerStub("lmstudio-local", true, "gemma-4-26b")
 	unknownCtx := newContextListerStub("some-vllm", true,
 		ModelListing{ID: "mystery-model", ContextLength: 0},
 	)
-	router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-darkstar"})
+	router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-local"})
 	router.RegisterProvider(plain)
 	router.RegisterProvider(unknownCtx)
 
@@ -522,7 +522,7 @@ func TestHandleModels_ContextLengthAbsentIsOmitted(t *testing.T) {
 	}
 	for _, entry := range raw.Data {
 		id, _ := entry["id"].(string)
-		if id != "lmstudio-darkstar/gemma-4-26b" && id != "some-vllm/mystery-model" {
+		if id != "lmstudio-local/gemma-4-26b" && id != "some-vllm/mystery-model" {
 			continue
 		}
 		if _, present := entry["context_length"]; present {
@@ -549,7 +549,7 @@ func TestOpenAICompatListModelsWithContext_PrefersLoadedOverMax(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]any{
 				{
-					"id":                    "ornith-1.0-35b",
+					"id":                    "example-35b",
 					"state":                 "loaded",
 					"loaded_context_length": 32768,
 					"max_context_length":    262144,
@@ -559,7 +559,7 @@ func TestOpenAICompatListModelsWithContext_PrefersLoadedOverMax(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := newTestOpenAIProvider(t, srv.URL, "ornith-1.0-35b")
+	p := newTestOpenAIProvider(t, srv.URL, "example-35b")
 	listings, err := p.ListModelsWithContext(context.Background())
 	if err != nil {
 		t.Fatalf("ListModelsWithContext: %v", err)
@@ -739,7 +739,7 @@ func TestHandleModels_AllEntriesCarryContextLength(t *testing.T) {
 	// (200k, 1M, anything) fails rather than passing by coincidence.
 	const frontierWindow = 777_000
 	claude.capabilities.MaxContextTokens = frontierWindow
-	local := newContextListerStub("lmstudio-darkstar", true,
+	local := newContextListerStub("lmstudio-local", true,
 		ModelListing{ID: "gemma-4-26b", ContextLength: 32768},
 	)
 	// The "local" alias resolves to the router's local provider; its
@@ -781,7 +781,7 @@ func TestHandleCard_AgreesWithModels(t *testing.T) {
 	claude.capabilities.MaxContextTokens = frontierWindow
 	// A realistic local provider too, so the local-alias comparison is
 	// actually exercised (round 4: it previously never was).
-	local := newContextListerStub("lmstudio-darkstar", true,
+	local := newContextListerStub("lmstudio-local", true,
 		ModelListing{ID: "gemma-4-26b", ContextLength: 32768},
 	)
 	local.capabilities.ModelsAvailable = []string{"gemma-4-26b"}
@@ -834,7 +834,7 @@ func TestHandleCard_AgreesWithModels(t *testing.T) {
 func TestHandleCard_LocalEntryResolvesThroughAlias(t *testing.T) {
 	t.Parallel()
 
-	local := newContextListerStub("lmstudio-darkstar", true,
+	local := newContextListerStub("lmstudio-local", true,
 		ModelListing{ID: "gemma-4-26b", ContextLength: 32768},
 	)
 	local.capabilities.ModelsAvailable = []string{"gemma-4-26b"}
@@ -909,11 +909,11 @@ func TestHandleCard_DefaultModelIsListed(t *testing.T) {
 	}
 
 	t.Run("local-only, no frontier", func(t *testing.T) {
-		local := newContextListerStub("lmstudio-darkstar", true,
+		local := newContextListerStub("lmstudio-local", true,
 			ModelListing{ID: "gemma-4-26b", ContextLength: 32768},
 		)
 		local.capabilities.ModelsAvailable = []string{"gemma-4-26b"}
-		router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-darkstar"})
+		router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-local"})
 		router.RegisterProvider(local)
 
 		def, ids := decode(t, freshModelsServer(t, router))
@@ -954,9 +954,9 @@ func TestHandleCard_DefaultModelIsListed(t *testing.T) {
 func TestHandleModels_CapabilitiesPropagated(t *testing.T) {
 	t.Parallel()
 
-	lister := newListerStub("lmstudio-darkstar", true, "gemma-4-26b")
+	lister := newListerStub("lmstudio-local", true, "gemma-4-26b")
 	lister.capabilities.Capabilities = []Capability{CapVision, CapToolUse}
-	router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-darkstar"})
+	router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-local"})
 	router.RegisterProvider(lister)
 
 	srv := freshModelsServer(t, router)
@@ -973,7 +973,7 @@ func TestHandleModels_CapabilitiesPropagated(t *testing.T) {
 
 	resp := fetchModels(t, srv)
 	byID := modelIDSet(resp)
-	m, ok := byID["lmstudio-darkstar/gemma-4-26b"]
+	m, ok := byID["lmstudio-local/gemma-4-26b"]
 	if !ok {
 		t.Fatalf("composite id missing; got %v", modelIDKeys(byID))
 	}
@@ -1074,7 +1074,7 @@ func TestHandleModels_CapabilitiesAbsentOnAliasesWhenProviderDeclaresNone(t *tes
 // (review finding on #640: the "local" alias's capability propagation had
 // no dedicated test, unlike frontierCapabilities). Mirrors
 // localAliasContextLength's own coverage: resolves "local" to its target
-// provider (lmstudio-darkstar here) and asserts the alias entry carries
+// provider (lmstudio-local here) and asserts the alias entry carries
 // that provider's declared capabilities, and that a provider declaring
 // none omits the field on the alias too.
 func TestHandleModels_CapabilitiesLocalAlias(t *testing.T) {
@@ -1082,9 +1082,9 @@ func TestHandleModels_CapabilitiesLocalAlias(t *testing.T) {
 
 	t.Run("propagated", func(t *testing.T) {
 		t.Parallel()
-		local := newListerStub("lmstudio-darkstar", true, "gemma-4-26b")
+		local := newListerStub("lmstudio-local", true, "gemma-4-26b")
 		local.capabilities.Capabilities = []Capability{CapVision, CapStreaming}
-		router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-darkstar"})
+		router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-local"})
 		router.RegisterProvider(local)
 
 		srv := freshModelsServer(t, router)
@@ -1108,9 +1108,9 @@ func TestHandleModels_CapabilitiesLocalAlias(t *testing.T) {
 
 	t.Run("absent when provider declares none", func(t *testing.T) {
 		t.Parallel()
-		local := newListerStub("lmstudio-darkstar", true, "gemma-4-26b")
+		local := newListerStub("lmstudio-local", true, "gemma-4-26b")
 		local.capabilities.Capabilities = nil
-		router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-darkstar"})
+		router := NewSimpleRouter(RoutingConfig{Default: "lmstudio-local"})
 		router.RegisterProvider(local)
 
 		srv := freshModelsServer(t, router)

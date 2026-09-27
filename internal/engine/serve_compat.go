@@ -311,7 +311,7 @@ func composeModelsList(ctx context.Context, router Router) []compatModel {
 }
 
 // buildModelsList composes the model menu: intent aliases + static frontier /
-// eclipse ids (config-gated, in-memory) followed by the live-enumerated ids from
+// ids (config-gated, in-memory) followed by the live-enumerated ids from
 // every ModelLister provider (bounded, concurrent, graceful-skip). Deduped by
 // final id, first occurrence wins so the static entries keep their curated
 // tier/description when a live probe would re-emit the same id.

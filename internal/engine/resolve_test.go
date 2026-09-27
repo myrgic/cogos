@@ -693,15 +693,15 @@ func TestResolveLiveCatalog_CompositeID_ResolvesAndAdmits(t *testing.T) {
 	t.Parallel()
 
 	router := NewSimpleRouter(RoutingConfig{})
-	router.RegisterProvider(NewStubProvider("lmstudio-eclipse", "r"))
+	router.RegisterProvider(NewStubProvider("lmstudio-remote", "r"))
 
-	const id = "lmstudio-eclipse/ornith-1.0-35b"
+	const id = "lmstudio-remote/example-35b"
 	res := ResolveModelRequest(router, id, "t")
-	if res.PreferProvider != "lmstudio-eclipse" {
-		t.Errorf("composite PreferProvider = %q; want lmstudio-eclipse", res.PreferProvider)
+	if res.PreferProvider != "lmstudio-remote" {
+		t.Errorf("composite PreferProvider = %q; want lmstudio-remote", res.PreferProvider)
 	}
-	if res.ModelOverride != "ornith-1.0-35b" {
-		t.Errorf("composite ModelOverride = %q; want ornith-1.0-35b", res.ModelOverride)
+	if res.ModelOverride != "example-35b" {
+		t.Errorf("composite ModelOverride = %q; want example-35b", res.ModelOverride)
 	}
 	if !IsKnownModel(router, id) {
 		t.Errorf("composite id %q must be admissible", id)
@@ -715,7 +715,7 @@ func TestResolveLiveCatalog_CompositeID_UnregisteredPrefixFallsThrough(t *testin
 	// must NOT be mis-split: it falls through to the generic model-id path
 	// (ModelOverride = whole string, no PreferProvider) and IsKnownModel is false.
 	router := NewSimpleRouter(RoutingConfig{})
-	router.RegisterProvider(NewStubProvider("lmstudio-darkstar", "r"))
+	router.RegisterProvider(NewStubProvider("lmstudio-local", "r"))
 
 	const id = "openrouter/anthropic/claude-3"
 	res := ResolveModelRequest(router, id, "t")
@@ -756,7 +756,7 @@ func TestResolveLiveCatalog_NewClaudeID_NoFrontierProviderRejects(t *testing.T) 
 	// No frontier provider registered → a bare claude id is NOT admissible and
 	// does not resolve to a frontier provider.
 	router := NewSimpleRouter(RoutingConfig{})
-	router.RegisterProvider(NewStubProvider("lmstudio-darkstar", "r"))
+	router.RegisterProvider(NewStubProvider("lmstudio-local", "r"))
 
 	const id = "claude-opus-4-9-20260101"
 	if IsKnownModel(router, id) {

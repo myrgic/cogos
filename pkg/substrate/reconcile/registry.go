@@ -39,7 +39,7 @@ var (
 // reach a path join.
 //
 // A key is one or two segments separated by "/" (the type, and an optional
-// instance discriminator — e.g. "lms-model-state/lmstudio-eclipse"). Each
+// instance discriminator — e.g. "lms-model-state/lmstudio-remote"). Each
 // segment must be a portable filename: non-empty, not "." or "..", and free
 // of path separators, ':' and other characters that are illegal on Windows.
 // ':' is rejected even though it is legal on Unix because this substrate runs

@@ -1365,7 +1365,7 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 	//      in providers config. If the current state maps to a configured
 	//      provider, dispatch there. This wires the autonomic loop and harness
 	//      dispatches through the same routing table as the main router.
-	//   2.5. harness_provider config default (e.g. "lmstudio-darkstar").
+	//   2.5. harness_provider config default (e.g. "lmstudio-local").
 	//   3. Legacy local-LLM probe: probes the configured endpoint (default
 	//      openaiCompatDefaultEndpoint = 127.0.0.1:1234) for an OpenAI-compat
 	//      server. Ollama is no longer the default; the probe order in
@@ -1565,7 +1565,7 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 			// resolve it the same way as the explicit-provider Path 1 instead of
 			// probing Ollama. This is the EXECUTING node's config, so a
 			// BEP-received remote dispatch uses the target node's harness_provider
-			// (e.g. eclipse -> lmstudio), not the sender's. Takes precedence over
+			// (e.g. a remote node -> its own LM Studio), not the sender's. Takes precedence over
 			// the legacy local_model + detectLocalLLMTarget probe (Path 3) but
 			// stays below explicit req.Provider, model-alias routing (Path 0), and
 			// process-state routing (Path 2) per the field's documented intent.

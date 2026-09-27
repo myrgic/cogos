@@ -999,7 +999,7 @@ routing:
 //
 // This is the core behaviour for cross-node dispatch: a BEP-received remote
 // dispatch arrives with empty Provider and is resolved using the EXECUTING
-// node's harness_provider (e.g. eclipse -> lmstudio), not the legacy probe.
+// node's harness_provider (e.g. a remote node -> its own LM Studio), not the legacy probe.
 func TestDispatchToHarness_HarnessProvider_ResolvesNamedProvider(t *testing.T) {
 	root := makeWorkspace(t)
 	cfg := makeConfig(t, root)
@@ -1327,7 +1327,7 @@ func TestDispatchToHarness_ExplicitProvider_RequestedModelWinsOverConfigDefault(
 	// Provider config hardcodes a model, mirroring the local-node
 	// providers.local.yaml gemma content-hash id from the issue.
 	writeTestFile(t, filepath.Join(root, ".cog", "config", "providers.yaml"), `providers:
-  lmstudio-darkstar:
+  lmstudio-local:
     type: openai
     endpoint: `+srv.URL+`
     model: gemma-content-hash-id
@@ -1342,8 +1342,8 @@ func TestDispatchToHarness_ExplicitProvider_RequestedModelWinsOverConfigDefault(
 
 	batch, dispErr := ctrl.DispatchToHarness(context.Background(), DispatchRequest{
 		Task:           "explicit model must win",
-		Provider:       "lmstudio-darkstar",
-		Model:          DispatchModel("ornith-1.0-35b"),
+		Provider:       "lmstudio-local",
+		Model:          DispatchModel("example-35b"),
 		N:              1,
 		TimeoutSeconds: 10,
 	})
@@ -1355,14 +1355,14 @@ func TestDispatchToHarness_ExplicitProvider_RequestedModelWinsOverConfigDefault(
 	}
 	res := batch.Results[0]
 
-	if gotModel != "ornith-1.0-35b" {
-		t.Errorf("wire request model = %q; want caller's explicit \"ornith-1.0-35b\" (config default must not win)", gotModel)
+	if gotModel != "example-35b" {
+		t.Errorf("wire request model = %q; want caller's explicit \"example-35b\" (config default must not win)", gotModel)
 	}
-	if res.ProviderUsed != "lmstudio-darkstar" {
-		t.Errorf("ProviderUsed = %q; want \"lmstudio-darkstar\"", res.ProviderUsed)
+	if res.ProviderUsed != "lmstudio-local" {
+		t.Errorf("ProviderUsed = %q; want \"lmstudio-local\"", res.ProviderUsed)
 	}
-	if res.ServedModel != "ornith-1.0-35b" {
-		t.Errorf("ServedModel = %q; want \"ornith-1.0-35b\" (the model actually sent to the provider)", res.ServedModel)
+	if res.ServedModel != "example-35b" {
+		t.Errorf("ServedModel = %q; want \"example-35b\" (the model actually sent to the provider)", res.ServedModel)
 	}
 	if !res.Success {
 		t.Errorf("Success = false; want true, error=%q", res.Error)
@@ -1400,7 +1400,7 @@ func TestDispatchToHarness_ExplicitProvider_ConfigDefaultAppliesWhenNoModelReque
 	defer srv.Close()
 
 	writeTestFile(t, filepath.Join(root, ".cog", "config", "providers.yaml"), `providers:
-  lmstudio-darkstar:
+  lmstudio-local:
     type: openai
     endpoint: `+srv.URL+`
     model: gemma-content-hash-id
@@ -1415,7 +1415,7 @@ func TestDispatchToHarness_ExplicitProvider_ConfigDefaultAppliesWhenNoModelReque
 
 	batch, dispErr := ctrl.DispatchToHarness(context.Background(), DispatchRequest{
 		Task:           "no explicit model — config default applies",
-		Provider:       "lmstudio-darkstar",
+		Provider:       "lmstudio-local",
 		N:              1,
 		TimeoutSeconds: 10,
 	})
@@ -1463,12 +1463,12 @@ func TestDispatchToHarness_HarnessProviderDefault_RequestedModelWins(t *testing.
 	defer srv.Close()
 
 	writeTestFile(t, filepath.Join(root, ".cog", "config", "providers.yaml"), `providers:
-  lmstudio-darkstar:
+  lmstudio-local:
     type: openai
     endpoint: `+srv.URL+`
     model: gemma-content-hash-id
 `)
-	cfg.HarnessProvider = "lmstudio-darkstar"
+	cfg.HarnessProvider = "lmstudio-local"
 
 	proc := NewProcess(cfg, makeNucleus("Cog", "tester"))
 	server := NewServer(cfg, makeNucleus("Cog", "tester"), proc)
@@ -1479,7 +1479,7 @@ func TestDispatchToHarness_HarnessProviderDefault_RequestedModelWins(t *testing.
 
 	batch, dispErr := ctrl.DispatchToHarness(context.Background(), DispatchRequest{
 		Task:           "explicit model over harness_provider default",
-		Model:          DispatchModel("ornith-1.0-35b"),
+		Model:          DispatchModel("example-35b"),
 		N:              1,
 		TimeoutSeconds: 10,
 	})
@@ -1488,14 +1488,14 @@ func TestDispatchToHarness_HarnessProviderDefault_RequestedModelWins(t *testing.
 	}
 	res := batch.Results[0]
 
-	if gotModel != "ornith-1.0-35b" {
-		t.Errorf("wire request model = %q; want caller's explicit \"ornith-1.0-35b\"", gotModel)
+	if gotModel != "example-35b" {
+		t.Errorf("wire request model = %q; want caller's explicit \"example-35b\"", gotModel)
 	}
-	if res.ProviderUsed != "lmstudio-darkstar" {
-		t.Errorf("ProviderUsed = %q; want \"lmstudio-darkstar\"", res.ProviderUsed)
+	if res.ProviderUsed != "lmstudio-local" {
+		t.Errorf("ProviderUsed = %q; want \"lmstudio-local\"", res.ProviderUsed)
 	}
-	if res.ServedModel != "ornith-1.0-35b" {
-		t.Errorf("ServedModel = %q; want \"ornith-1.0-35b\"", res.ServedModel)
+	if res.ServedModel != "example-35b" {
+		t.Errorf("ServedModel = %q; want \"example-35b\"", res.ServedModel)
 	}
 }
 
@@ -1515,13 +1515,13 @@ func TestDispatchToHarness_ProviderCannotServeModel_FailsLoudly(t *testing.T) {
 			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gemma-content-hash-id","object":"model"}]}`))
 		case "/v1/chat/completions":
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":"model 'ornith-1.0-35b' would likely overload your system"}`))
+			_, _ = w.Write([]byte(`{"error":"model 'example-35b' would likely overload your system"}`))
 		}
 	}))
 	defer srv.Close()
 
 	writeTestFile(t, filepath.Join(root, ".cog", "config", "providers.yaml"), `providers:
-  lmstudio-darkstar:
+  lmstudio-local:
     type: openai
     endpoint: `+srv.URL+`
     model: gemma-content-hash-id
@@ -1536,8 +1536,8 @@ func TestDispatchToHarness_ProviderCannotServeModel_FailsLoudly(t *testing.T) {
 
 	batch, dispErr := ctrl.DispatchToHarness(context.Background(), DispatchRequest{
 		Task:           "provider refuses requested model",
-		Provider:       "lmstudio-darkstar",
-		Model:          DispatchModel("ornith-1.0-35b"),
+		Provider:       "lmstudio-local",
+		Model:          DispatchModel("example-35b"),
 		N:              1,
 		TimeoutSeconds: 10,
 	})
