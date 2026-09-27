@@ -1769,3 +1769,51 @@ func TestSessionRegistry_ReapStale(t *testing.T) {
 		}
 	})
 }
+
+// Review finding on #622: the reaper was started in NewServer, so every
+// constructed Server (hundreds in tests) leaked an unstoppable ticker
+// goroutine. It now belongs to the serving lifetime: none after NewServer,
+// one after startBackground (what Start calls), none after stopBackground
+// (what Shutdown calls), and both are idempotent.
+func TestSessionReaper_LifetimeIsServingNotConstruction(t *testing.T) {
+	srv := newTestServer(t)
+	if srv.reaperStop != nil {
+		t.Fatal("NewServer started the session reaper; it must start with Start")
+	}
+	srv.startBackground()
+	srv.reaperMu.Lock()
+	first := srv.reaperStop
+	srv.reaperMu.Unlock()
+	if first == nil {
+		t.Fatal("startBackground did not start the reaper")
+	}
+	srv.startBackground() // idempotent: must not start a second loop
+	srv.reaperMu.Lock()
+	same := fmt.Sprintf("%p", srv.reaperStop) == fmt.Sprintf("%p", first)
+	srv.reaperMu.Unlock()
+	if !same {
+		t.Fatal("second startBackground replaced the running reaper")
+	}
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	if srv.reaperStop != nil {
+		t.Fatal("Shutdown did not stop the reaper")
+	}
+	srv.stopBackground() // idempotent
+}
+
+// The loop itself exits on cancel instead of ranging over the ticker
+// forever: with a 1ms interval it would otherwise sweep continuously.
+func TestSessionReaper_ExitsOnCancel(t *testing.T) {
+	srv := newTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	srv.startSessionReaperNotify(ctx, time.Hour, time.Millisecond, done)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reaper goroutine did not exit after cancel")
+	}
+}

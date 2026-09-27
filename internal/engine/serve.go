@@ -48,6 +48,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -66,10 +67,13 @@ type Server struct {
 	router            Router            // nil until SetRouter is called
 	serviceSupervisor ServiceSupervisor // nil until SetServiceSupervisor; defaults to ObserverSupervisor
 	srv               *http.Server
-	debug             debugStore      // captures last request pipeline state
-	attentionLog      *attentionLog   // per-server log (avoids global write race)
-	agentController   AgentController // nil until SetAgentController is called
-	mcpServer         *MCPServer      // so SetAgentController can propagate to tools
+	// reaperStop ends the session reaper started by Start (nil until then).
+	reaperMu        sync.Mutex
+	reaperStop      context.CancelFunc
+	debug           debugStore      // captures last request pipeline state
+	attentionLog    *attentionLog   // per-server log (avoids global write race)
+	agentController AgentController // nil until SetAgentController is called
+	mcpServer       *MCPServer      // so SetAgentController can propagate to tools
 
 	// reconcileDaemon backs GET /v1/reconcile/coherence (First Instruments
 	// Module B, M1-B). nil until SetReconcileDaemon is called — the daemon is
@@ -332,13 +336,6 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 	_ = ReplayHandoffRegistry(s.busSessions, s.handoffRegistry)
 	_ = ReplayForkRegistry(s.busSessions, s.forkRegistry)
 
-	// cogos#423: TTL reaper for the session registry. Without this, rows
-	// that never get an explicit POST /v1/sessions/{id}/end (crash, kill -9,
-	// dropped client) accumulate with Ended=false forever — confirmed live
-	// with 387 un-reaped rows dating back over a month. Runs for the life of
-	// the process; same shape as BusEventBroker.StartReaper (bus_stream.go).
-	s.startSessionReaper(defaultSessionReapTTL, defaultSessionReapInterval)
-
 	// Resolve the bind address. Default stays 127.0.0.1 (loopback-only);
 	// callers may override via Config.BindAddr to listen on all interfaces
 	// ("0.0.0.0") for pod/LAN/Tailnet deployments.
@@ -488,18 +485,33 @@ func (s *Server) WorkspaceRoot() string {
 // (LastSeen) for longer than ttl, emitting a session.end bus event for each
 // so bus_sessions stays the ground truth (ReplaySessionRegistry replays
 // reaped rows identically to explicitly-ended ones on restart). Runs for
-// the lifetime of the process — there is no server-wide shutdown context to
-// bind to yet (Shutdown() only tears down the HTTP listener), matching the
-// existing precedent of unbound background loops in this file (e.g. the
-// autonomic ticker in process.go).
-func (s *Server) startSessionReaper(ttl, interval time.Duration) {
+// until ctx is canceled. Started by Start, stopped by Shutdown: a Server
+// that is only constructed (every NewServer in tests) runs no goroutine.
+func (s *Server) startSessionReaper(ctx context.Context, ttl, interval time.Duration) {
+	s.startSessionReaperNotify(ctx, ttl, interval, nil)
+}
+
+// startSessionReaperNotify is startSessionReaper with an optional channel
+// closed when the loop exits (tests observe shutdown with it).
+func (s *Server) startSessionReaperNotify(ctx context.Context, ttl, interval time.Duration, exited chan<- struct{}) {
 	if ttl <= 0 || interval <= 0 {
+		if exited != nil {
+			close(exited)
+		}
 		return
 	}
 	go func() {
+		if exited != nil {
+			defer close(exited)
+		}
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
 			now := time.Now().UTC()
 			reaped := s.sessionRegistry.ReapStale(ttl, now, func(id string) error {
 				_, err := s.busSessions.AppendEvent(BusSessions, EvtSessionEnd, id, map[string]interface{}{
@@ -524,12 +536,40 @@ func (s *Server) Start() error {
 		return fmt.Errorf("listen %s: %w", s.srv.Addr, err)
 	}
 	slog.Info("server: listening", "addr", s.srv.Addr, "bind", s.cfg.BindAddr)
+	// cogos#423: TTL reaper for the session registry. Without it, rows that
+	// never get an explicit POST /v1/sessions/{id}/end (crash, kill -9,
+	// dropped client) stay Ended=false forever (387 such rows observed live,
+	// over a month old). Tied to the serving lifetime, not construction.
+	s.startBackground()
 	return s.srv.Serve(ln)
 }
 
-// Shutdown gracefully drains the server.
+// Shutdown gracefully drains the server and stops its background reaper.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.stopBackground()
 	return s.srv.Shutdown(ctx)
+}
+
+// startBackground starts the serving-lifetime loops (idempotent).
+func (s *Server) startBackground() {
+	s.reaperMu.Lock()
+	defer s.reaperMu.Unlock()
+	if s.reaperStop != nil {
+		return
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	s.reaperStop = stop
+	s.startSessionReaper(ctx, defaultSessionReapTTL, defaultSessionReapInterval)
+}
+
+// stopBackground stops what startBackground started (idempotent).
+func (s *Server) stopBackground() {
+	s.reaperMu.Lock()
+	defer s.reaperMu.Unlock()
+	if s.reaperStop != nil {
+		s.reaperStop()
+		s.reaperStop = nil
+	}
 }
 
 // Handler returns the HTTP handler, useful for httptest.NewServer in tests.
