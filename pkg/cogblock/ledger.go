@@ -169,6 +169,11 @@ func canonicalJSON(v interface{}) ([]byte, error) {
 		// interface{}), so the read side never leaves this branch.
 		return json.Marshal(v)
 	default:
+		// Not a CanonForm change (RFC-0003 Refinement 4): for every input
+		// where the previous code was self-consistent, the output is
+		// byte-identical, so every verifiable "rfc8785-v1" hash is unchanged.
+		// See TestCanonicalJSON_FixPreservesEveryVerifiableV1Hash.
+		//
 		// Anything else exists only on the write side: json.RawMessage (tool
 		// call arguments, verbatim), structs, typed maps and slices, ints.
 		// On read the same value decodes to the generic types above, so
