@@ -1198,8 +1198,8 @@ func TestMarshalRequestStructFieldsWinOverDefaults(t *testing.T) {
 // Options["default_options"] is correctly parsed into the provider's defaultOptions map.
 func TestNewOpenAICompatProviderLoadsDefaultOptions(t *testing.T) {
 	t.Parallel()
-	p := NewOpenAICompatProvider("lmstudio-eclipse", ProviderConfig{
-		Endpoint: "http://192.168.10.191:1234",
+	p := NewOpenAICompatProvider("lmstudio-remote", ProviderConfig{
+		Endpoint: "http://192.0.2.10:1234",
 		Model:    "google/gemma-4-26b-a4b",
 		Options: map[string]interface{}{
 			"is_local":    true,
@@ -1222,8 +1222,8 @@ func TestNewOpenAICompatProviderLoadsDefaultOptions(t *testing.T) {
 // marshalRequest falls through to plain json.Marshal).
 func TestNewOpenAICompatProviderNoDefaultOptions(t *testing.T) {
 	t.Parallel()
-	p := NewOpenAICompatProvider("lmstudio-eclipse", ProviderConfig{
-		Endpoint: "http://192.168.10.191:1234",
+	p := NewOpenAICompatProvider("lmstudio-remote", ProviderConfig{
+		Endpoint: "http://192.0.2.10:1234",
 		Model:    "google/gemma-4-26b-a4b",
 		Options: map[string]interface{}{
 			"is_local":    true,

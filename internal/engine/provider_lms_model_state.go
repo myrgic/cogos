@@ -18,7 +18,7 @@
 //   - The actuator is the Node @lmstudio/sdk websocket bridge at
 //     scripts/lms-actuator/ (load / unload / set-context over ws://). On a
 //     localhost backend a `~/.lmstudio/bin/lms` fast-path is permitted; remote
-//     backends (Eclipse, off-LAN) always use the SDK actuator because the lms
+//     backends (another host on the LAN) always use the SDK actuator because the lms
 //     CLI cannot reach a remote instance (LM Link gated).
 //   - Health() is O(1): it reads the last cached /api/v0/models rows (populated
 //     by FetchLive) under a RWMutex and never performs I/O. The autonomic ticker
@@ -98,7 +98,7 @@ type lmsModelRow struct {
 	Type                string `json:"type,omitempty"`
 
 	// Parallel is NOT part of the /api/v0/models response — LM Studio does not
-	// expose it there (confirmed live against Darkstar's :1234). It is merged in
+	// expose it there (confirmed live against a local :1234 instance). It is merged in
 	// after the fact, on local backends only, from `lms ps --json` (see
 	// probeParallelLocal). nil ⇒ unobserved (remote backend, or the CLI probe
 	// failed) — never treated as a mismatch; distinct from an observed 0.
@@ -108,7 +108,7 @@ type lmsModelRow struct {
 // lmsPsRow is one entry from `lms ps --json` (the local-only lms CLI, no --host
 // flag — same LM-Link-gated local/remote asymmetry the actuator's fast-path
 // already documents). Confirmed live shape:
-// {"identifier":"ornith-1.0-35b",...,"parallel":1}.
+// {"identifier":"example-35b",...,"parallel":1}.
 //
 // Parallel is a pointer for the same reason lmsModelRow.LoadedContextLength is:
 // an older lms CLI (or any future shape change) that omits the `parallel` key
@@ -133,9 +133,9 @@ type lmsModelsResponse struct {
 type LMSModelStateProvider struct {
 	// --- identity / target ---
 	name    string // provider name as declared in providers.yaml
-	baseURL string // e.g. "http://192.168.10.191:1234" (REST base, no path)
-	wsURL   string // e.g. "ws://192.168.10.191:1234" (SDK bridge)
-	host    string // bare host, e.g. "192.168.10.191"
+	baseURL string // e.g. "http://192.0.2.10:1234" (REST base, no path)
+	wsURL   string // e.g. "ws://192.0.2.10:1234" (SDK bridge)
+	host    string // bare host, e.g. "192.0.2.10"
 	port    int    // e.g. 1234
 	local   bool   // endpoint is localhost/127.0.0.1 ⇒ lms CLI fast-path allowed
 
@@ -419,7 +419,7 @@ func (p *LMSModelStateProvider) probeParallelLocal(ctx context.Context) (map[str
 //
 // Matching is deterministic in two ways that matter when the same base model
 // is loaded twice (LM Studio suffixes the second instance, e.g.
-// "ornith-1.0-35b" and "ornith-1.0-35b:2") or when one model id is a prefix
+// "example-35b" and "example-35b:2") or when one model id is a prefix
 // of another:
 //  1. An exact identifier match is always preferred over a prefix match.
 //  2. The prefix-either-direction fallback (same rule as findModelRow: quant
@@ -607,7 +607,7 @@ func (p *LMSModelStateProvider) ComputePlan(config any, live any, _ *reconcile.S
 		// the actuator single-shot per observation regardless of whether the
 		// resulting reload actually moves the observed parallel value. The
 		// live round trip (`lms load --parallel N` -> `lms ps --json`
-		// reporting N) was verified on Darkstar 2026-08-14: parallel 2 and
+		// reporting N) was verified on the author's local backend 2026-08-14: parallel 2 and
 		// parallel 1 both landed exactly as requested, context preserved,
 		// warm reloads ~12s. Once FetchLive reports a DIFFERENT observed
 		// value — converged, still wrong but freshly so, or changed by other

@@ -19,13 +19,13 @@ import (
 // ("Don't add error-handling, fallbacks, or validation for scenarios that
 // can't happen"), this change does not invent one.
 func TestPeer_NodeIdentityHash_Roundtrip(t *testing.T) {
-	const hash = "sha256:439592686bc8d8e792263de0c4ed548c05fd907e84c3f520e57b58638a36084c"
+	const hash = "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
 
 	t.Run("yaml present", func(t *testing.T) {
 		src := `
-deviceId: VHS7RZQ-LS4STOQ-J2GITFD-HACSCNX-YHBL5HV-OKHFIOM-IZGKI67-TFLVIAA
-address: 192.168.10.191:22033
-name: eclipse
+deviceId: AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH
+address: 192.0.2.10:22033
+name: peer-b
 trusted: true
 nodeIdentityHash: ` + hash + `
 `
@@ -40,9 +40,9 @@ nodeIdentityHash: ` + hash + `
 
 	t.Run("yaml absent is valid", func(t *testing.T) {
 		src := `
-deviceId: VHS7RZQ-LS4STOQ-J2GITFD-HACSCNX-YHBL5HV-OKHFIOM-IZGKI67-TFLVIAA
-address: 192.168.10.191:22033
-name: eclipse
+deviceId: AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH
+address: 192.0.2.10:22033
+name: peer-b
 trusted: true
 `
 		var p Peer

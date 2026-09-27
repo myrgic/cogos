@@ -242,7 +242,7 @@ func (r *SimpleRouter) Route(ctx context.Context, req *CompletionRequest) (Provi
 		// Compat-aware fallback (inference-pipeline-robustness FIX 3): a request
 		// carrying an explicit ModelOverride, when its primary is down, falls
 		// through the chain still carrying that override. A bare local-model id
-		// like "ornith-1.0-35b" must not be fired at a LOCAL model-serving sibling
+		// like "example-35b" must not be fired at a LOCAL model-serving sibling
 		// (lmstudio/ollama/mlx) that hasn't loaded it — that 404s opaquely — so
 		// providerCanServe skips such a candidate and lets the router reach the
 		// sibling that does serve it. Frontier providers (anthropic, claude-oauth,

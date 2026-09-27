@@ -28,10 +28,10 @@ func TestValidateInstanceName(t *testing.T) {
 	valid := []string{
 		"agent",
 		"component",
-		"lms-model-state/lmstudio-eclipse",
+		"lms-model-state/lmstudio-remote",
 		"lineage-projection-bibliography",
 		"worktree-reconciler/cog-1a2b3c4d",
-		"mlx-supervised/ornith_35b",
+		"mlx-supervised/model_35b",
 	}
 	for _, name := range valid {
 		if err := ValidateInstanceName(name); err != nil {
@@ -68,7 +68,7 @@ func TestValidateInstanceName(t *testing.T) {
 func TestValidateInstanceName_StatePathStaysLocal(t *testing.T) {
 	root := filepath.FromSlash("/ws")
 	base := filepath.Join(root, ".cog", "config")
-	for _, name := range []string{"agent", "lms-model-state/lmstudio-eclipse", "worktree-reconciler/cog-1a2b3c4d"} {
+	for _, name := range []string{"agent", "lms-model-state/lmstudio-remote", "worktree-reconciler/cog-1a2b3c4d"} {
 		if err := ValidateInstanceName(name); err != nil {
 			t.Fatalf("precondition: %q should be valid: %v", name, err)
 		}

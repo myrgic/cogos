@@ -96,7 +96,7 @@ func NewOpenAICompatProvider(name string, cfg ProviderConfig) *OpenAICompatProvi
 		// failure mode as the (now-fixed) 30s dispatch default in
 		// agent_dispatch_query.go. Match that default so both ceilings agree
 		// absent explicit config; providers.yaml's committed defaults
-		// (lmstudio-darkstar: 300s) remain the recommended explicit value.
+		// (lmstudio-local: 300s) remain the recommended explicit value.
 		timeout = time.Duration(dispatchTimeoutDefault) * time.Second
 	}
 	maxTokens := cfg.MaxTokens
@@ -113,11 +113,11 @@ func NewOpenAICompatProvider(name string, cfg ProviderConfig) *OpenAICompatProvi
 	// request shaping without new struct fields.
 	//
 	// Example: set `reasoning_effort: "none"` on a foveal/conversational provider
-	// to suppress Eclipse 26b A4B thinking tokens (empirically verified 2026-05-15:
+	// to suppress a 26B reasoning model's thinking tokens (empirically verified 2026-05-15:
 	// `reasoning_effort: "none"` removes reasoning_content entirely; "minimal" does
 	// not). The peripheral/deliberation variant omits this option so thinking runs.
 	//
-	// Future direction (Option B): a separate `lmstudio-eclipse-peripheral` provider
+	// Future direction (Option B): a separate `lmstudio-remote-peripheral` provider
 	// entry pointing at the same endpoint+model but without default_options, so the
 	// kernel can route deliberation work to the thinking-enabled variant explicitly.
 	var defaultOpts map[string]interface{}
@@ -929,7 +929,7 @@ func parseOpenAISSE(ctx context.Context, r io.Reader, ch chan<- StreamChunk, mod
 
 		for _, choice := range chunk.Choices {
 			// Reasoning/thinking content delta (LM Studio reasoning models,
-			// e.g. Eclipse 26b A4B). Tagged with IsReasoning so the handler
+			// e.g. a 26B reasoning model). Tagged with IsReasoning so the handler
 			// can measure the thinking phase separately from answer generation.
 			if choice.Delta.ReasoningContent != "" {
 				if !send(StreamChunk{Delta: choice.Delta.ReasoningContent, IsReasoning: true}) {

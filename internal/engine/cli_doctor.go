@@ -725,7 +725,7 @@ func roundDays(d time.Duration) string {
 // (~/, /Users/, /home/, /opt/, /usr/, /var/, /tmp/, /etc/) rather than any
 // "/segment/segment" shape — Hermes/MCP configs are full of superficially
 // path-shaped strings that are not paths at all (HuggingFace model IDs like
-// "lmstudio-eclipse/google/gemma-4-e4b", API base URLs like
+// "lmstudio-remote/google/gemma-4-e4b", API base URLs like
 // "https://api.anthropic.com/v1", docker image refs, MCP route strings like
 // "/v1/synthesize"), and an unanchored pattern flags all of them as
 // "nonexistent path" false positives.
@@ -1949,10 +1949,10 @@ func claudeCodeManagedSettingsPathForGOOS(goos string) string {
 // past the literal name or looks across every scope Claude Code / Claude
 // Desktop / Hermes each maintain independently.
 //
-// Live evidence this check was built against (darkstar, 2026-08-21): the
+// Live evidence this check was built against (the author's node, 2026-08-21): the
 // target http://127.0.0.1:9000/mcp is mounted THREE separate ways --
 // "browseros" in ~/.claude.json's user scope (type:http, direct url),
-// "browseros" again in ~/.hermes/profiles/darkstar/config.yaml's mcp_servers
+// "browseros" again in ~/.hermes/profiles/<profile>/config.yaml's mcp_servers
 // (same name, different scope), and "browserOS" in Claude Desktop's
 // claude_desktop_config.json via the `npx mcp-remote <url>` stdio-bridge
 // shape mcpEntryTarget normalizes through. The twin the issue asked doctor

@@ -407,7 +407,7 @@ func probeModelStateEntry(ctx context.Context, e modelStateEntry) (progressing b
 
 // msPsRow mirrors `lms ps --json`'s row shape (the local-only lms CLI — no
 // --host flag, so remote backends cannot be probed this way). Confirmed live:
-// {"identifier":"ornith-1.0-35b",...,"parallel":1}.
+// {"identifier":"example-35b",...,"parallel":1}.
 //
 // Parallel is a pointer, mirroring lmsPsRow in the engine copy: an older lms
 // CLI (or any future shape change) that omits the `parallel` key must decode

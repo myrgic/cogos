@@ -1,7 +1,7 @@
 // provider_ollama.go — OllamaProvider [DECOMMISSIONED]
 //
 // Ollama has been removed as the default and supported local inference backend.
-// The replacement is LM Studio via the named provider "lmstudio-darkstar"
+// The replacement is LM Studio via the named provider "lmstudio-local"
 // (OpenAI-compat at 127.0.0.1:1234, resident gemma-4-26b).
 //
 // This file is retained so that:
@@ -32,7 +32,7 @@ import (
 // defaultOllamaModel is retained only for backward compat with tests and
 // configs that reference it. Ollama is decommissioned; do not use this as
 // a routing default. The resident local model is google/gemma-4-26b via
-// LM Studio (lmstudio-darkstar).
+// LM Studio (lmstudio-local).
 const defaultOllamaModel = "gemma4:e4b"
 
 type ollamaModelProfile struct {

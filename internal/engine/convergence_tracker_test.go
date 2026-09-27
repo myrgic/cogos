@@ -434,20 +434,20 @@ func TestConvergenceTracker_QuarantineIsItsOwnAnomalyAxis(t *testing.T) {
 	// Not degraded (Suspended reads as not-degraded here), never over budget:
 	// without the quarantine axis this provider is invisible.
 	for i := 0; i < 5; i++ {
-		tr.Observe("lms/eclipse", convObservation{CycleMs: 5})
+		tr.Observe("lms/remote", convObservation{CycleMs: 5})
 	}
-	if s, _ := findConv(tr.Snapshot(), "lms/eclipse"); s.Flagged {
+	if s, _ := findConv(tr.Snapshot(), "lms/remote"); s.Flagged {
 		t.Fatalf("provider flagged before quarantine, got %+v", s)
 	}
 
 	// Daemon quarantines it: exactly one anomaly, and it stays open.
 	for i := 0; i < 50; i++ {
-		tr.Observe("lms/eclipse", convObservation{CycleMs: 5, Quarantined: true})
+		tr.Observe("lms/remote", convObservation{CycleMs: 5, Quarantined: true})
 	}
 	if got := countMsg(read(), msgAnomalyRaised); got != 1 {
 		t.Fatalf("raise lines = %d, want exactly 1 for the quarantine episode", got)
 	}
-	s, _ := findConv(tr.Snapshot(), "lms/eclipse")
+	s, _ := findConv(tr.Snapshot(), "lms/remote")
 	if !s.Flagged || !hasReason(s, "quarantined") {
 		t.Fatalf("snapshot = %+v, want flagged with the quarantined reason", s)
 	}

@@ -87,26 +87,26 @@ func TestRouterFallbackWhenPrimaryUnavailable(t *testing.T) {
 
 // TestRouterFallbackSkipsProvidersThatCannotServeOverride is the regression
 // guard for inference-pipeline-robustness FIX 3. When the primary local provider
-// (serving ornith-1.0-35b) is down, the fallback carries the ModelOverride into
+// (serving example-35b) is down, the fallback carries the ModelOverride into
 // the chain. A LOCAL model-serving sibling that has a DIFFERENT model loaded
-// (gemma) would 404 on the ornith id, so the router must skip it and reach the
-// sibling that actually serves ornith-1.0-35b. Only local model-serving
+// (gemma) would 404 on the example-35b id, so the router must skip it and reach the
+// sibling that actually serves example-35b. Only local model-serving
 // providers are gated this way — see TestRouterFallbackReachesFrontierBackup
 // for the complementary guarantee that frontier fallbacks stay eligible.
 func TestRouterFallbackSkipsProvidersThatCannotServeOverride(t *testing.T) {
 	t.Parallel()
 	r := NewSimpleRouter(RoutingConfig{
-		Default:       "lmstudio-darkstar",
-		FallbackChain: []string{"lmstudio-darkstar", "lmstudio-gemma", "lmstudio-eclipse"},
+		Default:       "lmstudio-local",
+		FallbackChain: []string{"lmstudio-local", "lmstudio-gemma", "lmstudio-remote"},
 	})
 
-	// Primary: serves ornith-1.0-35b but is down.
-	darkstar := NewStubProvider("lmstudio-darkstar", "")
-	darkstar.model = "ornith-1.0-35b"
-	darkstar.available = false
+	// Primary: serves example-35b but is down.
+	localLMS := NewStubProvider("lmstudio-local", "")
+	localLMS.model = "example-35b"
+	localLMS.available = false
 
 	// Local model-serving sibling with a DIFFERENT model loaded. It would 404 on
-	// an ornith id, so it MUST be skipped for an ornith override.
+	// an example-35b id, so it MUST be skipped for that override.
 	gemma := NewStubProvider("lmstudio-gemma", "gemma reply")
 	gemma.model = "gemma-4-26b"
 	gemma.capabilities = ProviderCapabilities{
@@ -115,23 +115,23 @@ func TestRouterFallbackSkipsProvidersThatCannotServeOverride(t *testing.T) {
 		IsLocal:         true,
 	}
 
-	// Sibling local provider that DOES serve ornith-1.0-35b.
-	eclipse := NewStubProvider("lmstudio-eclipse", "ornith reply")
-	eclipse.model = "ornith-1.0-35b"
+	// Sibling local provider that DOES serve example-35b.
+	remoteLMS := NewStubProvider("lmstudio-remote", "remote reply")
+	remoteLMS.model = "example-35b"
 
-	r.RegisterProvider(darkstar)
+	r.RegisterProvider(localLMS)
 	r.RegisterProvider(gemma)
-	r.RegisterProvider(eclipse)
+	r.RegisterProvider(remoteLMS)
 
 	p, dec, err := r.Route(context.Background(), &CompletionRequest{
-		ModelOverride: "ornith-1.0-35b",
+		ModelOverride: "example-35b",
 		Metadata:      RequestMetadata{RequestID: "fix3-1"},
 	})
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
-	if p.Name() != "lmstudio-eclipse" {
-		t.Errorf("selected = %q; want lmstudio-eclipse (lmstudio-gemma must be skipped — it has a different model loaded and can't serve ornith-1.0-35b)", p.Name())
+	if p.Name() != "lmstudio-remote" {
+		t.Errorf("selected = %q; want lmstudio-remote (lmstudio-gemma must be skipped — it has a different model loaded and can't serve example-35b)", p.Name())
 	}
 	if !dec.FallbackUsed {
 		t.Error("FallbackUsed should be true")
@@ -222,13 +222,13 @@ func TestRouterFallbackReachesFrontierBackup(t *testing.T) {
 func TestRouterFallbackNoOverridePreservesBehavior(t *testing.T) {
 	t.Parallel()
 	r := NewSimpleRouter(RoutingConfig{
-		Default:       "lmstudio-darkstar",
-		FallbackChain: []string{"lmstudio-darkstar", "claude-oauth", "lmstudio-eclipse"},
+		Default:       "lmstudio-local",
+		FallbackChain: []string{"lmstudio-local", "claude-oauth", "lmstudio-remote"},
 	})
 
-	darkstar := NewStubProvider("lmstudio-darkstar", "")
-	darkstar.model = "ornith-1.0-35b"
-	darkstar.available = false
+	localLMS := NewStubProvider("lmstudio-local", "")
+	localLMS.model = "example-35b"
+	localLMS.available = false
 
 	oauth := NewStubProvider("claude-oauth", "claude reply")
 	oauth.model = "claude-opus-4-7"
@@ -238,12 +238,12 @@ func TestRouterFallbackNoOverridePreservesBehavior(t *testing.T) {
 		IsLocal:         false,
 	}
 
-	eclipse := NewStubProvider("lmstudio-eclipse", "ornith reply")
-	eclipse.model = "ornith-1.0-35b"
+	remoteLMS := NewStubProvider("lmstudio-remote", "remote reply")
+	remoteLMS.model = "example-35b"
 
-	r.RegisterProvider(darkstar)
+	r.RegisterProvider(localLMS)
 	r.RegisterProvider(oauth)
-	r.RegisterProvider(eclipse)
+	r.RegisterProvider(remoteLMS)
 
 	// No ModelOverride: claude-oauth is the next available candidate and must be
 	// selected exactly as before the fix (the skip only applies to overrides).
@@ -270,8 +270,8 @@ func TestRouterFallbackNoOverridePreservesBehavior(t *testing.T) {
 func TestRouterPreferredProviderNotSkippedForDifferingOverride(t *testing.T) {
 	t.Parallel()
 	r := NewSimpleRouter(RoutingConfig{
-		Default:       "lmstudio-darkstar",
-		FallbackChain: []string{"lmstudio-darkstar"},
+		Default:       "lmstudio-local",
+		FallbackChain: []string{"lmstudio-local"},
 	})
 
 	// Frontier provider configured for opus but asked (via override) for sonnet —
@@ -313,10 +313,10 @@ func TestProviderCanServe(t *testing.T) {
 
 	// Local model-serving provider (lmstudio/ollama/mlx shape): IsLocal, not an
 	// agentic harness, advertises exactly the model it has loaded.
-	localServing := NewStubProvider("lmstudio-eclipse", "")
-	localServing.model = "ornith-1.0-35b"
+	localServing := NewStubProvider("lmstudio-remote", "")
+	localServing.model = "example-35b"
 	localServing.capabilities = ProviderCapabilities{
-		ModelsAvailable: []string{"ornith-1.0-35b"},
+		ModelsAvailable: []string{"example-35b"},
 		IsLocal:         true,
 	}
 
@@ -352,13 +352,13 @@ func TestProviderCanServe(t *testing.T) {
 	}{
 		{"empty override always serves (local serving)", localServing, "", true},
 		{"empty override always serves (remote frontier)", remoteFrontier, "", true},
-		{"exact model match on local serving", localServing, "ornith-1.0-35b", true},
+		{"exact model match on local serving", localServing, "example-35b", true},
 		{"non-matching override on local serving provider is skipped", localServing, "gemma-4-26b", false},
-		{"prefix: request family, local serving provider serves variant", localServing, "ornith-1.0", true},
+		{"prefix: request family, local serving provider serves variant", localServing, "example-35b", true},
 		{"remote frontier serves any Claude-family override (never gated)", remoteFrontier, "claude-sonnet-4-6", true},
-		{"remote frontier serves even a non-family override (honours verbatim)", remoteFrontier, "ornith-1.0-35b", true},
+		{"remote frontier serves even a non-family override (honours verbatim)", remoteFrontier, "example-35b", true},
 		{"local agentic CLI serves an override outside its advertised list", agenticCLI, "claude-sonnet-4-6", true},
-		{"local model-agnostic provider serves any override", localAgnostic, "ornith-1.0-35b", true},
+		{"local model-agnostic provider serves any override", localAgnostic, "example-35b", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

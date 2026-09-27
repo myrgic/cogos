@@ -201,7 +201,7 @@ var localAliases = map[string]ModelResolution{
 // these entries a dispatch caller pinning a raw claude id silently falls
 // through to the local default and is served a different model than requested
 // (the #430 wrong-model trap; observed live 2026-07-17: Model=claude-fable-5 →
-// served ornith-1.0-35b).
+// served example-35b).
 //
 // Deliberately NOT merged into intentAliases: on the gateway path (live
 // router) raw claude ids must keep resolving DYNAMICALLY via resolveLiveCatalog

@@ -198,7 +198,7 @@ func TestWarnIfUnauthenticatedNonLoopback_SilentOnLoopback(t *testing.T) {
 
 func TestWarnIfUnauthenticatedNonLoopback_LANAddress(t *testing.T) {
 	t.Parallel()
-	cfg := &Config{BindAddr: "192.168.10.191", Port: 6931}
+	cfg := &Config{BindAddr: "192.0.2.10", Port: 6931}
 	out := captureSlogTo(func(l *slog.Logger) {
 		warnIfUnauthenticatedNonLoopbackTo(l, cfg)
 	})

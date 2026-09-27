@@ -2,7 +2,7 @@
 //
 // THE BUG THESE PIN
 // -----------------
-// On 2026-08-27 the live kernel snapshot on darkstar reported
+// On 2026-08-27 the live kernel snapshot on a node reported
 //
 //	vitals-retention {"health": "Healthy", "operation": "Idle", "sync": "Synced"}
 //
@@ -42,7 +42,7 @@ func newTestRecorder(t *testing.T) *Recorder {
 // TestHealthDegradedWhenAppendsStop is the primary regression test: a recorder
 // that succeeded once and then went quiet must report Degraded.
 //
-// Before the fix this returned Healthy, which is exactly what darkstar showed
+// Before the fix this returned Healthy, which is exactly what that node showed
 // for 17 hours.
 func TestHealthDegradedWhenAppendsStop(t *testing.T) {
 	r := newTestRecorder(t)
@@ -57,7 +57,7 @@ func TestHealthDegradedWhenAppendsStop(t *testing.T) {
 	if st.Health != reconcile.HealthDegraded {
 		t.Fatalf("Health() = %v; want Degraded.\n"+
 			"A recorder whose last successful append was 17h ago is not healthy — "+
-			"this is the exact live state observed on darkstar 2026-08-27 while "+
+			"this is the exact live state observed on a node 2026-08-27 while "+
 			"the provider self-reported Healthy.", st.Health)
 	}
 	if !strings.Contains(st.Message, "stale") {

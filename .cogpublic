@@ -131,6 +131,23 @@ content_guards:
     description: "Slack bot token"
   - pattern: '@gmail\.com|@yahoo\.com|@hotmail\.com'
     description: "Personal email address (git author emails exempt)"
+  # Operator node identifiers. The kernel is generic: node names, their LAN
+  # subnet, and the models pinned to them live in node-local config
+  # (providers.local.yaml, gitignored), never in the repo. One pattern per
+  # token (no alternation) so each has its own probe and a broken branch
+  # cannot hide behind a working one.
+  - pattern: '(?i)\bdarkstar\b'
+    description: "Operator machine name"
+    probe: "lmstudio-Darkstar"
+  - pattern: '(?i)\beclipse\b'
+    description: "Operator machine name (the IDE is not referenced in this repo)"
+    probe: "backend eclipse"
+  - pattern: '(?i)\bornith\b'
+    description: "Model name tied to operator nodes"
+    probe: "ornith-1.0-35b"
+  - pattern: '192\.168\.10\.'
+    description: "Operator LAN subnet (use 192.0.2.0/24, RFC 5737, in examples)"
+    probe: "http://192.168.10.191:1234"
 
 # Paths the content scan skips.
 #

@@ -397,7 +397,7 @@ func TestToolEmitEvent_FromSession_OmittedKeepsLegacyBehavior(t *testing.T) {
 // ─── payload coercion (issue #492) ───────────────────────────────────────────
 //
 // Local-model tool-call plumbing (LM Studio-served models observed on
-// a peer node's ornith-1.0-35b) stringifies nested object arguments even when
+// a peer node's example-35b) stringifies nested object arguments even when
 // shown the object form. These tests exercise the same code path the local
 // harness uses — json.Unmarshal of raw tool-call argument bytes into
 // emitEventInput — rather than constructing emitEventInput literals, since

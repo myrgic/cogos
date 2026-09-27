@@ -29,7 +29,7 @@ The substrate already has richer routing: `SimpleRouter.Route()` respects `Compl
 
 ### Why this matters now
 
-With desktop LM Studio (192.168.10.191:1234, `google/gemma-4-26b-a4b`) wired as the `desktop` provider in `providers.local.yaml`, the substrate has the quality ceiling available — but Claude Code / MCP callers can't reach it through `cog_dispatch_to_harness`. The dispatch path can hit `desktop` only by overloading `COGOS_LLM_ENDPOINT` to point there globally, which forces *every* "26b" dispatch through the desktop and breaks isolation from the laptop's local LM Studio.
+With desktop LM Studio (192.0.2.10:1234, `google/gemma-4-26b-a4b`) wired as the `desktop` provider in `providers.local.yaml`, the substrate has the quality ceiling available — but Claude Code / MCP callers can't reach it through `cog_dispatch_to_harness`. The dispatch path can hit `desktop` only by overloading `COGOS_LLM_ENDPOINT` to point there globally, which forces *every* "26b" dispatch through the desktop and breaks isolation from the laptop's local LM Studio.
 
 The same friction will recur for any future provider — vLLM (RFC-0006), Codex, peer-fleet members. Hardcoding two model names is the wrong primitive; a provider name is.
 
@@ -69,7 +69,7 @@ type ProviderResolver interface {
 }
 
 type ResolvedProvider struct {
-    BackendURL  string  // e.g. http://192.168.10.191:1234
+    BackendURL  string  // e.g. http://192.0.2.10:1234
     BackendKind string  // "openai" | "ollama"
     Model       string  // e.g. google/gemma-4-26b-a4b
     APIKey      string  // already materialized from api_key_env

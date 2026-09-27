@@ -319,12 +319,12 @@ func TestHealthIssuesMessage_NoGapNotes(t *testing.T) {
 
 func TestIsLocalHostEndpoint(t *testing.T) {
 	cases := map[string]bool{
-		"":                           true,
-		"http://localhost:1234":      true,
-		"http://LOCALHOST:1234":      true, // case-insensitive — a config typo must not silently disable the parallel watch
-		"http://127.0.0.1:1234":      true,
-		"http://192.168.10.191:1234": false,
-		"https://eclipse.local:1234": false,
+		"":                            true,
+		"http://localhost:1234":       true,
+		"http://LOCALHOST:1234":       true, // case-insensitive — a config typo must not silently disable the parallel watch
+		"http://127.0.0.1:1234":       true,
+		"http://192.0.2.10:1234":      false,
+		"https://lan-host.local:1234": false,
 		// Bracketed IPv6 literals: the naive strings.LastIndex(host, ":") port
 		// strip cuts INSIDE the brackets on a literal with no port suffix
 		// ("[::1]" → "[:", a miss), and only works on "[::1]:1234" by
@@ -351,7 +351,7 @@ func TestParseModelStateEntries_ParallelField(t *testing.T) {
     options:
       model_state:
         manage: true
-        model: ornith-1.0-35b
+        model: example-35b
         context_length: 262144
         parallel: 1
 `
@@ -381,13 +381,13 @@ func TestParseModelStateEntries_NoOptIn(t *testing.T) {
     type: lmstudio
     endpoint: http://localhost:1234
     model: some-model
-  eclipse:
+  lmstudio-remote:
     type: openai
-    endpoint: http://192.168.10.191:1234
+    endpoint: http://192.0.2.10:1234
     options:
       model_state:
         manage: false
-        model: ornith-1.0-35b
+        model: example-35b
 `
 	got := parseModelStateEntriesFromYAML([]byte(yaml))
 	if len(got) != 0 {
@@ -398,14 +398,14 @@ func TestParseModelStateEntries_NoOptIn(t *testing.T) {
 func TestParseModelStateEntries_OptIn(t *testing.T) {
 	t.Parallel()
 	yaml := `providers:
-  eclipse:
+  lmstudio-remote:
     type: openai
-    endpoint: http://192.168.10.191:1234
-    api_key_env: ECLIPSE_API_KEY
+    endpoint: http://192.0.2.10:1234
+    api_key_env: LMSTUDIO_REMOTE_API_KEY
     options:
       model_state:
         manage: true
-        model: ornith-1.0-35b
+        model: example-35b
         context_length: 262144
 `
 	got := parseModelStateEntriesFromYAML([]byte(yaml))
@@ -413,16 +413,16 @@ func TestParseModelStateEntries_OptIn(t *testing.T) {
 		t.Fatalf("got %d; want 1", len(got))
 	}
 	e := got[0]
-	if e.name != "eclipse" {
+	if e.name != "lmstudio-remote" {
 		t.Errorf("name: got %q", e.name)
 	}
-	if e.endpoint != "http://192.168.10.191:1234" {
+	if e.endpoint != "http://192.0.2.10:1234" {
 		t.Errorf("endpoint: got %q", e.endpoint)
 	}
-	if e.apiKeyEnv != "ECLIPSE_API_KEY" {
+	if e.apiKeyEnv != "LMSTUDIO_REMOTE_API_KEY" {
 		t.Errorf("apiKeyEnv: got %q", e.apiKeyEnv)
 	}
-	if e.model != "ornith-1.0-35b" {
+	if e.model != "example-35b" {
 		t.Errorf("model: got %q", e.model)
 	}
 	if e.contextLength != 262144 {

@@ -32,7 +32,7 @@ ticker does not try to self-heal a box that is simply off or off-LAN.
 can only be **observed** (and, as of this reconciler's local fast-path, only
 **remediated**) on a local backend. `lms ps --json` (the source for the
 observed value) is a local-only CLI — `lms ps --help` shows no `--host` flag —
-so a remote backend (e.g. Eclipse) can never be checked against a declared
+so a remote backend can never be checked against a declared
 `parallel` target through this mechanism; `Health()`'s message says so
 explicitly rather than silently reporting full coverage. Likewise, if the local
 probe itself produces no observation (lms CLI missing/renamed, the probe times
@@ -68,13 +68,13 @@ anything** (against a mock, or the `list` verb against a reachable backend):
 
 ```bash
 # read-only: list loaded models (no mutation)
-LMS_ACTUATOR_TOKEN=$ECLIPSE_API_KEY \
-  node scripts/lms-actuator/lms-actuator.mjs list --host 192.168.10.191 --port 1234
+LMS_ACTUATOR_TOKEN=$LMSTUDIO_REMOTE_API_KEY \
+  node scripts/lms-actuator/lms-actuator.mjs list --host 192.0.2.10 --port 1234
 
 # dry-run: resolve + print the plan, issue no load/unload
-LMS_ACTUATOR_TOKEN=$ECLIPSE_API_KEY \
-  node scripts/lms-actuator/lms-actuator.mjs load --host 192.168.10.191 --port 1234 \
-       --model ornith-1.0-35b --context-length 262144 --dry-run
+LMS_ACTUATOR_TOKEN=$LMSTUDIO_REMOTE_API_KEY \
+  node scripts/lms-actuator/lms-actuator.mjs load --host 192.0.2.10 --port 1234 \
+       --model example-35b --context-length 262144 --dry-run
 ```
 
 ## Config (commented example — do NOT enable blindly)
@@ -84,39 +84,38 @@ actuator is installed and you have live-verified it against the target backend.
 
 ```yaml
 providers:
-  eclipse:
+  lmstudio-remote:
     type: openai                    # OpenAI-compatible dispatch (LM Studio REST)
     enabled: true
-    endpoint: "http://192.168.10.191:1234"
-    api_key_env: ECLIPSE_API_KEY    # Bearer token; also used by the reconciler
-    model: "ornith-1.0-35b"
+    endpoint: "http://192.0.2.10:1234"
+    api_key_env: LMSTUDIO_REMOTE_API_KEY    # Bearer token; also used by the reconciler
+    model: "example-35b"
     timeout: 300
     context_window: 262144
     options:
       model_state:
         manage: true                # the opt-in switch; false/absent ⇒ Suspended
-        model: "ornith-1.0-35b"
+        model: "example-35b"
         context_length: 262144      # VERIFIED loaded + serving on the 24GB card
         parallel: 1
         keep_warm: true
         jit_evict: false            # true ⇒ unload a non-target model crowding the card
 ```
 
-**Context length: use `262144`, not `65536`.** The old 65536 "ceiling" note was
-refuted — Eclipse loads and serves `ornith-1.0-35b` at 262144 on the 24 GB card.
-Darkstar is 262144 too.
+**Context length: use `262144`, not `65536`.** An earlier 65536 "ceiling" note
+was refuted: a 35B MoE loads and serves at 262144 on a 24 GB card.
 
 ### Local vs remote
 
-- **Remote backend (Eclipse, any off-LAN):** always uses the Node SDK actuator.
+- **Remote backend (another host):** always uses the Node SDK actuator.
   The `lms` CLI cannot reach a remote instance (LM Link gated).
-- **Localhost backend (Darkstar):** may fast-path through
+- **Localhost backend:** may fast-path through
   `~/.lmstudio/bin/lms load … --context-length …` when the CLI is present.
 
 ## Two-writer hazard
 
-Darkstar runs a `com.cogos.lmstudio-baseline` launchd job that loads a baseline
-model at boot. If you enable this reconciler with a **different** target on the
+If the node also runs a `com.cogos.lmstudio-baseline` launchd job that loads a
+baseline model at boot, and you enable this reconciler with a **different** target on the
 same backend, the two writers race. Before trusting the reconciler, scope that
 launchd job to boot-only (or retire it) so the reconciler is the single writer.
 Do not enable both with divergent targets.
@@ -130,7 +129,7 @@ Do not enable both with divergent targets.
 
 ## Out of scope: remote-backend `parallel` observability
 
-Extending `parallel` drift detection to remote backends (Eclipse) would require
+Extending `parallel` drift detection to remote backends would require
 the Node SDK actuator's `list` verb (`client.llm.listLoaded()`) to expose a
 parallel-equivalent field over the websocket bridge. That is unverified — the
 SDK is not installed in a bare checkout (`scripts/lms-actuator/node_modules` is

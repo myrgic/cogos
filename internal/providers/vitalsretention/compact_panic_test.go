@@ -12,7 +12,7 @@
 // guard — with no error, no log line, and nothing in Health() to show for it.
 // Compaction would silently never run again, raw files would grow past their
 // budget, and the 5m/1h tiers would stop being written, which is exactly the
-// on-disk shape observed on darkstar (raw current, 5m frozen days earlier).
+// on-disk shape observed on a live node (raw current, 5m frozen days earlier).
 //
 // Same defect class as the Health() blindness in health_staleness_test.go: a
 // failure whose only symptom is the absence of activity.

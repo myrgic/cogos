@@ -16,17 +16,17 @@ CogOS dispatches inference to LM Studio backends through the OpenAI-compatible
 provider (`type: lmstudio` / `openai`). That provider reconciles *dispatch* — is
 the endpoint reachable, does it speak `/v1/chat/completions`. It says nothing
 about **which model is loaded, at what context length**. Today that dimension is
-managed imperatively: a `com.cogos.lmstudio-baseline` launchd job on Darkstar
-loads a baseline model at boot, and the operator hand-loads models on Eclipse
-(192.168.10.191) through the LM Studio desktop app.
+managed imperatively: a `com.cogos.lmstudio-baseline` launchd job on the local
+node loads a baseline model at boot, and the operator hand-loads models on a
+remote LAN backend through the LM Studio desktop app.
 
 The only declarative inference reconciler that exists is `mlx-supervised`
 (ADR precedent), and it reconciles a *different* dimension: process-up via a
 launchd plist. It does not manage model/context state, and its actuator
 (launchctl) cannot reach a remote LM Studio instance.
 
-The gap: there is no way to declare "backend `eclipse` should have
-`ornith-1.0-35b` loaded at context 262144" and have the kernel keep it that way,
+The gap: there is no way to declare "backend `lmstudio-remote` should have
+`example-35b` loaded at context 262144" and have the kernel keep it that way,
 the way `mlx-supervised` keeps a process up. This ADR specifies that reconciler.
 
 ### Why LM Studio's native REST surface, not `/v1/models`
@@ -46,13 +46,13 @@ duplicate of the same id.
 ### `parallel` drift is watched too, but observed differently (issue #555)
 
 `GET /api/v0/models` does **not** expose `parallel` — confirmed live against
-Darkstar's `:1234` instance, it is simply absent from the response. The value
+a local `:1234` instance, it is simply absent from the response. The value
 *is* exposed by the local `lms` CLI's `lms ps --json` (confirmed live:
-`{"identifier":"ornith-1.0-35b",...,"parallel":1}`), which is a **local-only**
+`{"identifier":"example-35b",...,"parallel":1}`), which is a **local-only**
 command — `lms ps --help` shows no `--host` flag, the same LM-Link-gated
 local/remote asymmetry §3 already documents for the actuator's `lms load` fast
 path. So `parallel` drift is only observable on local backends; on a remote
-backend (e.g. Eclipse) a declared `parallel` target cannot be checked through
+backend a declared `parallel` target cannot be checked through
 this mechanism at all — the reconciler says so explicitly in its `Health()`
 message rather than silently reporting Healthy on context alone. The same gap
 note fires when a *local* backend's probe itself fails to observe anything
@@ -88,7 +88,7 @@ clamping or rounding the request, or the reload simply not taking effect)
 would otherwise unload and reload the model on every autonomic tick forever.
 
 The round trip `lms load --parallel N` → `lms ps --json` reporting exactly
-`N` back was verified live on Darkstar 2026-08-14 against `ornith-1.0-35b`:
+`N` back was verified live on a local backend 2026-08-14 against `example-35b`:
 `--parallel 2` landed as `"parallel": 2`, restoring `--parallel 1` landed as
 `"parallel": 1`, context length held at 262144 across both reloads, and warm
 reloads took roughly 12s. The dampening gate is kept regardless, as
@@ -178,8 +178,8 @@ in Go would be fragile. The actuator is the same "shell-out to the tool that own
 the surface" pattern `mlx-supervised` uses with launchctl.
 
 **Remote vs local:** on a localhost backend the provider may fast-path through
-`~/.lmstudio/bin/lms load … --context-length …`. On a remote backend (Eclipse,
-off-LAN) it always uses the SDK actuator — the `lms` CLI cannot reach a remote
+`~/.lmstudio/bin/lms load … --context-length …`. On a remote backend (another
+host) it always uses the SDK actuator — the `lms` CLI cannot reach a remote
 instance (LM Link gated).
 
 ### §4 — Registration (opt-in, off-by-default)
@@ -200,7 +200,7 @@ mirroring `mlx_inference.go`.
    read-only. Only `ApplyPlan` mutates, and only via the external actuator. The
    actuator's connection + read-only path was verified against a **mock**
    websocket server (ws upgrade + auth-frame accepted + `listLoaded` dispatched);
-   a real load against live Eclipse/Darkstar was deliberately **not** run. That
+   a real load against a live backend was deliberately **not** run. That
    path is "built + connection-verified + mock-tested" and still needs operator
    live-verification before it is trusted.
 2. **Opt-in, disabled by default.** No `model_state` block ⇒ Suspended, empty
@@ -212,7 +212,7 @@ mirroring `mlx_inference.go`.
 
 ## Two-writer hazard (documented, not changed here)
 
-The imperative `com.cogos.lmstudio-baseline` launchd job on Darkstar loads a
+The imperative `com.cogos.lmstudio-baseline` launchd job on the local node loads a
 baseline model at boot. If a `lms-model-state` reconciler with a *different*
 target were enabled on the same backend, the two writers would race (launchd
 loads model A at boot; the reconciler unloads it and loads model B; a relaunch of
@@ -261,9 +261,9 @@ operator-trusted and enabled on a live node.
 - A new build-time dependency: `scripts/lms-actuator/node_modules/@lmstudio/sdk`
   (pinned in `package.json`; `npm install` run in that dir). The Go side shells
   out; there is no Go-module dependency.
-- Verified target values for the operator's backends: **eclipse
-  `context_length: 262144`** (loaded + serving on the 24 GB card; the old 65536
-  "ceiling" note was refuted — do NOT hardcode 65536); darkstar 262144 too.
+- Verified target values on the author's backends: a 35B MoE loads and serves
+  at **`context_length: 262144`** on a 24 GB card and on the local node alike
+  (an earlier 65536 "ceiling" note was refuted — do NOT hardcode 65536).
 
 ## Testing
 

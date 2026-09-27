@@ -14,7 +14,7 @@ import (
 //
 // #432 forensics: the prior value here was 30s, sized for the resident E4B's
 // 10-turn worst case at ~3s/turn. That assumption broke once larger local
-// models joined the resident mix (Ornith 35B, gemma under concurrent-slot
+// models joined the resident mix (a 35B MoE, gemma under concurrent-slot
 // prefill load per #430/#432) — real single-turn latency under load runs
 // 2-4 minutes, so a 30s ceiling canceled every such request client-side while
 // LM Studio kept generating server-side (non-streaming completions don't
@@ -82,7 +82,7 @@ func (r *DispatchRequest) Normalize() error {
 		// keep — recognized legacy routing enum values.
 	default:
 		// Not a recognized routing enum value: treat it as an explicit
-		// model id the caller is requesting (e.g. "ornith-1.0-35b"),
+		// model id the caller is requesting (e.g. "example-35b"),
 		// per issue #430. Preserve it in RequestedModel so the dispatcher
 		// can honor it end-to-end instead of silently coercing to "e4b" —
 		// the prior behavior masked the caller's intent before routing

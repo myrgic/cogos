@@ -223,21 +223,21 @@ func writeFakePs(t *testing.T, body string, exitNonZero bool) string {
 
 func TestFetchLiveMergesLocalParallel(t *testing.T) {
 	srv := httptest.NewServer(modelsHandler(
-		modelFixture{id: "ornith-1.0-35b", state: "loaded", loadedCtx: 262144, maxCtx: 262144},
+		modelFixture{id: "example-35b", state: "loaded", loadedCtx: 262144, maxCtx: 262144},
 	))
 	defer srv.Close()
 
-	p := makeLMSProvider(t, srv.URL, "ornith-1.0-35b", 262144)
+	p := makeLMSProvider(t, srv.URL, "example-35b", 262144)
 	p.local = true
 	p.target.Parallel = 1 // must be declared — FetchLive gates the probe on a declared target
-	p.lmsCLI = writeFakePs(t, `[{"identifier":"ornith-1.0-35b","modelKey":"ornith-1.0-35b","parallel":1}]`, false)
+	p.lmsCLI = writeFakePs(t, `[{"identifier":"example-35b","modelKey":"example-35b","parallel":1}]`, false)
 
 	live, err := p.FetchLive(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("FetchLive: %v", err)
 	}
 	rows := live.([]lmsModelRow)
-	row := findModelRow(rows, "ornith-1.0-35b")
+	row := findModelRow(rows, "example-35b")
 	if row == nil || row.Parallel == nil || *row.Parallel != 1 {
 		t.Fatalf("expected merged Parallel=1, got %#v", row)
 	}
@@ -249,16 +249,16 @@ func TestFetchLiveSkipsParallelProbeWhenNoTargetDeclared(t *testing.T) {
 	// local backends that have never heard of `parallel:`. Point lmsCLI at a
 	// script that would fail loudly (a mismatching parallel value) if invoked.
 	srv := httptest.NewServer(modelsHandler(
-		modelFixture{id: "ornith-1.0-35b", state: "loaded", loadedCtx: 262144, maxCtx: 262144},
+		modelFixture{id: "example-35b", state: "loaded", loadedCtx: 262144, maxCtx: 262144},
 	))
 	defer srv.Close()
 
-	p := makeLMSProvider(t, srv.URL, "ornith-1.0-35b", 262144)
+	p := makeLMSProvider(t, srv.URL, "example-35b", 262144)
 	p.local = true
 	p.target.Parallel = 0 // no target declared
 
 	var invocations int
-	psPath := writeFakePs(t, `[{"identifier":"ornith-1.0-35b","parallel":99}]`, false)
+	psPath := writeFakePs(t, `[{"identifier":"example-35b","parallel":99}]`, false)
 	// Wrap the fake with a counter so we can assert it was never invoked.
 	countedPath := filepath.Join(t.TempDir(), "lms")
 	script := "#!/bin/sh\necho called >> " + filepath.Join(filepath.Dir(countedPath), "calls.log") + "\nexec " + psPath + " \"$@\"\n"
@@ -271,7 +271,7 @@ func TestFetchLiveSkipsParallelProbeWhenNoTargetDeclared(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchLive: %v", err)
 	}
-	row := findModelRow(live.([]lmsModelRow), "ornith-1.0-35b")
+	row := findModelRow(live.([]lmsModelRow), "example-35b")
 	if row == nil || row.Parallel != nil {
 		t.Errorf("expected nil Parallel with no target declared, got %#v", row)
 	}
@@ -285,11 +285,11 @@ func TestFetchLiveSkipsParallelProbeWhenNoTargetDeclared(t *testing.T) {
 
 func TestFetchLiveParallelProbeFailureIsNonFatal(t *testing.T) {
 	srv := httptest.NewServer(modelsHandler(
-		modelFixture{id: "ornith-1.0-35b", state: "loaded", loadedCtx: 262144, maxCtx: 262144},
+		modelFixture{id: "example-35b", state: "loaded", loadedCtx: 262144, maxCtx: 262144},
 	))
 	defer srv.Close()
 
-	p := makeLMSProvider(t, srv.URL, "ornith-1.0-35b", 262144)
+	p := makeLMSProvider(t, srv.URL, "example-35b", 262144)
 	p.local = true
 	p.target.Parallel = 1               // must be declared — FetchLive gates the probe on a declared target
 	p.lmsCLI = writeFakePs(t, "", true) // exits non-zero
@@ -299,7 +299,7 @@ func TestFetchLiveParallelProbeFailureIsNonFatal(t *testing.T) {
 		t.Fatalf("FetchLive must succeed despite parallel-probe failure: %v", err)
 	}
 	rows := live.([]lmsModelRow)
-	row := findModelRow(rows, "ornith-1.0-35b")
+	row := findModelRow(rows, "example-35b")
 	if row == nil {
 		t.Fatal("expected the /api/v0/models row to still be present")
 	}
@@ -313,11 +313,11 @@ func TestFetchLiveParallelProbeFailureIsNonFatal(t *testing.T) {
 
 func TestFetchLiveParallelProbeGarbageJSONIsNonFatal(t *testing.T) {
 	srv := httptest.NewServer(modelsHandler(
-		modelFixture{id: "ornith-1.0-35b", state: "loaded", loadedCtx: 262144, maxCtx: 262144},
+		modelFixture{id: "example-35b", state: "loaded", loadedCtx: 262144, maxCtx: 262144},
 	))
 	defer srv.Close()
 
-	p := makeLMSProvider(t, srv.URL, "ornith-1.0-35b", 262144)
+	p := makeLMSProvider(t, srv.URL, "example-35b", 262144)
 	p.local = true
 	p.target.Parallel = 1 // must be declared — FetchLive gates the probe on a declared target
 	p.lmsCLI = writeFakePs(t, "not json", false)
@@ -326,7 +326,7 @@ func TestFetchLiveParallelProbeGarbageJSONIsNonFatal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchLive must succeed despite garbage parallel-probe output: %v", err)
 	}
-	row := findModelRow(live.([]lmsModelRow), "ornith-1.0-35b")
+	row := findModelRow(live.([]lmsModelRow), "example-35b")
 	if row == nil || row.Parallel != nil {
 		t.Errorf("expected nil Parallel on unparseable lms ps output, got %#v", row)
 	}
@@ -337,20 +337,20 @@ func TestFetchLiveRemoteBackendSkipsParallelProbe(t *testing.T) {
 	// makes it meaningless there). Point lmsCLI at a script that would fail loudly
 	// if invoked, and assert the row's Parallel stays nil without erroring.
 	srv := httptest.NewServer(modelsHandler(
-		modelFixture{id: "ornith-1.0-35b", state: "loaded", loadedCtx: 262144, maxCtx: 262144},
+		modelFixture{id: "example-35b", state: "loaded", loadedCtx: 262144, maxCtx: 262144},
 	))
 	defer srv.Close()
 
-	p := makeLMSProvider(t, srv.URL, "ornith-1.0-35b", 262144)
+	p := makeLMSProvider(t, srv.URL, "example-35b", 262144)
 	p.local = false       // remote
 	p.target.Parallel = 1 // declared, so this test exercises the local-gate specifically
-	p.lmsCLI = writeFakePs(t, `[{"identifier":"ornith-1.0-35b","parallel":1}]`, false)
+	p.lmsCLI = writeFakePs(t, `[{"identifier":"example-35b","parallel":1}]`, false)
 
 	live, err := p.FetchLive(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("FetchLive: %v", err)
 	}
-	row := findModelRow(live.([]lmsModelRow), "ornith-1.0-35b")
+	row := findModelRow(live.([]lmsModelRow), "example-35b")
 	if row == nil || row.Parallel != nil {
 		t.Errorf("remote backend must not merge a parallel probe, got %#v", row)
 	}
@@ -994,7 +994,7 @@ func TestBuildStateReportsObservedParallel(t *testing.T) {
 // ── ApplyPlan: invokes the FAKE actuator with correct argv+env, no real load ──
 
 func TestApplyPlanInvokesActuatorWithArgvAndEnv(t *testing.T) {
-	p := makeLMSProvider(t, "http://192.168.10.191:1234", "target-model", 262144)
+	p := makeLMSProvider(t, "http://192.0.2.10:1234", "target-model", 262144)
 	plan := &reconcile.Plan{
 		ResourceType: lmsModelStateType,
 		Actions: []reconcile.Action{{
@@ -1019,7 +1019,7 @@ func TestApplyPlanInvokesActuatorWithArgvAndEnv(t *testing.T) {
 	// NOTE: --parallel is intentionally absent: LM Studio's SDK load config has no
 	// per-load parallelism knob, so the actuator does not accept/forward it.
 	for _, want := range []string{
-		"load", "--host 192.168.10.191", "--port 1234",
+		"load", "--host 192.0.2.10", "--port 1234",
 		"--model target-model", "--context-length 262144",
 	} {
 		if !strings.Contains(log, want) {
@@ -1042,7 +1042,7 @@ func TestApplyPlanInvokesActuatorWithArgvAndEnv(t *testing.T) {
 // swallowed catch). ApplyPlan must NOT report ApplySucceeded — the result-line
 // parse folds the actuator's error into an ApplyFailed.
 func TestApplyPlanFailsOnOkFalseWithZeroExit(t *testing.T) {
-	p := makeLMSProvider(t, "http://192.168.10.191:1234", "target-model", 262144)
+	p := makeLMSProvider(t, "http://192.0.2.10:1234", "target-model", 262144)
 	dir := t.TempDir()
 	script := "#!/bin/sh\n" +
 		"echo '{\"ok\":false,\"error\":\"load timed out\"}'\n" +
@@ -1074,7 +1074,7 @@ func TestApplyPlanFailsOnOkFalseWithZeroExit(t *testing.T) {
 }
 
 func TestApplyPlanContextActionUsesSetContext(t *testing.T) {
-	p := makeLMSProvider(t, "http://192.168.10.191:1234", "target-model", 262144)
+	p := makeLMSProvider(t, "http://192.0.2.10:1234", "target-model", 262144)
 	plan := &reconcile.Plan{
 		ResourceType: lmsModelStateType,
 		Actions: []reconcile.Action{{
@@ -1102,7 +1102,7 @@ func TestApplyPlanContextActionUsesSetContext(t *testing.T) {
 // --parallel unconditionally on that verb regardless of which drift triggered
 // it.
 func TestApplyPlanParallelActionUsesSetContext(t *testing.T) {
-	p := makeLMSProvider(t, "http://192.168.10.191:1234", "target-model", 262144)
+	p := makeLMSProvider(t, "http://192.0.2.10:1234", "target-model", 262144)
 	plan := &reconcile.Plan{
 		ResourceType: lmsModelStateType,
 		Actions: []reconcile.Action{{
@@ -1245,15 +1245,15 @@ func TestLocalDetection(t *testing.T) {
 	if !p.local {
 		t.Errorf("127.0.0.1 should be detected as local")
 	}
-	cfg.Endpoint = "http://192.168.10.191:1234"
+	cfg.Endpoint = "http://192.0.2.10:1234"
 	p2, _ := newLMSModelStateProvider("x", cfg, "", "")
 	if p2.local {
-		t.Errorf("192.168.10.191 should NOT be local")
+		t.Errorf("192.0.2.10 should NOT be local")
 	}
-	if p2.host != "192.168.10.191" || p2.port != 1234 {
+	if p2.host != "192.0.2.10" || p2.port != 1234 {
 		t.Errorf("host/port parse: got %s:%d", p2.host, p2.port)
 	}
-	if p2.wsURL != "ws://192.168.10.191:1234" {
+	if p2.wsURL != "ws://192.0.2.10:1234" {
 		t.Errorf("wsURL: got %s", p2.wsURL)
 	}
 }
