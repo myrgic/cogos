@@ -763,6 +763,7 @@ func (c *LocalHarnessController) runCycle(parent context.Context, reason string,
 	}
 
 	model, _, note := resolveDispatchLocalModel(target.Models, c.localModelHint(), DispatchModelE4B)
+	recordPinResolution("assess", c.localModelHint(), model, note)
 	if model == "" {
 		outcome.record.Action = "error"
 		outcome.record.Reason = note
@@ -1422,9 +1423,18 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 		// issue #420's provider-precedence semantics — req.Provider still
 		// resolves the same way; only the *model* selection within that
 		// resolved provider now prefers the caller's explicit request.
+		// pinReason distinguishes the two outcomes explicitly — this branch has
+		// the same shape as state-routing/harness-provider below (empty note
+		// on the declared path, a descriptive "...overridden" note only when
+		// req.RequestedModel is set), so it needs the same typed classification
+		// instead of classifyPinNote's note=="" heuristic (cog-review round 2
+		// on #601 found this exact branch left on the untyped path while its
+		// three siblings were converted).
+		pinReason := PinReasonDeclared
 		if req.RequestedModel != "" {
 			model = req.RequestedModel
 			note = fmt.Sprintf("explicit-model: provider=%s model=%s (config default %s overridden)", req.Provider, req.RequestedModel, pc.Model)
+			pinReason = PinReasonOverridden
 		} else {
 			model = pc.Model
 		}
@@ -1441,6 +1451,7 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 				Message: fmt.Sprintf("model %q is denied on provider %q: %s", model, req.Provider, reason),
 			}
 		}
+		recordPinResolutionTyped("dispatch:explicit-provider", pc.Model, model, pinReason, note)
 		// routeUsed stays empty; ProviderUsed on each slot is the canonical
 		// signal that the named-provider path fired. ServedModel (set from
 		// the provider response's ProviderMeta.Model) is the canonical
@@ -1507,6 +1518,15 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 					req.Provider = mres.PreferProvider
 					note = fmt.Sprintf("model-routing: model=%s -> provider=%s override=%s", req.Model, mres.PreferProvider, mres.ModelOverride)
 					usedModelRoute = true
+					// This branch always fulfills an explicit caller-requested
+					// alias/model id (req.Model) via the shared resolver — there
+					// is no "config default" to diverge from here, so every
+					// resolution on this path is declared, not a fallback. The
+					// note above is diagnostic detail only; do not run it through
+					// classifyPinNote (it is always non-empty and would
+					// misclassify as "fallback:other" on every single dispatch,
+					// per the cog-review objection on PR #601).
+					recordPinResolutionTyped("dispatch:model-alias", pc.Model, model, PinReasonDeclared, note)
 				}
 				// If provider not found or disabled in this node's config: fall
 				// through to process_state_routing / legacy path.
@@ -1534,9 +1554,18 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 						// Per issue #430: an explicit caller model wins over the
 						// config default here too — state-routing only chooses
 						// the provider, not the model.
+						// pinReason distinguishes the two outcomes explicitly:
+						// classifyPinNote's note=="" heuristic can't be reused
+						// here because BOTH branches build a descriptive note
+						// (for Detail) — an unconditional note would misclassify
+						// the no-override branch as "fallback:other" on every
+						// single normal dispatch (the cog-review objection on
+						// PR #601).
+						pinReason := PinReasonDeclared
 						if req.RequestedModel != "" {
 							model = req.RequestedModel
 							note = fmt.Sprintf("state-routing: state=%s -> provider=%s model=%s (config default %s overridden)", c.process.State().String(), stateProvider, req.RequestedModel, pc.Model)
+							pinReason = PinReasonOverridden
 						} else {
 							model = pc.Model
 							note = fmt.Sprintf("state-routing: state=%s -> provider=%s", c.process.State().String(), stateProvider)
@@ -1556,6 +1585,7 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 						// from the legacy local-LLM probe path.
 						req.Provider = stateProvider
 						usedStateRoute = true
+						recordPinResolutionTyped("dispatch:state-routing", pc.Model, model, pinReason, note)
 					}
 					// If provider not found or disabled: fall through to legacy path silently.
 				}
@@ -1608,9 +1638,15 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 				// provider itself was resolved from the harness_provider config
 				// default. The config's model remains the default when the
 				// caller specified none.
+				// pinReason distinguishes the two outcomes explicitly — see the
+				// matching comment in the state-routing branch above; both
+				// branches here build a descriptive note for Detail, so
+				// classifyPinNote's note=="" heuristic can't tell them apart.
+				pinReason := PinReasonDeclared
 				if req.RequestedModel != "" {
 					model = req.RequestedModel
 					note = fmt.Sprintf("harness-provider: provider=%s model=%s (config default %s overridden)", hp, req.RequestedModel, pc.Model)
+					pinReason = PinReasonOverridden
 				} else {
 					model = pc.Model
 					note = fmt.Sprintf("harness-provider: provider=%s", hp)
@@ -1628,6 +1664,7 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 				// provider name in ProviderUsed.
 				req.Provider = hp
 				usedHarnessProvider = true
+				recordPinResolutionTyped("dispatch:harness-provider", pc.Model, model, pinReason, note)
 			}
 			if !usedStateRoute && !usedHarnessProvider {
 				// Path 3: legacy model-enum routing via local-LLM probe.
@@ -1636,6 +1673,7 @@ func (c *LocalHarnessController) DispatchToHarness(ctx context.Context, req Disp
 					return nil, terr
 				}
 				m, ru, n := resolveDispatchLocalModel(target.Models, c.localModelHint(), req.Model)
+				recordPinResolution("dispatch", c.localModelHint(), m, n)
 				if m == "" {
 					return nil, errors.New(n)
 				}
