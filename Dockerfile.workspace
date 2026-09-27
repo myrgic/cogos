@@ -1,0 +1,256 @@
+# CogOS Workspace — declared minimal starting condition
+#
+# This is the FIRST official container declaration of a CogOS *workspace*
+# (as opposed to Dockerfile, which containerizes the kernel binary only).
+# Every existing artifact in this repo mounts a workspace in from outside;
+# this image says, in one build, exactly what a fresh workspace IS: the
+# directory tree and default config files `cogos init` produces, nothing
+# more. It is the shared trusted foundation — distributions (a product, a
+# fleet node, a demo) layer their own skills/config on top of this base;
+# they do not redefine what "minimal" means.
+#
+# Two things make this trustworthy rather than a hand-copied file list:
+#   1. The scaffold stage runs the REAL `cogos init` command against a
+#      binary downloaded from an actual GitHub release — not a COPY of
+#      files guessed from reading the source. If internal/engine/init.go
+#      changes what init produces, this image changes with it automatically
+#      the next time it is rebuilt against a release containing that change.
+#   2. The published binary is fetched and verified exactly the way
+#      `cogos self-update` verifies it: SHA-256 against checksums.txt, then
+#      checksums.txt's Sigstore keyless signature against this repo's
+#      release.yml CI identity (see docs/release-signing.md). A build with
+#      REQUIRE_SIGNATURE_VERIFICATION=1 (the default) fails closed if either
+#      check does not pass.
+#
+# Build:
+#   docker build -f Dockerfile.workspace -t ghcr.io/myrgic/cogos-workspace:dev .
+#
+# Build for a specific pinned release, a named workspace, and a non-default
+# port:
+#   docker build -f Dockerfile.workspace \
+#     --build-arg COGOS_VERSION=v0.16.31 \
+#     --build-arg WORKSPACE_NAME=my-node \
+#     --build-arg COGOS_PORT=6931 \
+#     -t ghcr.io/myrgic/cogos-workspace:v0.16.31 .
+#
+# Layering an overlay (extra skills / config) at build time — see the
+# "Component seams" section below for the contract:
+#   docker build -f Dockerfile.workspace \
+#     --build-arg SKILLS_OVERLAY=./my-distribution/skills \
+#     --build-arg CONFIG_OVERLAY=./my-distribution/config \
+#     -t ghcr.io/myrgic/cogos-workspace:my-distribution .
+#
+# Multi-platform (matches the release build matrix: linux/amd64, linux/arm64):
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     -f Dockerfile.workspace -t ghcr.io/myrgic/cogos-workspace:dev .
+#
+# What is deliberately NOT in this image: no ANTHROPIC_API_KEY or any other
+# secret material, no provider config beyond the shipped defaults, no
+# identity beyond the generic default identity card, no skills, no CLAUDE.md
+# / SOUL.md / USER.md. A workspace is a substrate, not a persona — personas
+# and secrets are supplied by whoever runs the image, same as the existing
+# kernel Dockerfile's `/path/to/workspace` volume mount.
+
+# ── Build ARGs (component seams) ──────────────────────────────────────────────
+#
+# COGOS_VERSION      Pinned release tag to install. Defaults to the latest
+#                     published tag as of this Dockerfile's last edit — NOT
+#                     resolved dynamically at build time, so builds stay
+#                     reproducible. Bump by hand when a new release should
+#                     become the new minimal-starting-condition baseline.
+# WORKSPACE_NAME      Cosmetic identity for this workspace instance; stamped
+#                     as an env var and OCI annotation. Does not change the
+#                     scaffold.
+# COGOS_PORT          Kernel HTTP API port this workspace expects to serve
+#                     on. Stamped as EXPOSE + env var; the actual `serve`
+#                     invocation still decides the real bind.
+# SKILLS_OVERLAY      Build-context-relative directory COPYed onto
+#                     .claude/skills/ after scaffolding. Defaults to an
+#                     empty placeholder checked into this repo so the image
+#                     builds standalone with zero overlay. A distribution
+#                     points this at its own skills directory (which must
+#                     live inside the build context).
+# CONFIG_OVERLAY      Same contract as SKILLS_OVERLAY, applied on top of
+#                     .cog/config/ (can replace kernel.yaml / providers.yaml
+#                     / identity.yaml with distribution-specific defaults).
+# REQUIRE_SIGNATURE_VERIFICATION
+#                     "1" (default) fails the build if the downloaded
+#                     release's Sigstore signature does not verify. Set to
+#                     "0" only for releases predating signing
+#                     (docs/release-signing.md's FirstSignedRelease,
+#                     v0.16.20) or in an air-gapped build environment that
+#                     cannot reach Sigstore's public Fulcio/Rekor infra —
+#                     both are exceptional, not the default path.
+# COGOS_WORKSPACE_SCHEMA
+#                     The scaffold-version string this build declares via
+#                     the cog.workspace.schema label. Must equal the VERSION
+#                     marker internal/engine/init.go actually writes to
+#                     .cog/VERSION — the build below ASSERTS this rather
+#                     than trusting it, so the label can never silently lie.
+
+ARG COGOS_VERSION=v0.16.31
+ARG COGOS_REPO=myrgic/cogos
+ARG COSIGN_VERSION=v3.1.3
+ARG WORKSPACE_NAME=workspace
+ARG COGOS_PORT=6931
+ARG SKILLS_OVERLAY=./docker/workspace-overlay/skills
+ARG CONFIG_OVERLAY=./docker/workspace-overlay/config
+ARG REQUIRE_SIGNATURE_VERIFICATION=1
+ARG COGOS_WORKSPACE_SCHEMA=3.0.0
+
+# ── Stage 1: fetch — download + verify the published release binary ──────────
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS fetch
+
+ARG COGOS_VERSION
+ARG COGOS_REPO
+ARG COSIGN_VERSION
+ARG REQUIRE_SIGNATURE_VERIFICATION
+ARG TARGETARCH
+
+RUN apk add --no-cache curl ca-certificates
+
+WORKDIR /fetch
+
+# cosign is used only to verify the release; it never reaches the runtime
+# stage. Its own binary is checksum-verified against sigstore/cosign's
+# published checksums file — a documented trust-boundary stop, the same one
+# a human doing `brew install cosign` from docs/release-signing.md accepts.
+RUN if [ "$REQUIRE_SIGNATURE_VERIFICATION" = "1" ]; then \
+      curl -fsSLO "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${TARGETARCH}" && \
+      curl -fsSLO "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign_checksums.txt" && \
+      grep "cosign-linux-${TARGETARCH}\$" cosign_checksums.txt > cosign_expected.sha256 && \
+      test -s cosign_expected.sha256 && \
+      sha256sum -c cosign_expected.sha256 && \
+      mv "cosign-linux-${TARGETARCH}" /usr/local/bin/cosign && \
+      chmod +x /usr/local/bin/cosign; \
+    fi
+
+# Download the release binary + its integrity/provenance material, exactly
+# the set self-update resolves (internal/providers/selfupdate/github.go):
+# the asset, checksums.txt, checksums.txt.sig, checksums.txt.pem.
+RUN set -eu; \
+    base="https://github.com/${COGOS_REPO}/releases/download/${COGOS_VERSION}"; \
+    asset="cogos-linux-${TARGETARCH}"; \
+    curl -fsSLO "${base}/${asset}"; \
+    curl -fsSLO "${base}/checksums.txt"; \
+    curl -fsSL -o checksums.txt.sig "${base}/checksums.txt.sig" || true; \
+    curl -fsSL -o checksums.txt.pem "${base}/checksums.txt.pem" || true; \
+    echo "${asset}" > /fetch/.asset_name
+
+# Signature first (docs/release-signing.md's exact recipe), then checksum —
+# only trust checksums.txt's digests once its own provenance is established.
+RUN set -eu; \
+    if [ "$REQUIRE_SIGNATURE_VERIFICATION" = "1" ]; then \
+      if [ ! -s checksums.txt.sig ] || [ ! -s checksums.txt.pem ]; then \
+        echo "ERROR: ${COGOS_VERSION} has no checksums.txt.sig/.pem (releases before v0.16.20 predate signing)." >&2; \
+        echo "Set --build-arg REQUIRE_SIGNATURE_VERIFICATION=0 only if that is expected." >&2; \
+        exit 1; \
+      fi; \
+      cosign verify-blob \
+        --certificate checksums.txt.pem \
+        --signature checksums.txt.sig \
+        --certificate-identity-regexp "^https://github.com/${COGOS_REPO}/.github/workflows/release.yml@.*" \
+        --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+        checksums.txt; \
+    fi
+RUN set -eu; \
+    asset="$(cat /fetch/.asset_name)"; \
+    grep " ${asset}\$" checksums.txt > expected.sha256; \
+    test -s expected.sha256; \
+    sha256sum -c expected.sha256; \
+    chmod +x "${asset}"; \
+    mv "${asset}" /fetch/cogos
+
+# ── Stage 2: scaffold — run the REAL `cogos init`, no hand-copied files ──────
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS scaffold
+
+ARG WORKSPACE_NAME
+ARG COGOS_WORKSPACE_SCHEMA
+
+COPY --from=fetch /fetch/cogos /usr/local/bin/cogos
+
+RUN mkdir -p /workspace && /usr/local/bin/cogos init --workspace /workspace
+
+# Fail the build if the schema label this Dockerfile is about to stamp would
+# lie about what init.go actually wrote. This is the drift guard: bump
+# COGOS_WORKSPACE_SCHEMA here (and in the label below) whenever
+# internal/engine/init.go's VERSION marker changes, or the build breaks
+# loudly instead of shipping a mislabeled image.
+RUN actual="$(tr -d '\n' < /workspace/.cog/VERSION)"; \
+    if [ "$actual" != "$COGOS_WORKSPACE_SCHEMA" ]; then \
+      echo "ERROR: cogos init wrote .cog/VERSION=${actual}, but COGOS_WORKSPACE_SCHEMA=${COGOS_WORKSPACE_SCHEMA}." >&2; \
+      echo "Update the COGOS_WORKSPACE_SCHEMA ARG default (and cog.workspace.schema label) to match." >&2; \
+      exit 1; \
+    fi
+
+RUN echo "${WORKSPACE_NAME}" > /workspace/.cog/WORKSPACE_NAME
+
+# ── Stage 3: runtime — minimal final image ────────────────────────────────────
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+
+ARG COGOS_VERSION
+ARG COGOS_REPO
+ARG WORKSPACE_NAME
+ARG COGOS_PORT
+ARG SKILLS_OVERLAY
+ARG CONFIG_OVERLAY
+ARG COGOS_WORKSPACE_SCHEMA
+ARG BUILD_TIME=unknown
+
+RUN apk add --no-cache ca-certificates
+
+RUN addgroup -S cogos && adduser -S cogos -G cogos
+
+COPY --from=fetch /fetch/cogos /usr/local/bin/cogos
+COPY --from=scaffold --chown=cogos:cogos /workspace /workspace
+
+WORKDIR /workspace
+
+# Component seams: optional overlays layered onto the scaffolded workspace.
+# The default overlay directories are checked into this repo and empty
+# (docker/workspace-overlay/{skills,config}/.gitkeep), so a plain
+# `docker build -f Dockerfile.workspace .` with no --build-arg overrides
+# copies nothing extra. A distribution points SKILLS_OVERLAY / CONFIG_OVERLAY
+# at its own directories (which must live inside its build context) to layer
+# skills or replace default config at build time — no ONBUILD trigger, no
+# forked Dockerfile required for the common case.
+COPY --chown=cogos:cogos ${SKILLS_OVERLAY} /workspace/.claude/skills/
+COPY --chown=cogos:cogos ${CONFIG_OVERLAY} /workspace/.cog/config/
+
+# OCI annotations. cog.workspace.schema is asserted against the real
+# .cog/VERSION marker in the scaffold stage above — it cannot drift silently.
+LABEL org.opencontainers.image.title="cogos-workspace" \
+      org.opencontainers.image.description="Declared minimal starting condition of a CogOS workspace" \
+      org.opencontainers.image.source="https://github.com/${COGOS_REPO}" \
+      org.opencontainers.image.version="${COGOS_VERSION}" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.created="${BUILD_TIME}" \
+      cog.workspace.schema="${COGOS_WORKSPACE_SCHEMA}" \
+      cog.workspace.name="${WORKSPACE_NAME}"
+
+# ARG values do not survive into the running container — only ENV does — so
+# COGOS_PORT must be re-exported as ENV here for the shell-form HEALTHCHECK
+# and CMD below (both run via `/bin/sh -c` at container-start time, which
+# expands $COGOS_PORT from the runtime environment) to see the build-time
+# value. EXPOSE, unlike CMD/HEALTHCHECK, is one of the few instructions Docker
+# itself substitutes ARGs into at build time, so it needs no ENV mirror.
+ENV COG_WORKSPACE="${WORKSPACE_NAME}" \
+    COGOS_PORT="${COGOS_PORT}"
+
+USER cogos
+
+EXPOSE ${COGOS_PORT}
+
+# Exercises the real health surface: `cogos health` is the headless,
+# workspace-aware check (internal/engine/cli.go's runHealthCheckCmd is
+# documented "Used by the Dockerfile HEALTHCHECK directive") — it resolves
+# the running daemon's endpoint from --workspace/--port and hits its
+# /health HTTP route, rather than hardcoding a curl to localhost the way
+# the kernel Dockerfile currently does.
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD cogos health --workspace /workspace --port $COGOS_PORT || exit 1
+
+# Shell-form (not ENTRYPOINT + exec-form CMD) so $COGOS_PORT actually expands
+# at container start — exec-form JSON arrays never go through a shell, so
+# Docker would otherwise pass the literal string "$COGOS_PORT" to `serve`.
+CMD cogos serve --workspace /workspace --port $COGOS_PORT
