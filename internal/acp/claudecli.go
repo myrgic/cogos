@@ -42,7 +42,10 @@ type SpawnOpts struct {
 //   - Send may be called from any goroutine; writes are serialized.
 //   - Events() returns the same channel across the Subprocess's lifetime;
 //     it closes when the subprocess exits and the reader goroutine drains.
-//   - Wait blocks until the subprocess exits and returns its exit error.
+//   - Wait blocks until the subprocess exits AND Events() has been drained
+//     to EOF, then returns the exit error. Drain Events() before (or while)
+//     calling Wait; Wait alone on an undrained channel blocks once the
+//     event buffer fills.
 type Subprocess struct {
 	cmd  *exec.Cmd
 	in   io.WriteCloser
@@ -120,8 +123,21 @@ func Spawn(ctx context.Context, opts SpawnOpts) (*Subprocess, error) {
 		events: make(chan Event, 32),
 		waitCh: make(chan error, 1),
 	}
-	go sp.readLoop()
-	go func() { sp.waitCh <- cmd.Wait() }()
+	// cmd.Wait closes the stdout pipe as soon as the process exits, so it
+	// must not run until readLoop has drained stdout to EOF (os/exec: "it is
+	// incorrect to call Wait before all reads from the pipe have
+	// completed"). Waiting first dropped whatever the process wrote last,
+	// typically its final result frame: a process that prints and exits
+	// immediately lost it every time.
+	readDone := make(chan struct{})
+	go func() {
+		sp.readLoop()
+		close(readDone)
+	}()
+	go func() {
+		<-readDone
+		sp.waitCh <- cmd.Wait()
+	}()
 
 	return sp, nil
 }
@@ -216,6 +232,8 @@ func (s *Subprocess) Cancel(mode CancelMode) error {
 	}
 }
 
-// Wait blocks until the subprocess exits and returns its exit error
-// (nil on clean exit). May be called from any goroutine.
+// Wait blocks until the subprocess has exited and its stdout has been read
+// to EOF, then returns the exit error (nil on clean exit). Drain Events()
+// first or concurrently (see the Subprocess concurrency contract). May be
+// called from any goroutine.
 func (s *Subprocess) Wait() error { return <-s.waitCh }
