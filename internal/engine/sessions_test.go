@@ -1716,56 +1716,62 @@ func TestSessionRegistry_ReapStale(t *testing.T) {
 		// continuously for the sum of every row's append in the sweep: a
 		// concurrent caller must get a turn in the gaps between rows.
 		//
-		// Reproduce this by giving every row in the sweep a slow appendFn
-		// and, concurrently, hammering the registry with reads. If the
-		// lock is held for the whole batch (the pre-fix behavior), every
-		// read is delayed by roughly the full batch duration. If it's only
-		// held per-row (the fix), reads succeed in the gaps and none is
-		// delayed by more than roughly one row's append.
-		const (
-			rowCount   = 4
-			appendWait = 80 * time.Millisecond
-		)
-		fullBatchDuration := rowCount * appendWait
-
+		// Structural, not timed. Row 1's append blocks until released while
+		// a reader queues on the lock. sync.Mutex hands the lock to a waiter
+		// in FIFO order once it has waited >1ms (starvation mode), so on
+		// release: with a per-row hold, row 1 unlocks and the reader runs
+		// BEFORE row 2's append starts; with a whole-sweep hold, the reader
+		// cannot run until every append is done. The old version measured
+		// read latency against an 80ms-per-row budget and could flake on a
+		// loaded runner.
+		const rowCount = 3
 		reg := NewSessionRegistry()
 		for i := 0; i < rowCount; i++ {
 			seed(t, reg, fmt.Sprintf("stale-batch-%d", i), now.Add(-2*ttl), false)
 		}
 
+		inFirst := make(chan struct{})
+		release := make(chan struct{})
+		readDone := make(chan struct{})
+		calls := 0
+		readerBeforeSecond := false
 		sweepDone := make(chan struct{})
 		go func() {
 			defer close(sweepDone)
 			reg.ReapStale(ttl, now, func(string) error {
-				time.Sleep(appendWait)
+				calls++ // appends run sequentially inside one sweep
+				switch calls {
+				case 1:
+					close(inFirst)
+					<-release
+				case 2:
+					select {
+					case <-readDone:
+						readerBeforeSecond = true
+					default:
+					}
+				}
 				return nil
 			})
 		}()
 
-		var maxReadLatency time.Duration
-		for {
-			select {
-			case <-sweepDone:
-				goto assert
-			default:
-			}
-			start := time.Now()
+		<-inFirst // sweep holds the lock inside row 1's append
+		go func() {
 			reg.Get("stale-batch-0")
-			if d := time.Since(start); d > maxReadLatency {
-				maxReadLatency = d
-			}
-			time.Sleep(5 * time.Millisecond)
+			close(readDone)
+		}()
+		// Let the reader queue on the lock long enough (>1ms) that the
+		// mutex switches to FIFO handoff.
+		time.Sleep(20 * time.Millisecond)
+		close(release)
+		<-sweepDone
+		<-readDone
+		if calls != rowCount {
+			t.Fatalf("appendFn called %d times; want %d", calls, rowCount)
 		}
-
-	assert:
-		// A generous threshold: comfortably above one row's append (the
-		// unavoidable per-row hold) but well below the full batch — a
-		// whole-sweep lock would push this past fullBatchDuration.
-		threshold := fullBatchDuration - appendWait/2
-		if maxReadLatency >= threshold {
-			t.Errorf("max concurrent Get() latency during sweep = %v, want < %v (full batch = %v); "+
-				"the registry lock appears to be held across the whole sweep instead of per-row",
-				maxReadLatency, threshold, fullBatchDuration)
+		if !readerBeforeSecond {
+			t.Error("a reader queued during row 1 did not run before row 2's append; " +
+				"the registry lock is held across the whole sweep instead of per row")
 		}
 	})
 }

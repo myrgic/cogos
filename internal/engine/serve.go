@@ -540,6 +540,14 @@ func (s *Server) Start() error {
 	// never get an explicit POST /v1/sessions/{id}/end (crash, kill -9,
 	// dropped client) stay Ended=false forever (387 such rows observed live,
 	// over a month old). Tied to the serving lifetime, not construction.
+	return s.Serve(ln)
+}
+
+// Serve serves on an already-bound listener and runs the serving-lifetime
+// background loops (session reaper) until Shutdown. Every production entry
+// point must come through here or Start: Boot (`cogos serve`) binds its own
+// listener first, and calling srv.Serve directly skipped the reaper.
+func (s *Server) Serve(ln net.Listener) error {
 	s.startBackground()
 	return s.srv.Serve(ln)
 }
@@ -560,6 +568,13 @@ func (s *Server) startBackground() {
 	ctx, stop := context.WithCancel(context.Background())
 	s.reaperStop = stop
 	s.startSessionReaper(ctx, defaultSessionReapTTL, defaultSessionReapInterval)
+}
+
+// backgroundRunning reports whether the serving-lifetime loops are running.
+func (s *Server) backgroundRunning() bool {
+	s.reaperMu.Lock()
+	defer s.reaperMu.Unlock()
+	return s.reaperStop != nil
 }
 
 // stopBackground stops what startBackground started (idempotent).

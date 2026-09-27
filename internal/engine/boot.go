@@ -144,6 +144,12 @@ type Kernel struct {
 	bepProvider *BEPProvider
 }
 
+// SessionReaperRunning reports whether the server's session TTL reaper is
+// running. It must be true for any kernel that is serving (cogos#423).
+func (k *Kernel) SessionReaperRunning() bool {
+	return k.server != nil && k.server.backgroundRunning()
+}
+
 // Endpoint returns the base URL of the kernel's HTTP server,
 // e.g. "http://127.0.0.1:54321".
 func (k *Kernel) Endpoint() string {
@@ -486,7 +492,7 @@ func Boot(ctx context.Context, cfg *Config, opts ...BootOption) (*Kernel, error)
 	// Start HTTP server goroutine using the pre-allocated listener.
 	serverDone := make(chan error, 1)
 	go func() {
-		if err := server.srv.Serve(ln); err != nil {
+		if err := server.Serve(ln); err != nil {
 			serverDone <- err
 		}
 	}()

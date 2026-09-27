@@ -1551,7 +1551,7 @@
     },
     {
       "file": "internal/engine/serve.go",
-      "line": 1342,
+      "line": 1357,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",
@@ -2247,7 +2247,7 @@
     },
     {
       "file": "internal/testkernel/testkernel.go",
-      "line": 576,
+      "line": 581,
       "column": 13,
       "primitive": "os.MkdirAll",
       "func": "makeMinimalWorkspace",
@@ -2259,7 +2259,7 @@
     },
     {
       "file": "internal/testkernel/testkernel.go",
-      "line": 583,
+      "line": 588,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "makeMinimalWorkspace",
@@ -2271,7 +2271,7 @@
     },
     {
       "file": "internal/testkernel/testkernel.go",
-      "line": 588,
+      "line": 593,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "makeMinimalWorkspace",
