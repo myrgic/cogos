@@ -39,12 +39,14 @@ package all
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/myrgic/cogos/internal/conversations"
 	"github.com/myrgic/cogos/internal/engine"
@@ -309,6 +311,9 @@ func RegisterConversations(provider *conversations.Provider) {
 	// Wire conversations URI resolver.
 	engine.SetConversationsResolver(&conversationsURIResolver{p: provider})
 
+	// Wire the transcript half of GET /memory/search (myrgic/cogos#650).
+	engine.SetTranscriptSearcher(&transcriptSearcher{p: provider})
+
 	// Wire GET /v1/observatory/coverage (v0.2 coverage metric surface).
 	prevHTTP := engine.RegisterHTTPExtensions
 	engine.RegisterHTTPExtensions = func(s *engine.Server, mux *http.ServeMux) {
@@ -328,4 +333,33 @@ type conversationsURIResolver struct {
 
 func (r *conversationsURIResolver) ResolveURI(_ context.Context, uri string) (any, error) {
 	return r.p.ResolveURI(uri)
+}
+
+// transcriptSearcher adapts conversations.Provider to engine.TranscriptSearcher.
+type transcriptSearcher struct {
+	p *conversations.Provider
+}
+
+func (t *transcriptSearcher) SearchTranscripts(ctx context.Context, query string, limit int) ([]engine.TranscriptHit, error) {
+	hits, err := t.p.SearchRecent(ctx, query, time.Time{}, limit)
+	if err != nil {
+		if errors.Is(err, conversations.ErrIndexNotReady) {
+			return nil, fmt.Errorf("%w: %v", engine.ErrTranscriptsUnavailable, err)
+		}
+		return nil, err
+	}
+	out := make([]engine.TranscriptHit, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, engine.TranscriptHit{
+			SessionID:    h.SessionID,
+			TurnIndex:    h.TurnIndex,
+			Source:       h.Source,
+			Role:         string(h.Role),
+			Timestamp:    h.Timestamp,
+			Excerpt:      h.Excerpt,
+			SessionTitle: h.SessionTitle,
+			URI:          conversations.HitURI(h),
+		})
+	}
+	return out, nil
 }
