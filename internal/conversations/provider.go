@@ -99,6 +99,11 @@ type Provider struct {
 	// re-parsed every reconcile cycle. Guarded by p.mu. ActionSkip is itself the
 	// drift-free signal, so a cached entry is valid whenever present.
 	coverageCache map[string]SourceCoverage
+
+	// watermarks is the per-ingest-source delta state (ingest_watermark.go),
+	// loaded in LoadConfig and saved after each ApplyPlan. Guarded by p.mu.
+	watermarks      map[string]*sourceWatermark
+	watermarksDirty bool
 }
 
 // NewProvider constructs a ConversationsProvider. The root workspace path
@@ -190,8 +195,13 @@ func (p *Provider) LoadConfig(root string) (any, error) {
 	// Set up quarantine writer and coverage tracker.
 	quarantineDir := filepath.Join(root, QuarantineDir)
 
+	wms := loadWatermarks(root)
+
 	p.mu.Lock()
 	p.ontology = lo
+	if p.watermarks == nil || !p.watermarksDirty {
+		p.watermarks = wms
+	}
 	p.quarantine = NewQuarantineWriter(quarantineDir)
 	if p.coverage == nil {
 		p.coverage = NewCoverageTracker()
@@ -362,7 +372,7 @@ func (p *Provider) ComputePlan(config any, live any, _ *reconcile.State) (*recon
 			})
 			plan.Summary.Creates++
 
-		case isIngestDrift(indexed, src):
+		case p.ingestDrift(indexed, src):
 			details["prev_sessions"] = len(indexed)
 			plan.Actions = append(plan.Actions, reconcile.Action{
 				Action:       reconcile.ActionUpdate,
@@ -573,9 +583,23 @@ func (p *Provider) ApplyPlan(ctx context.Context, plan *reconcile.Plan) ([]recon
 					cached, warm := p.coverageCache[action.Name]
 					p.mu.Unlock()
 
+					p.mu.Lock()
+					wm := p.watermarks[action.Name]
+					p.mu.Unlock()
+
 					if warm && cached.ontologyFingerprint == currentFP {
 						// Cache hit: restore without parsing.
 						cov.SetSource(action.Name, cached)
+					} else if wm != nil && wm.Fingerprint == currentFP {
+						// Cold process (e.g. the `cog reconcile` CLI), but the
+						// watermark carries the coverage of every consumed byte
+						// under the same mapping: restore it without parsing.
+						snap := wm.Coverage
+						cov.SetSource(action.Name, snap)
+						snap.ontologyFingerprint = currentFP
+						p.mu.Lock()
+						p.coverageCache[action.Name] = snap
+						p.mu.Unlock()
 					} else {
 						// Cold cache (e.g. first cycle after a restart) OR the
 						// ontology/mapping was edited in place since the cache was
@@ -615,16 +639,63 @@ func (p *Provider) ApplyPlan(ctx context.Context, plan *reconcile.Plan) ([]recon
 				// error does not drop it from liveSources and cause a spurious
 				// cache eviction on the same cycle.
 				liveSources[action.Name] = struct{}{}
-				if applyErr := applyIngestSource(idx, action, ont, qw, cov, bySource[action.Name]); applyErr != nil {
+
+				// Delta first: ingest only the bytes past the source's
+				// watermark (ingest_watermark.go). Falls back to the full
+				// re-parse when there is no usable watermark.
+				p.mu.Lock()
+				prevWM := p.watermarks[action.Name]
+				p.mu.Unlock()
+				delta, deltaErr := applyIngestSourceDelta(idx, action, ont, qw, prevWM)
+				if deltaErr == nil {
+					if cov != nil {
+						cov.SetSource(action.Name, delta.Watermark.Coverage)
+					}
+					p.mu.Lock()
+					p.watermarks[action.Name] = delta.Watermark
+					p.watermarksDirty = true
+					p.mu.Unlock()
+					slog.Info("conversations: delta ingest",
+						"source", action.Name, "files_read", delta.FilesRead, "bytes_read", delta.BytesRead,
+						"sessions_upserted", delta.SessionsTouch, "turns_added", delta.TurnsAdded)
+				} else if !errors.Is(deltaErr, errNeedFull) {
 					res.Status = reconcile.ApplyFailed
-					res.Error = fmt.Sprintf("index ingest source %s: %v", action.Name, applyErr)
+					res.Error = fmt.Sprintf("index ingest source %s (delta): %v", action.Name, deltaErr)
 					results = append(results, res)
-					if isLockBackpressure(applyErr) {
+					if isLockBackpressure(deltaErr) {
 						backpressure++
 					} else {
 						errs = append(errs, res.Error)
 					}
 					continue
+				} else {
+					fullCov := cov
+					if fullCov == nil {
+						fullCov = NewCoverageTracker()
+					}
+					if applyErr := applyIngestSource(idx, action, ont, qw, fullCov, bySource[action.Name]); applyErr != nil {
+						res.Status = reconcile.ApplyFailed
+						res.Error = fmt.Sprintf("index ingest source %s: %v", action.Name, applyErr)
+						results = append(results, res)
+						if isLockBackpressure(applyErr) {
+							backpressure++
+						} else {
+							errs = append(errs, res.Error)
+						}
+						continue
+					}
+					files := stringSliceDetail(action.Details["ingest_files"])
+					if wm, wmErr := watermarkFromFull(files, ont.SourceFingerprint(action.Name), fullCov.All()[action.Name], sessionsOfSource(idx, action.Name)); wmErr == nil {
+						p.mu.Lock()
+						p.watermarks[action.Name] = wm
+						p.watermarksDirty = true
+						p.mu.Unlock()
+					} else {
+						slog.Warn("conversations: could not record ingest watermark; next cycle re-parses in full",
+							"source", action.Name, "err", wmErr)
+					}
+					slog.Info("conversations: full ingest", "source", action.Name, "files", len(files),
+						"reason", fullReason(prevWM))
 				}
 				// applyIngestSource parsed + populated cov for this source;
 				// snapshot it into the cache (stamped with the ontology fingerprint
@@ -789,6 +860,22 @@ func (p *Provider) ApplyPlan(ctx context.Context, plan *reconcile.Plan) ([]recon
 	for src := range p.coverageCache {
 		if _, ok := liveSources[src]; !ok {
 			delete(p.coverageCache, src)
+		}
+	}
+	for src := range p.watermarks {
+		if _, ok := liveSources[src]; !ok {
+			delete(p.watermarks, src)
+			p.watermarksDirty = true
+		}
+	}
+	if p.watermarksDirty {
+		// Written after the index commit: a crash before this point re-reads
+		// the same delta next cycle, which dedups against the turns already
+		// on disk.
+		if err := saveWatermarks(p.root, p.watermarks); err != nil {
+			slog.Warn("conversations: save ingest watermarks failed; next cycle re-reads from the old marks", "err", err)
+		} else {
+			p.watermarksDirty = false
 		}
 	}
 	p.lastErrors = errs
@@ -1539,6 +1626,46 @@ func indexSessionIncremental(sourcePath, sessionID string, maxTurnLen int, prevM
 	meta.SourceTailHash = newTailHash
 
 	return meta, combined, true, nil
+}
+
+// ingestDrift decides whether an ingest source has changed since it was last
+// indexed. With a watermark it compares the source's files against what was
+// consumed (ingest_watermark.go); without one it falls back to the legacy
+// aggregate check. The legacy check must not be used once a watermark exists:
+// delta applies update only the sessions that gained turns, so the untouched
+// sessions keep an older aggregate size and the legacy check would report
+// drift forever.
+//
+// With a watermark, drift also includes any disagreement between the
+// sessions the watermark recorded and the indexed sessions of the source: a
+// session lost or truncated in the index while the source files are unchanged
+// would otherwise plan skip forever (cog-review, PR #661).
+func (p *Provider) ingestDrift(indexed []IndexEntry, src ingestSourceInfo) bool {
+	p.mu.Lock()
+	wm := p.watermarks[src.Source]
+	p.mu.Unlock()
+	if wm != nil {
+		if watermarkDrift(wm, src) {
+			return true
+		}
+		byKey := make(map[string]int, len(indexed))
+		for _, e := range indexed {
+			byKey[e.Meta.SessionID] = e.Meta.TurnCount
+		}
+		return !indexMatchesWatermark(wm, func(k string) (int, bool) {
+			n, ok := byKey[k]
+			return n, ok
+		})
+	}
+	return isIngestDrift(indexed, src)
+}
+
+// fullReason names why a source took the full re-parse path (logging only).
+func fullReason(wm *sourceWatermark) string {
+	if wm == nil {
+		return "no watermark"
+	}
+	return "watermark unusable (mapping changed, or a consumed file shrank or vanished)"
 }
 
 // isIngestDrift returns true when the indexed sessions of a source are stale

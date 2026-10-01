@@ -134,6 +134,42 @@
       "raw": "path"
     },
     {
+      "file": "internal/conversations/ingest_watermark.go",
+      "line": 128,
+      "column": 12,
+      "primitive": "os.MkdirAll",
+      "func": "saveWatermarks",
+      "pattern": "dirname({p.root}/.cog/state/conversations-ingest-watermarks.json)",
+      "category": "cog",
+      "resolved": true,
+      "subsystem": "internal:conversations",
+      "raw": "filepath.Dir(path)"
+    },
+    {
+      "file": "internal/conversations/ingest_watermark.go",
+      "line": 136,
+      "column": 12,
+      "primitive": "os.WriteFile",
+      "func": "saveWatermarks",
+      "pattern": "{p.root}/.cog/state/conversations-ingest-watermarks.json\u003ccall:fmt.Sprintf\u003e",
+      "category": "cog",
+      "resolved": false,
+      "subsystem": "internal:conversations",
+      "raw": "tmp"
+    },
+    {
+      "file": "internal/conversations/ingest_watermark.go",
+      "line": 139,
+      "column": 12,
+      "primitive": "os.Rename",
+      "func": "saveWatermarks",
+      "pattern": "{p.root}/.cog/state/conversations-ingest-watermarks.json",
+      "category": "cog",
+      "resolved": true,
+      "subsystem": "internal:conversations",
+      "raw": "path"
+    },
+    {
       "file": "internal/conversations/quarantine.go",
       "line": 154,
       "column": 17,
@@ -2871,8 +2907,8 @@
     }
   ],
   "summary": {
-    "total": 239,
-    "cog": 97,
+    "total": 242,
+    "cog": 100,
     "home": 2,
     "elsewhere": 14,
     "unanchored": 85,
@@ -2882,12 +2918,12 @@
       "io.Copy": 7,
       "os.Create": 6,
       "os.CreateTemp": 9,
-      "os.MkdirAll": 76,
+      "os.MkdirAll": 77,
       "os.MkdirTemp": 2,
       "os.OpenFile": 27,
-      "os.Rename": 33,
+      "os.Rename": 34,
       "os.Symlink": 1,
-      "os.WriteFile": 65,
+      "os.WriteFile": 66,
       "sql.Open(sqlite3)": 8
     }
   },

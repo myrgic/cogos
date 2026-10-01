@@ -78,6 +78,10 @@ type ingestSessionAccum struct {
 	// incremental observer runs may re-emit records already ingested from an
 	// earlier file.
 	seen map[string]struct{}
+
+	// added counts turns appended by this accumulator (not seeded from the
+	// index). The delta path upserts only sessions with added > 0.
+	added int
 }
 
 // ingestAccumulator consumes ingest JSONL files and groups records into
@@ -107,6 +111,12 @@ type ingestAccumulator struct {
 
 	// Coverage accumulates per-source coverage metrics.
 	Coverage *CoverageTracker
+
+	// existing, when set, seeds a session the first time this accumulator sees
+	// it with the meta + turns already in the index (delta ingest,
+	// ingest_watermark.go), so new records append after them and re-emitted
+	// records dedup against them instead of becoming duplicate turns.
+	existing func(key string) (SessionMeta, []Turn, bool)
 }
 
 // newIngestAccumulator returns an empty accumulator.
@@ -250,6 +260,17 @@ func (a *ingestAccumulator) ConsumeFile(r io.Reader) error {
 				},
 				seen: make(map[string]struct{}),
 			}
+			if a.existing != nil {
+				if meta, turns, found := a.existing(key); found {
+					sess.Meta = meta
+					sess.Turns = turns
+					for _, t := range turns {
+						for _, k := range ingestDedupKeysForTurn(t) {
+							sess.seen[k] = struct{}{}
+						}
+					}
+				}
+			}
 			a.sessions[key] = sess
 			a.order = append(a.order, key)
 		}
@@ -296,6 +317,7 @@ func (a *ingestAccumulator) ConsumeFile(r io.Reader) error {
 			MappingVersion:  mappingRef,
 		})
 		sess.Meta.TurnCount = len(sess.Turns)
+		sess.added++
 	}
 
 	return scanner.Err()
@@ -334,6 +356,36 @@ func ingestRecordID(rec ingestRecord) (uuid string, dedupKey string) {
 	h.Write([]byte(rec.Text))
 	sum := hex.EncodeToString(h.Sum(nil))[:16]
 	return sum, "h:" + sum
+}
+
+// ingestDedupKeysForTurn returns every dedup key ingestRecordID could have
+// produced for an already-indexed turn. The index stores only the UUID, not
+// which namespace it came from, and the namespace cannot be recovered from
+// the UUID's shape: a numeric stable_id (ingestStableID's float64 branch) can
+// render as 16 decimal digits, which is also a valid 16-hex content hash.
+// Guessing seeds the wrong key and lets a re-emitted record become a
+// duplicate turn (cog-review, PR #661). So seed BOTH candidates: "s:"+UUID
+// always, and "h:"+UUID when the UUID is hash-shaped. Over-seeding can only
+// suppress a new record whose stable_id equals an existing turn's content
+// hash (or vice versa), which needs a SHA-256 prefix collision.
+func ingestDedupKeysForTurn(t Turn) []string {
+	if isContentHashUUID(t.UUID) {
+		return []string{"s:" + t.UUID, "h:" + t.UUID}
+	}
+	return []string{"s:" + t.UUID}
+}
+
+func isContentHashUUID(s string) bool {
+	if len(s) != 16 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // ingestStableID extracts refs.stable_id as a string, or "" when absent.
