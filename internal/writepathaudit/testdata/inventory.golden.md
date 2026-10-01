@@ -85,10 +85,10 @@ Total sites: 242  (cog: 100, home: 2, elsewhere: 14, unanchored: 85, dynamic: 41
 | `{root}/.cog/mem/semantic/inbox/links/<call:fmt.Sprintf>` | pullDiscordLinkFeed (`os.WriteFile`) | internal/linkfeed/linkfeed.go:395 | internal:linkfeed |
 | `{root}/.cog/mem/semantic/inbox/links/basename({p.Filename})` | enrichLink (`os.WriteFile`) | internal/linkfeed/linkfeed.go:538 | internal:linkfeed |
 | `{root}/.cog/mem/semantic/research/link-feed-state.json` | writeLinkFeedState (`os.WriteFile`) | internal/linkfeed/linkfeed.go:672 | internal:linkfeed |
-| `dirname({root}/.cog/config/discord/server.yaml)` | writeDiscordServerYAML (`os.MkdirAll`) | internal/providers/discord/discord_provider.go:389 | provider:discord |
-| `{root}/.cog/config/discord/server.yaml` | writeDiscordServerYAML (`os.WriteFile`) | internal/providers/discord/discord_provider.go:392 | provider:discord |
-| `{root}/.cog/config/discord/.state.json.tmp` | writeState (`os.WriteFile`) | internal/providers/discord/discord_reconcile.go:1111 | provider:discord |
-| `{root}/.cog/config/discord/.state.json` | writeState (`os.Rename`) | internal/providers/discord/discord_reconcile.go:1114 | provider:discord |
+| `dirname({root}/.cog/config/discord/server.yaml)` | writeDiscordServerYAML (`os.MkdirAll`) | internal/providers/discord/discord_provider.go:415 | provider:discord |
+| `{root}/.cog/config/discord/server.yaml` | writeDiscordServerYAML (`os.WriteFile`) | internal/providers/discord/discord_provider.go:418 | provider:discord |
+| `{root}/.cog/config/discord/.state.json.tmp` | writeState (`os.WriteFile`) | internal/providers/discord/discord_reconcile.go:1180 | provider:discord |
+| `{root}/.cog/config/discord/.state.json` | writeState (`os.Rename`) | internal/providers/discord/discord_reconcile.go:1183 | provider:discord |
 | `{root}/.cog/pins` | WritePinRecord (`os.MkdirAll`) | internal/providers/pin/pin.go:1049 | provider:pin |
 | `{root}/.cog/pins/<call:sanitiseFilename>.yaml` | WritePinRecord (`os.WriteFile`) | internal/providers/pin/pin.go:1059 | provider:pin |
 | `dirname({root}/.cog/run/selfupdate-provenance.json)` | WriteProvenanceOutcome (`os.MkdirAll`) | internal/providers/selfupdate/outcome.go:80 | provider:selfupdate |
@@ -295,7 +295,7 @@ These sites write to disk but this tool could not structurally resolve their pat
 
 v1 counts direct filesystem primitives + sqlite only (see the package doc). A spawned process can write anywhere its own logic chooses, which this tool cannot see without executing it — these sites are enumerated for visibility, with cmd.Dir resolved where possible, but are NOT classified into any bin above and do not contribute to the totals at the top of this document. Non-Go writers (shell/Python scripts this repo runs) are not enumerable by a Go source scanner at all and are not listed here either — see the package doc.
 
-Total subprocess sites: 79
+Total subprocess sites: 80
 
 | cmd.Dir | call | file:line | subsystem |
 |---|---|---|---|
@@ -363,6 +363,7 @@ Total subprocess sites: 79
 | _(not set — inherits the process's own working directory)_ | `exec.Command("git", "rev-parse", "--show-toplevel")` | internal/providers/all/all.go:126 | provider:all |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(psCtx, e.lmsCLIPath, "ps", "--json")` | internal/providers/daemon/lms_model_state.go:449 | provider:daemon |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "launchctl", "list", label)` | internal/providers/daemon/mlx_inference.go:217 | provider:daemon |
+| `{root}` | `exec.CommandContext(ctx, bin, argv[1:]...)` | internal/providers/discord/discord_reconcile.go:467 | provider:discord |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "gh", "api", path)` | internal/providers/marginbridge/marginbridge.go:455 | provider:marginbridge |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "git", "-C", targetPath, "rev-parse", "HEAD")` | internal/providers/pin/pin.go:239 | provider:pin |
 | _(not set — inherits the process's own working directory)_ | `exec.Command(exe, args...)` | internal/providers/selfupdate/spawn_unix.go:65 | provider:selfupdate |

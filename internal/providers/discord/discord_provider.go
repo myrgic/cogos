@@ -54,8 +54,30 @@ func (d *DiscordProvider) SetWorkspaceRoot(root string) { d.WorkspaceRoot = root
 // LoadConfig loads the Discord server config (HCL-first, YAML fallback).
 // Returns *DiscordServerConfig as any.
 func (d *DiscordProvider) LoadConfig(root string) (any, error) {
+	if d.WorkspaceRoot == "" {
+		d.WorkspaceRoot = root
+	}
 	cfg, _, err := loadDiscordServerConfig(root)
 	return cfg, err
+}
+
+// ensureToken resolves the bot token through the full chain (env, then
+// auth.yaml token_command / token) when nothing was injected via SetToken.
+// Without this, the generic reconcile CLI path only ever saw {TYPE}_TOKEN env
+// vars and never auth.yaml, so plan/apply failed where snapshot succeeded.
+func (d *DiscordProvider) ensureToken() error {
+	if d.Token != "" {
+		return nil
+	}
+	if d.WorkspaceRoot == "" {
+		return fmt.Errorf("discord: bot token not set")
+	}
+	tok, err := resolveToken(d.WorkspaceRoot, "")
+	if err != nil {
+		return err
+	}
+	d.Token = tok
+	return nil
 }
 
 // FetchLive retrieves the current Discord server state from the API.
@@ -66,8 +88,8 @@ func (d *DiscordProvider) FetchLive(ctx context.Context, config any) (any, error
 		return nil, fmt.Errorf("discord: expected *DiscordServerConfig, got %T", config)
 	}
 
-	if d.Token == "" {
-		return nil, fmt.Errorf("discord: bot token not set")
+	if err := d.ensureToken(); err != nil {
+		return nil, err
 	}
 
 	client := newDiscordClient(d.Token, cfg.Reconciler.MaxAPICalls)
@@ -112,8 +134,8 @@ func (d *DiscordProvider) ComputePlan(config any, live any, state *reconcile.Sta
 
 // ApplyPlan executes the planned changes against Discord.
 func (d *DiscordProvider) ApplyPlan(ctx context.Context, plan *reconcile.Plan) ([]reconcile.Result, error) {
-	if d.Token == "" {
-		return nil, fmt.Errorf("discord: bot token not set")
+	if err := d.ensureToken(); err != nil {
+		return nil, err
 	}
 
 	// Convert generic plan back to Discord plan
@@ -249,6 +271,10 @@ func (d *DiscordProvider) ExportConfig(root string) error {
 	guildName := cfg.Guild.Name
 	guildDesc := cfg.Guild.Description
 	newCfg := buildDiscordConfigFromLive(liveState, cfg.Guild.ID, guildName, guildDesc)
+	// Snapshot captures live → spec for the guild only. The reconciler block
+	// is operator policy, not live state; carry it through unchanged rather
+	// than resetting dry_run / respect_user_managed to zero values (#615).
+	newCfg.Reconciler = cfg.Reconciler
 
 	if err := writeDiscordServerYAML(root, newCfg); err != nil {
 		return fmt.Errorf("discord: write snapshot: %w", err)
