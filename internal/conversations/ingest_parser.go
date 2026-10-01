@@ -265,7 +265,9 @@ func (a *ingestAccumulator) ConsumeFile(r io.Reader) error {
 					sess.Meta = meta
 					sess.Turns = turns
 					for _, t := range turns {
-						sess.seen[ingestDedupKeyForTurn(t)] = struct{}{}
+						for _, k := range ingestDedupKeysForTurn(t) {
+							sess.seen[k] = struct{}{}
+						}
 					}
 				}
 			}
@@ -356,15 +358,21 @@ func ingestRecordID(rec ingestRecord) (uuid string, dedupKey string) {
 	return sum, "h:" + sum
 }
 
-// ingestDedupKeyForTurn rebuilds the dedup key ingestRecordID produced for an
-// already-indexed turn. Its UUID is the stable_id verbatim when the record had
-// one, else the 16-hex content hash; the two namespaces cannot be confused
-// because stable ids are "<source>:<id>" and never 16 bare hex characters.
-func ingestDedupKeyForTurn(t Turn) string {
+// ingestDedupKeysForTurn returns every dedup key ingestRecordID could have
+// produced for an already-indexed turn. The index stores only the UUID, not
+// which namespace it came from, and the namespace cannot be recovered from
+// the UUID's shape: a numeric stable_id (ingestStableID's float64 branch) can
+// render as 16 decimal digits, which is also a valid 16-hex content hash.
+// Guessing seeds the wrong key and lets a re-emitted record become a
+// duplicate turn (cog-review, PR #661). So seed BOTH candidates: "s:"+UUID
+// always, and "h:"+UUID when the UUID is hash-shaped. Over-seeding can only
+// suppress a new record whose stable_id equals an existing turn's content
+// hash (or vice versa), which needs a SHA-256 prefix collision.
+func ingestDedupKeysForTurn(t Turn) []string {
 	if isContentHashUUID(t.UUID) {
-		return "h:" + t.UUID
+		return []string{"s:" + t.UUID, "h:" + t.UUID}
 	}
-	return "s:" + t.UUID
+	return []string{"s:" + t.UUID}
 }
 
 func isContentHashUUID(s string) bool {

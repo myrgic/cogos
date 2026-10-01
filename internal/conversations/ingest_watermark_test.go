@@ -279,3 +279,77 @@ func TestDeltaIngest_ColdProcessSkipDoesNotReparse(t *testing.T) {
 		t.Fatalf("cold coverage %+v, want %+v", got, want)
 	}
 }
+
+// cog-review PR #661 finding 1: the projection is cleared but the watermark
+// (which lives outside it) survives. The source must be rebuilt in full, not
+// from past the old offsets.
+func TestDeltaIngest_ClearedIndexWithSurvivingWatermarkRebuildsFully(t *testing.T) {
+	root, _, files := deltaWorkspace(t, 2)
+	p := NewProvider()
+	reconcileOnce(t, p, root)
+	want := indexSnapshot(p)
+	appendLines(t, files[1], deltaRec("s0-fb", "after", "after the clear"))
+
+	if err := os.RemoveAll(filepath.Join(root, ".cog", "state", "conversations")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(watermarkPath(root)); err != nil {
+		t.Fatalf("precondition: watermark must survive the clear: %v", err)
+	}
+	q := NewProvider() // fresh process: loads the surviving watermark
+	reconcileOnce(t, q, root)
+	got := indexSnapshot(q)
+	want["hermes-x/s0-fb"] = append(want["hermes-x/s0-fb"], "hermes-x:after=after the clear")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rebuild after clear lost turns:\ngot  %d sessions, s0-fa=%v\nwant %d sessions, s0-fa=%v",
+			len(got), got["hermes-x/s0-fa"], len(want), want["hermes-x/s0-fa"])
+	}
+}
+
+// cog-review PR #661 finding 2: one session is lost from the index while the
+// source files are untouched. ComputePlan must see drift and the next cycle
+// must restore the session.
+func TestDeltaIngest_LostSessionIsDriftAndIsRestored(t *testing.T) {
+	root, _, _ := deltaWorkspace(t, 2)
+	p := NewProvider()
+	reconcileOnce(t, p, root)
+	want := indexSnapshot(p)
+
+	if _, err := p.index.DeleteSessions([]string{"hermes-x/s1-fa"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := p.LoadConfig(root)
+	live, _ := p.FetchLive(context.Background(), cfg)
+	plan, _ := p.ComputePlan(cfg, live, nil)
+	if plan.Summary.Updates != 1 {
+		t.Fatalf("lost session not seen as drift: plan %+v", plan.Summary)
+	}
+	if _, err := p.ApplyPlan(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if got := indexSnapshot(p); !reflect.DeepEqual(got, want) {
+		t.Fatalf("lost session not restored: s1-fa=%v want %v", got["hermes-x/s1-fa"], want["hermes-x/s1-fa"])
+	}
+}
+
+// cog-review PR #661 finding 3: a numeric stable_id that renders as 16
+// decimal digits is hash-shaped. A later re-emission of that record must
+// still dedup against the seeded turn.
+func TestDeltaIngest_NumericStableIDReEmissionDedups(t *testing.T) {
+	root := t.TempDir()
+	ingest := filepath.Join(root, ".cog", "observatory", "ingest")
+	rec := makeIngestRecord("hermes-x", "num", "user", "numeric id", "2026-10-01T10:00:00Z",
+		map[string]any{"refs": map[string]any{"stable_id": 1234567890123456}})
+	writeIngestDir(t, ingest, "hermes-x", "20261001", []string{rec})
+	writeObservatoryConfigFull(t, root, nil, []string{ingest})
+	p := NewProvider()
+	reconcileOnce(t, p, root)
+
+	// A later observer run re-emits the same record in a new file.
+	writeIngestDir(t, ingest, "hermes-x", "20261002", []string{rec})
+	reconcileOnce(t, p, root)
+	got := indexSnapshot(p)["hermes-x/num"]
+	if len(got) != 1 || got[0] != "1234567890123456=numeric id" {
+		t.Fatalf("re-emitted numeric stable_id duplicated: %v", got)
+	}
+}

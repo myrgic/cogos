@@ -685,7 +685,7 @@ func (p *Provider) ApplyPlan(ctx context.Context, plan *reconcile.Plan) ([]recon
 						continue
 					}
 					files := stringSliceDetail(action.Details["ingest_files"])
-					if wm, wmErr := watermarkFromFull(files, ont.SourceFingerprint(action.Name), fullCov.All()[action.Name]); wmErr == nil {
+					if wm, wmErr := watermarkFromFull(files, ont.SourceFingerprint(action.Name), fullCov.All()[action.Name], sessionsOfSource(idx, action.Name)); wmErr == nil {
 						p.mu.Lock()
 						p.watermarks[action.Name] = wm
 						p.watermarksDirty = true
@@ -1635,12 +1635,27 @@ func indexSessionIncremental(sourcePath, sessionID string, maxTurnLen int, prevM
 // delta applies update only the sessions that gained turns, so the untouched
 // sessions keep an older aggregate size and the legacy check would report
 // drift forever.
+//
+// With a watermark, drift also includes any disagreement between the
+// sessions the watermark recorded and the indexed sessions of the source: a
+// session lost or truncated in the index while the source files are unchanged
+// would otherwise plan skip forever (cog-review, PR #661).
 func (p *Provider) ingestDrift(indexed []IndexEntry, src ingestSourceInfo) bool {
 	p.mu.Lock()
 	wm := p.watermarks[src.Source]
 	p.mu.Unlock()
 	if wm != nil {
-		return watermarkDrift(wm, src)
+		if watermarkDrift(wm, src) {
+			return true
+		}
+		byKey := make(map[string]int, len(indexed))
+		for _, e := range indexed {
+			byKey[e.Meta.SessionID] = e.Meta.TurnCount
+		}
+		return !indexMatchesWatermark(wm, func(k string) (int, bool) {
+			n, ok := byKey[k]
+			return n, ok
+		})
 	}
 	return isIngestDrift(indexed, src)
 }

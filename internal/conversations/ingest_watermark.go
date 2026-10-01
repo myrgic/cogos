@@ -46,7 +46,9 @@ import (
 
 // watermarkVersion is bumped when the file's meaning changes; a mismatch is
 // treated as "no watermark" (full re-parse, then a fresh watermark).
-const watermarkVersion = 1
+//
+// v2 (PR #661 review) adds Sessions; a v1 file forces one full re-parse.
+const watermarkVersion = 2
 
 // fileMark is how far one ingest file has been consumed.
 type fileMark struct {
@@ -70,6 +72,14 @@ type sourceWatermark struct {
 	// Coverage is the coverage counted over every consumed byte (the same
 	// numbers a full parse of those bytes produces).
 	Coverage SourceCoverage `json:"coverage"`
+	// Sessions maps every index session key the consumed bytes produced to
+	// its turn count when the watermark was written. The watermark lives
+	// outside .cog/state/conversations/, so it can outlive the index it
+	// describes (projection cleared, a session lost or truncated).
+	// indexMatchesWatermark checks it against the live index; any mismatch
+	// means consumed bytes are no longer represented and the source must be
+	// re-parsed in full.
+	Sessions map[string]int `json:"sessions"`
 	// UpdatedAt is informational.
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -102,7 +112,7 @@ func loadWatermarks(root string) map[string]*sourceWatermark {
 		return out
 	}
 	for src, wm := range wf.Sources {
-		if wm != nil && wm.Files != nil {
+		if wm != nil && wm.Files != nil && wm.Sessions != nil {
 			out[src] = wm
 		}
 	}
@@ -151,6 +161,42 @@ func watermarkDrift(wm *sourceWatermark, src ingestSourceInfo) bool {
 	return seen != len(wm.Files)
 }
 
+// indexMatchesWatermark reports whether every session wm recorded is still
+// indexed with at least the turn count wm recorded. lookup returns a
+// session's indexed turn count (ok=false when absent). Fewer turns, or a
+// missing session, means consumed bytes are no longer represented. MORE turns
+// is fine: it is the crash window between the index commit and the watermark
+// write, which a delta replay dedups against (see the file header).
+func indexMatchesWatermark(wm *sourceWatermark, lookup func(key string) (int, bool)) bool {
+	for key, want := range wm.Sessions {
+		got, ok := lookup(key)
+		if !ok || got < want {
+			return false
+		}
+	}
+	return true
+}
+
+// indexTurnCount adapts idx to indexMatchesWatermark's lookup.
+func indexTurnCount(idx *Index) func(string) (int, bool) {
+	return func(key string) (int, bool) {
+		m, ok := idx.GetMeta(key)
+		return m.TurnCount, ok
+	}
+}
+
+// sessionsOfSource returns key -> turn count for every indexed session of
+// source: the Sessions a full parse leaves behind.
+func sessionsOfSource(idx *Index, source string) map[string]int {
+	out := make(map[string]int)
+	for _, key := range idx.SessionIDsBySource()[source] {
+		if m, ok := idx.GetMeta(key); ok {
+			out[key] = m.TurnCount
+		}
+	}
+	return out
+}
+
 // lastCompleteOffset returns the offset just past the last '\n' in the first
 // size bytes of path (0 when there is none), reading backwards in chunks so a
 // multi-megabyte final record costs only its own length.
@@ -184,11 +230,12 @@ func lastCompleteOffset(path string, size int64) (int64, error) {
 }
 
 // watermarkFromFull builds the watermark a full parse of files leaves behind.
-func watermarkFromFull(files []string, fingerprint string, cov SourceCoverage) (*sourceWatermark, error) {
+func watermarkFromFull(files []string, fingerprint string, cov SourceCoverage, sessions map[string]int) (*sourceWatermark, error) {
 	wm := &sourceWatermark{
 		Fingerprint: fingerprint,
 		Files:       make(map[string]fileMark, len(files)),
 		Coverage:    cov,
+		Sessions:    sessions,
 		UpdatedAt:   time.Now().UTC(),
 	}
 	for _, path := range files {
@@ -257,6 +304,13 @@ func applyIngestSourceDelta(idx *Index, action reconcile.Action, ont *LoadedOnto
 	if wm.Fingerprint != fingerprint {
 		return res, errNeedFull
 	}
+	// The watermark claims bytes [0, offset) are already in the index. If the
+	// index lost any session they produced (projection cleared, a session
+	// deleted or truncated), reading only past the offset never brings them
+	// back: re-parse in full instead (cog-review, PR #661).
+	if idx == nil || !indexMatchesWatermark(wm, indexTurnCount(idx)) {
+		return res, errNeedFull
+	}
 	sourceDir, _ := action.Details["source_dir"].(string)
 	files := stringSliceDetail(action.Details["ingest_files"])
 
@@ -286,7 +340,11 @@ func applyIngestSourceDelta(idx *Index, action reconcile.Action, ont *LoadedOnto
 	next := &sourceWatermark{
 		Fingerprint: fingerprint,
 		Files:       make(map[string]fileMark, len(files)),
+		Sessions:    make(map[string]int, len(wm.Sessions)),
 		UpdatedAt:   time.Now().UTC(),
+	}
+	for k, v := range wm.Sessions {
+		next.Sessions[k] = v
 	}
 	var totalSize int64
 	var latestMtime time.Time
@@ -334,6 +392,7 @@ func applyIngestSourceDelta(idx *Index, action reconcile.Action, ont *LoadedOnto
 		sess.Meta.SourceMtime = latestMtime
 		sess.Meta.SourceSize = totalSize
 		batch = append(batch, SessionAndTurns{Meta: sess.Meta, Turns: sess.Turns})
+		next.Sessions[sess.Meta.SessionID] = len(sess.Turns)
 		res.SessionsTouch++
 		res.TurnsAdded += sess.added
 	}
