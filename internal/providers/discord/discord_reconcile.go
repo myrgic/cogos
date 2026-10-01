@@ -1,12 +1,15 @@
 package discord
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -210,9 +213,18 @@ var discordPermBits = []struct {
 	{"CREATE_EVENTS", 1 << 44},
 	{"USE_EXTERNAL_SOUNDS", 1 << 45},
 	{"SEND_VOICE_MESSAGES", 1 << 46},
+	{"USE_CLYDE_AI", 1 << 47},
+	{"SET_VOICE_CHANNEL_STATUS", 1 << 48},
 	{"SEND_POLLS", 1 << 49},
 	{"USE_EXTERNAL_APPS", 1 << 50},
+	{"PIN_MESSAGES", 1 << 51},
+	{"BYPASS_SLOWMODE", 1 << 52},
 }
+
+// unknownPermPrefix names a bit Discord set that discordPermBits does not
+// (yet) know. Emitting it keeps snapshot -> plan lossless: dropping unknown
+// bits made a fresh snapshot plan to strip live permissions from roles.
+const unknownPermPrefix = "PERM_BIT_"
 
 func permBitsToNames(bitfieldStr string) []string {
 	var bitfield uint64
@@ -221,9 +233,16 @@ func permBitsToNames(bitfieldStr string) []string {
 		return nil
 	}
 	var names []string
+	var known uint64
 	for _, p := range discordPermBits {
+		known |= p.Bit
 		if bitfield&p.Bit != 0 {
 			names = append(names, p.Name)
+		}
+	}
+	for i := 0; i < 64; i++ {
+		if b := uint64(1) << i; bitfield&b != 0 && known&b == 0 {
+			names = append(names, fmt.Sprintf("%s%d", unknownPermPrefix, i))
 		}
 	}
 	return names
@@ -411,14 +430,56 @@ func resolveToken(root string, flagToken string) (string, error) {
 	data, err := os.ReadFile(authPath)
 	if err == nil {
 		var auth struct {
-			Token string `yaml:"token"`
+			Token        string   `yaml:"token"`
+			TokenCommand []string `yaml:"token_command"`
 		}
-		if err := yaml.Unmarshal(data, &auth); err == nil && auth.Token != "" {
+		if err := yaml.Unmarshal(data, &auth); err != nil {
+			return "", fmt.Errorf("discord: parse %s: %w", authPath, err)
+		}
+		// token_command wins over a literal token: it is a pointer to the
+		// secret store (credential_process style), so the token itself never
+		// has to sit in the workspace.
+		if len(auth.TokenCommand) > 0 {
+			return runTokenCommand(root, auth.TokenCommand)
+		}
+		if auth.Token != "" {
 			return auth.Token, nil
 		}
 	}
 
-	return "", fmt.Errorf("no Discord token found. Set DISCORD_BOT_TOKEN env var or create .cog/config/discord/auth.yaml")
+	return "", fmt.Errorf("no Discord token found. Set DISCORD_BOT_TOKEN, or token / token_command in .cog/config/discord/auth.yaml")
+}
+
+// tokenCommandTimeout bounds a token_command so a hung secret store cannot
+// wedge the kernel. Var so tests can shorten it.
+var tokenCommandTimeout = 30 * time.Second
+
+// runTokenCommand executes argv (relative argv[0] resolved against the
+// workspace root) and returns its trimmed stdout as the token. Stderr is
+// surfaced on failure; stdout is never included in errors.
+func runTokenCommand(root string, argv []string) (string, error) {
+	bin := argv[0]
+	if !filepath.IsAbs(bin) && strings.Contains(bin, "/") {
+		bin = filepath.Join(root, bin)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), tokenCommandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, argv[1:]...)
+	cmd.Dir = root
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("discord: token_command %q failed: %w (stderr: %s)", argv[0], err, strings.TrimSpace(stderr.String()))
+	}
+	tok := strings.TrimSpace(string(out))
+	if tok == "" {
+		return "", fmt.Errorf("discord: token_command %q produced no token", argv[0])
+	}
+	if strings.ContainsAny(tok, " \n	") {
+		return "", fmt.Errorf("discord: token_command %q produced malformed output (whitespace inside token)", argv[0])
+	}
+	return tok, nil
 }
 
 // ─── Diff / plan computation ────────────────────────────────────────────────
@@ -1051,6 +1112,14 @@ func convertPermOverwrites(overwrites []DiscordPermOverwrite, roleIDToName map[s
 		})
 	}
 
+	// Discord returns overwrites in no stable order; sort so repeated
+	// snapshots of an unchanged guild are byte-identical.
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].TargetType != result[j].TargetType {
+			return result[i].TargetType < result[j].TargetType
+		}
+		return result[i].Target < result[j].Target
+	})
 	return result
 }
 
@@ -1158,6 +1227,13 @@ func stateResourceByID(state *DiscordState) map[string]*StateResource {
 func permNamesToBits(names []string) uint64 {
 	var bits uint64
 	for _, name := range names {
+		if strings.HasPrefix(name, unknownPermPrefix) {
+			var i int
+			if _, err := fmt.Sscanf(strings.TrimPrefix(name, unknownPermPrefix), "%d", &i); err == nil && i >= 0 && i < 64 {
+				bits |= uint64(1) << i
+			}
+			continue
+		}
 		for _, p := range discordPermBits {
 			if p.Name == name {
 				bits |= p.Bit
@@ -1227,9 +1303,10 @@ func diffPermOverwrites(desired []PermOverwriteConf, live []DiscordPermOverwrite
 		}
 	}
 
-	// Detect removed overwrites
+	// Detect removed overwrites. A live overwrite with allow=0 and deny=0 is
+	// a no-op (snapshot omits it), so "removing" it is not a change.
 	for _, liveOW := range live {
-		if !matchedTargets[liveOW.ID] {
+		if !matchedTargets[liveOW.ID] && !(isZeroPerm(liveOW.Allow) && isZeroPerm(liveOW.Deny)) {
 			diffs = append(diffs, permOverwriteDiff{
 				TargetID:   liveOW.ID,
 				TargetType: map[int]string{0: "role", 1: "member"}[liveOW.Type],
@@ -1239,6 +1316,12 @@ func diffPermOverwrites(desired []PermOverwriteConf, live []DiscordPermOverwrite
 	}
 
 	return diffs
+}
+
+func isZeroPerm(s string) bool {
+	var v uint64
+	fmt.Sscanf(s, "%d", &v)
+	return v == 0
 }
 
 func diffRolePermissions(desired []string, live string) string {
