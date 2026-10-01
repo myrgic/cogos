@@ -11,6 +11,18 @@
 // HealthSuspended (NOT HealthMissing) — this is an opt-in feature, not a missing
 // requirement. This mirrors mlx_inference.go's precedent exactly.
 //
+// A managed backend that is unreachable (box off, off-LAN) also reports
+// HealthSuspended, not HealthDegraded — matching the engine-layer
+// LMSModelStateProvider's precedent ("do NOT self-heal a box that is simply
+// off or unreachable"). Only a REACHABLE backend reporting the wrong
+// model/context/state is HealthDegraded. Before this split (fixed 2026-10),
+// both cases folded into Degraded here, which autonomic_ticker's
+// healDegradedProviders treats as actionable — so an unreachable LAN box
+// (Eclipse) drove an unbounded self-heal reconcile loop (measured: ~79k
+// cycles, thousands of escalations to claude-oauth) against a condition no
+// self-heal action could ever resolve. See the go-cogos-kernel-patterns
+// skill's "degenerate status signals" pattern.
+//
 // GUARDRAILS: this daemon stub is Health()-only and strictly read-only. It never
 // loads or unloads a model. Full plan/apply lives in the engine-layer
 // LMSModelStateProvider (constructed by BuildRouter). The daemon only exercises
@@ -23,6 +35,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -35,6 +48,17 @@ import (
 
 	"github.com/myrgic/cogos/pkg/substrate/reconcile"
 )
+
+// unreachableError marks a probe failure caused by the backend being off or
+// off-LAN, as opposed to a reachable backend reporting the wrong model/state.
+// Health() uses errors.As to route these to Suspended instead of Degraded —
+// see the package doc comment and the engine-layer precedent this mirrors
+// (provider_lms_model_state.go's lastErr ⇒ Suspended mapping, "do NOT
+// self-heal a box that is simply off or unreachable").
+type unreachableError struct{ err error }
+
+func (e *unreachableError) Error() string { return "unreachable: " + e.err.Error() }
+func (e *unreachableError) Unwrap() error { return e.err }
 
 func init() {
 	reconcile.RegisterProvider("lms-model-state", &lmsModelStateProvider{stubMethods: stubMethods{name: "lms-model-state"}})
@@ -69,28 +93,59 @@ func (p *lmsModelStateProvider) Health() reconcile.ResourceStatus {
 	defer cancel()
 
 	var issues []string
+	var unreachable []string
 	var gapNotes []string
 	var anyProgressing bool
 	for _, e := range entries {
 		progressing, gapNote, err := probeModelStateEntry(ctx, e)
-		if err != nil {
+		var unreachErr *unreachableError
+		switch {
+		case errors.As(err, &unreachErr):
+			unreachable = append(unreachable, fmt.Sprintf("%s: %v", e.name, err))
+		case err != nil:
 			issues = append(issues, fmt.Sprintf("%s: %v", e.name, err))
-		} else if progressing {
+		case progressing:
 			anyProgressing = true
-		} else if gapNote != "" {
+		case gapNote != "":
 			gapNotes = append(gapNotes, gapNote)
 		}
 	}
 
 	if len(issues) > 0 {
-		// Unreachable/off-LAN and drift both land here as OutOfSync. The engine
-		// provider distinguishes Suspended-vs-Degraded on the live path; the
-		// daemon stub only reports a coarse aggregate for proprioception.
+		// Reachable backend, wrong model/context/state — drift a self-heal
+		// action could plausibly fix. OutOfSync/Degraded is correct here.
 		return reconcile.ResourceStatus{
 			Sync:      reconcile.SyncStatusOutOfSync,
 			Health:    reconcile.HealthDegraded,
 			Operation: reconcile.OperationIdle,
 			Message:   healthIssuesMessage(issues, gapNotes),
+		}
+	}
+
+	if len(unreachable) > 0 {
+		// Backend is off or off-LAN. No self-heal action fixes "the box is
+		// off" — mirror the engine-layer provider's Suspended mapping (see
+		// provider_lms_model_state.go: "do NOT self-heal a box that is
+		// simply off or unreachable"). Reporting this as Degraded is exactly
+		// degenerate-status-signal bug class: a status that can only
+		// ever read one way isn't instrumentation, and autonomic_ticker's
+		// healDegradedProviders treats Degraded as actionable, so an
+		// unreachable LAN box drove a self-heal reconcile cycle roughly
+		// every minute indefinitely (measured 2026-10-01: 79,140 bare
+		// lms-model-state "starting reconcile cycle" lines; 4,085
+		// degraded_health escalations to claude-oauth in 24h while Eclipse
+		// was down). If some backends are unreachable and others merely
+		// report gap notes, that's still an incomplete-but-not-actionable
+		// watch — Suspended, not Degraded.
+		msg := strings.Join(unreachable, "; ")
+		if len(gapNotes) > 0 {
+			msg += "; " + strings.Join(gapNotes, "; ")
+		}
+		return reconcile.ResourceStatus{
+			Sync:      reconcile.SyncStatusUnknown,
+			Health:    reconcile.HealthSuspended,
+			Operation: reconcile.OperationIdle,
+			Message:   msg,
 		}
 	}
 
@@ -330,7 +385,7 @@ func probeModelStateEntry(ctx context.Context, e modelStateEntry) (progressing b
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, "", fmt.Errorf("unreachable: %v", err)
+		return false, "", &unreachableError{err: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
