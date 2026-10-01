@@ -1851,7 +1851,7 @@
     },
     {
       "file": "internal/providers/discord/discord_provider.go",
-      "line": 389,
+      "line": 415,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "writeDiscordServerYAML",
@@ -1863,7 +1863,7 @@
     },
     {
       "file": "internal/providers/discord/discord_provider.go",
-      "line": 392,
+      "line": 418,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "writeDiscordServerYAML",
@@ -1875,7 +1875,7 @@
     },
     {
       "file": "internal/providers/discord/discord_reconcile.go",
-      "line": 1111,
+      "line": 1180,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "writeState",
@@ -1887,7 +1887,7 @@
     },
     {
       "file": "internal/providers/discord/discord_reconcile.go",
-      "line": 1114,
+      "line": 1183,
       "column": 12,
       "primitive": "os.Rename",
       "func": "writeState",
@@ -3567,6 +3567,16 @@
       "raw": "exec.CommandContext(ctx, \"launchctl\", \"list\", label)",
       "dir": "",
       "dir_known": false
+    },
+    {
+      "file": "internal/providers/discord/discord_reconcile.go",
+      "line": 467,
+      "column": 9,
+      "func": "runTokenCommand",
+      "subsystem": "provider:discord",
+      "raw": "exec.CommandContext(ctx, bin, argv[1:]...)",
+      "dir": "{root}",
+      "dir_known": true
     },
     {
       "file": "internal/providers/marginbridge/marginbridge.go",
