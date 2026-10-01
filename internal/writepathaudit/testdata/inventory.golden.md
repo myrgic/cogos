@@ -24,7 +24,7 @@ Total sites: 239  (cog: 97, home: 2, elsewhere: 14, unanchored: 85, dynamic: 41)
 
 | pattern | writer func | file:line | subsystem |
 |---|---|---|---|
-| `{root}/.cog/state/conversations` | NewIndex (`os.MkdirAll`) | internal/conversations/index.go:97 | internal:conversations |
+| `{root}/.cog/state/conversations` | NewIndex (`os.MkdirAll`) | internal/conversations/index.go:110 | internal:conversations |
 | `{root}/.cog/observatory/quarantine/<call:sanitizeSourceName>` | (*QuarantineWriter).WriteRecord (`os.MkdirAll`) | internal/conversations/quarantine.go:154 | internal:conversations |
 | `{root}/.cog/observatory/quarantine/<call:sanitizeSourceName>/quarantine.jsonl` | (*QuarantineWriter).WriteRecord (`os.OpenFile`) | internal/conversations/quarantine.go:158 | internal:conversations |
 | `<WorkspaceRoot>/.cog/mem/episodic/experiments` | SaveResults (`os.MkdirAll`) | internal/engine/benchmark.go:201 | internal:engine |
@@ -249,10 +249,10 @@ These sites write to disk but this tool could not structurally resolve their pat
 | `<call:rbacKindDir>` | writeBindingFile (`os.MkdirAll`) | _legacy/wave4-providers/rbac_provider.go:742 | other |
 | `<call:rbacKindDir>/{action.Name}.yaml` | writeBindingFile (`os.WriteFile`) | _legacy/wave4-providers/rbac_provider.go:750 | other |
 | `<call:os.Getenv>` | (*Harness).RunInference (`os.OpenFile`) | harness/harness.go:468 | harness |
-| `<call:idx.metaPath><call:fmt.Sprintf>` | (*Index).writeMetaFileLocked (`os.WriteFile`) | internal/conversations/index.go:973 | internal:conversations |
-| `<call:idx.metaPath>` | (*Index).writeMetaFileLocked (`os.Rename`) | internal/conversations/index.go:976 | internal:conversations |
-| `<call:idx.turnsPath><call:fmt.Sprintf>` | (*Index).writeTurnsFileLocked (`os.WriteFile`) | internal/conversations/index.go:1108 | internal:conversations |
-| `<call:idx.turnsPath>` | (*Index).writeTurnsFileLocked (`os.Rename`) | internal/conversations/index.go:1111 | internal:conversations |
+| `<call:idx.metaPath><call:fmt.Sprintf>` | (*Index).writeMetaFileLocked (`os.WriteFile`) | internal/conversations/index.go:987 | internal:conversations |
+| `<call:idx.metaPath>` | (*Index).writeMetaFileLocked (`os.Rename`) | internal/conversations/index.go:990 | internal:conversations |
+| `<call:idx.turnsPath><call:fmt.Sprintf>` | (*Index).writeTurnsFileLocked (`os.WriteFile`) | internal/conversations/index.go:1122 | internal:conversations |
+| `<call:idx.turnsPath>` | (*Index).writeTurnsFileLocked (`os.Rename`) | internal/conversations/index.go:1125 | internal:conversations |
 | `<expr>` | runBlobsCmd (`os.WriteFile`) | internal/engine/blobs_cmd.go:168 | internal:engine |
 | `dirname(<call:bs.blobPath>)` | (*BlobStore).Store (`os.MkdirAll`) | internal/engine/blobstore.go:89 | internal:engine |
 | `<call:bs.blobPath>.tmp` | (*BlobStore).Store (`os.WriteFile`) | internal/engine/blobstore.go:95 | internal:engine |
@@ -357,7 +357,7 @@ Total subprocess sites: 79
 | `{wts[i].Path}` | `exec.CommandContext(ctx, "git", "rev-list", "--count", upstreamRef+"..HEAD")` | internal/engine/worktree_reconciler.go:963 | internal:engine |
 | `{repoRoot}` | `exec.CommandContext(ctx, "git", args...)` | internal/engine/worktree_spawn.go:134 | internal:engine |
 | `{root}` | `exec.CommandContext(ctx, cogScript, args...)` | internal/linkfeed/linkfeed.go:977 | internal:linkfeed |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("git", "rev-parse", "--show-toplevel")` | internal/providers/all/all.go:126 | provider:all |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("git", "rev-parse", "--show-toplevel")` | internal/providers/all/all.go:128 | provider:all |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(psCtx, e.lmsCLIPath, "ps", "--json")` | internal/providers/daemon/lms_model_state.go:449 | provider:daemon |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "launchctl", "list", label)` | internal/providers/daemon/mlx_inference.go:217 | provider:daemon |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "gh", "api", path)` | internal/providers/marginbridge/marginbridge.go:455 | provider:marginbridge |

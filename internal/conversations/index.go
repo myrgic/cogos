@@ -72,6 +72,19 @@ type Index struct {
 	lastMetaMtime time.Time
 	lastMetaSize  int64
 	lastMetaHash  string
+
+	// loaded is set once Load has completed at least once. Before that the
+	// in-memory maps are empty regardless of what is on disk, so readers that
+	// must distinguish "no matches" from "not ready" (the fused memory search,
+	// myrgic/cogos#650) check Loaded. Guarded by mu.
+	loaded bool
+}
+
+// Loaded reports whether Load has completed at least once on this index.
+func (idx *Index) Loaded() bool {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return idx.loaded
 }
 
 // metaDelta describes the change a single writeMetaFileLocked call must apply
@@ -152,6 +165,7 @@ func (idx *Index) Load() error {
 	idx.lastMetaMtime = metaMtime
 	idx.lastMetaSize = metaSize
 	idx.lastMetaHash = metaHash
+	idx.loaded = true
 	idx.mu.Unlock()
 	return nil
 }
