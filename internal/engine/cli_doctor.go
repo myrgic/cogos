@@ -87,10 +87,12 @@ import (
 	"context"
 	"database/sql"
 	"debug/buildinfo"
+
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	bep "github.com/myrgic/cogos/pkg/substrate/bep"
 	"io/fs"
 	"net/http"
 	neturl "net/url"
@@ -490,6 +492,20 @@ func doctorInstallIntegrity(report *DoctorReport, root string, opts DoctorOption
 
 	// -- Enumerate every cogos/cog binary on disk, dev-artifact flagged --
 	doctorBinarySprawl(g, root, opts)
+
+	// -- Standalone Syncthing beside the kernel's own BEP engine ----------
+	bepEnabled, bepListen := false, ""
+	if root != "" {
+		if cc, err := NewBEPProvider(root).LoadConfig(); err == nil && cc != nil {
+			bepEnabled = cc.Enabled
+			port := cc.ListenPort
+			if port == 0 {
+				port = bep.DefaultListenPort
+			}
+			bepListen = fmt.Sprintf(":%d", port)
+		}
+	}
+	doctorSyncthingConflict(g, bepEnabled, bepListen)
 }
 
 // lookPathAll resolves name against every directory on PATH, returning every
