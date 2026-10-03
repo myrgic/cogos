@@ -15,7 +15,7 @@ package engine
 
 import (
 	"encoding/json"
-	"io"
+	"errors"
 	"net/http"
 )
 
@@ -85,9 +85,9 @@ func (s *Server) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MB is vast for a scalar config
+	body, err := readLimitedBody(w, r, maxConfigRequestBodyBytes)
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
+		w.WriteHeader(configBodyErrStatus(err))
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": "read body: " + err.Error()})
 		return
 	}
@@ -130,9 +130,9 @@ func (s *Server) handleConfigRollback(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	var body rollbackConfigInput
 	if r.ContentLength > 0 {
-		data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		data, err := readLimitedBody(w, r, maxConfigRequestBodyBytes)
 		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
+			w.WriteHeader(configBodyErrStatus(err))
 			_ = json.NewEncoder(w).Encode(map[string]any{"error": "read body: " + err.Error()})
 			return
 		}
@@ -170,4 +170,13 @@ func truthyQuery(v string) bool {
 		return true
 	}
 	return false
+}
+
+// configBodyErrStatus maps a readLimitedBody error to an HTTP status:
+// 413 for an oversized body, 400 otherwise.
+func configBodyErrStatus(err error) int {
+	if errors.Is(err, errRequestBodyTooLarge) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
 }
