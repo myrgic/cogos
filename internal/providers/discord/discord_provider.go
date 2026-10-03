@@ -126,7 +126,10 @@ func (d *DiscordProvider) ComputePlan(config any, live any, state *reconcile.Sta
 		discordState = reconcileStateToDiscordState(state)
 	}
 
-	plan := computePlanWithState(cfg, liveState.Channels, liveState.Roles, discordState)
+	plan, err := computePlanWithState(cfg, liveState.Channels, liveState.Roles, discordState)
+	if err != nil {
+		return nil, fmt.Errorf("discord: %w", err)
+	}
 
 	// Convert Discord Plan to generic reconcile.Plan
 	return discordPlanToReconcilePlan(plan), nil
@@ -357,6 +360,9 @@ func buildDiscordConfigFromLive(live *DiscordLiveState, guildID, guildName, guil
 			NSFW:                 ch.NSFW,
 			ManagedBy:            "cog",
 			PermissionOverwrites: convertPermOverwrites(ch.PermissionOverwrites, roleIDToName),
+			Tags:                 tagsFromLive(ch.AvailableTags),
+			DefaultSort:          liveForumSort(ch),
+			DefaultLayout:        liveForumLayout(ch),
 		})
 	}
 
@@ -503,7 +509,7 @@ func discordStateToReconcileState(ds *DiscordState) *reconcile.State {
 		ResourceType: "discord",
 		GeneratedAt:  ds.GeneratedAt,
 		Resources:    resources,
-		Metadata:     map[string]any{"guild_id": ds.GuildID},
+		Metadata:     discordStateMetadata(ds),
 	}
 }
 
@@ -531,6 +537,7 @@ func reconcileStateToDiscordState(state *reconcile.State) *DiscordState {
 		GuildID:     guildID,
 		GeneratedAt: state.GeneratedAt,
 		Resources:   resources,
+		TagIDs:      tagIDsFromMetadata(state.Metadata),
 	}
 }
 

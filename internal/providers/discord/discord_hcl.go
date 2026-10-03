@@ -58,6 +58,17 @@ type hclChannel struct {
 	Slowmode    int             `hcl:"slowmode,optional"`
 	NSFW        bool            `hcl:"nsfw,optional"`
 	Permissions []hclPermission `hcl:"permission,block"`
+
+	// Forum-only.
+	Tags          []hclTag `hcl:"tag,block"`
+	DefaultSort   string   `hcl:"default_sort,optional"`
+	DefaultLayout string   `hcl:"default_layout,optional"`
+}
+
+type hclTag struct {
+	Name      string `hcl:"name,label"`
+	Emoji     string `hcl:"emoji,optional"`
+	Moderated bool   `hcl:"moderated,optional"`
 }
 
 type hclPermission struct {
@@ -322,6 +333,11 @@ func hclToDiscordConfig(cfg *hclConfigFile) *DiscordServerConfig {
 				NSFW:                 ch.NSFW,
 				ManagedBy:            "cog",
 				PermissionOverwrites: chPerms,
+				DefaultSort:          ch.DefaultSort,
+				DefaultLayout:        ch.DefaultLayout,
+			}
+			for _, t := range ch.Tags {
+				chc.Tags = append(chc.Tags, TagConfig{Name: t.Name, Emoji: t.Emoji, Moderated: t.Moderated})
 			}
 			cc.Channels = append(cc.Channels, chc)
 		}
@@ -496,7 +512,8 @@ func discordConfigToHCL(cfg *DiscordServerConfig) string {
 			chHasExplicitPerms := !permsEqual(ch.PermissionOverwrites, cat.PermissionOverwrites)
 
 			// Determine if we need a block body at all
-			needsBody := ch.Type != "text" || ch.Topic != "" || ch.Slowmode != 0 || ch.NSFW || chHasExplicitPerms
+			needsBody := ch.Type != "text" || ch.Topic != "" || ch.Slowmode != 0 || ch.NSFW || chHasExplicitPerms ||
+				len(ch.Tags) > 0 || ch.DefaultSort != "" || ch.DefaultLayout != ""
 
 			if !needsBody {
 				b.WriteString(fmt.Sprintf("  channel %q {}\n", ch.Name))
@@ -513,6 +530,22 @@ func discordConfigToHCL(cfg *DiscordServerConfig) string {
 				}
 				if ch.NSFW {
 					b.WriteString("    nsfw = true\n")
+				}
+				if ch.DefaultSort != "" {
+					b.WriteString(fmt.Sprintf("    default_sort = %q\n", ch.DefaultSort))
+				}
+				if ch.DefaultLayout != "" {
+					b.WriteString(fmt.Sprintf("    default_layout = %q\n", ch.DefaultLayout))
+				}
+				for _, t := range ch.Tags {
+					b.WriteString(fmt.Sprintf("    tag %q {\n", t.Name))
+					if t.Emoji != "" {
+						b.WriteString(fmt.Sprintf("      emoji = %q\n", t.Emoji))
+					}
+					if t.Moderated {
+						b.WriteString("      moderated = true\n")
+					}
+					b.WriteString("    }\n")
 				}
 				if chHasExplicitPerms {
 					for _, p := range ch.PermissionOverwrites {
