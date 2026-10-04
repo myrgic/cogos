@@ -48,8 +48,10 @@ type PodmanRuntime struct {
 	run func(args ...string) ([]byte, error)
 }
 
-// NewPodmanRuntime locates the podman binary. It does not touch the machine;
-// call EnsureReady before the first container operation.
+// NewPodmanRuntime locates the podman binary. It does not touch the machine:
+// every container operation (Start, Stop, Status, Logs, Exec, Pull) calls
+// EnsureReady itself, so callers never see a dead-connection error for a
+// machine that is merely stopped.
 func NewPodmanRuntime() (*PodmanRuntime, error) {
 	bin, err := findBinary(envPodmanBin, "podman", []string{
 		"/opt/homebrew/bin/podman",
@@ -127,7 +129,15 @@ func (p *PodmanRuntime) EnsureReady() error {
 	out, err := p.run(args...)
 	if err != nil {
 		// A concurrent start races to "already running"; treat as ready.
-		if strings.Contains(strings.ToLower(string(out)), "already running") {
+		text := strings.ToLower(string(out))
+		// "only one VM can be active at a time" (macOS applehv/libkrun) names
+		// ANOTHER machine; it also contains "already ... running", so it must
+		// be checked first or it would read as our machine being ready.
+		if strings.Contains(text, "only one vm can be active") {
+			return fmt.Errorf("podman machine %q cannot start: another podman machine is running and this host allows one at a time; "+
+				"stop it, or point %s at the running machine: %s", p.machine, envPodmanMachine, strings.TrimSpace(string(out)))
+		}
+		if strings.Contains(text, "already running") {
 			return nil
 		}
 		return fmt.Errorf("podman machine start: %w: %s", err, strings.TrimSpace(string(out)))
@@ -166,6 +176,9 @@ func (p *PodmanRuntime) Start(image string, config ContainerConfig) (string, err
 }
 
 func (p *PodmanRuntime) Stop(containerID string) error {
+	if err := p.EnsureReady(); err != nil {
+		return err
+	}
 	out, err := p.run(p.global("stop", containerID)...)
 	if err != nil {
 		return fmt.Errorf("podman stop %s: %w: %s", containerID, err, strings.TrimSpace(string(out)))
@@ -174,6 +187,12 @@ func (p *PodmanRuntime) Stop(containerID string) error {
 }
 
 func (p *PodmanRuntime) Status(containerID string) (ContainerStatus, error) {
+	// Status is the first runtime call on the `cog start` path (planStart),
+	// so it must bring a stopped machine up rather than fail on a dead
+	// connection.
+	if err := p.EnsureReady(); err != nil {
+		return ContainerStatus{}, err
+	}
 	out, err := p.run(p.global("container", "inspect", containerID)...)
 	if err != nil {
 		if isNoSuchContainer(out) {
@@ -201,6 +220,9 @@ func (p *PodmanRuntime) Status(containerID string) (ContainerStatus, error) {
 }
 
 func (p *PodmanRuntime) Logs(containerID string, follow bool) (io.ReadCloser, error) {
+	if err := p.EnsureReady(); err != nil {
+		return nil, err
+	}
 	args := []string{"logs"}
 	if follow {
 		args = append(args, "-f")
@@ -220,6 +242,9 @@ func (p *PodmanRuntime) Logs(containerID string, follow bool) (io.ReadCloser, er
 }
 
 func (p *PodmanRuntime) Exec(containerID string, command []string) ([]byte, error) {
+	if err := p.EnsureReady(); err != nil {
+		return nil, err
+	}
 	args := append([]string{"exec", containerID}, command...)
 	out, err := p.run(p.global(args...)...)
 	if err != nil {

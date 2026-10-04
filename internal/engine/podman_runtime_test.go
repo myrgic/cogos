@@ -96,6 +96,21 @@ func TestPodmanEnsureReadyToleratesAlreadyRunningRace(t *testing.T) {
 	}
 }
 
+// Observed on darwin/applehv, podman 5.6.1: starting a second machine while
+// another runs fails with this text. It must not be mistaken for "ours is
+// already running".
+func TestPodmanEnsureReadyOneVMAtATime(t *testing.T) {
+	p, _ := fakePodman("podman-machine-default", true, map[string]reply{
+		"machine inspect": {out: `[{"Name":"podman-machine-default","State":"stopped"}]`},
+		"machine start": {out: "Error: unable to start \"podman-machine-default\": cogos-node already starting or running: only one VM can be active at a time",
+			err: errors.New("exit 125")},
+	})
+	err := p.EnsureReady()
+	if err == nil || !strings.Contains(err.Error(), "one at a time") {
+		t.Fatalf("want explicit one-VM error, got %v", err)
+	}
+}
+
 func TestPodmanLinuxNeedsNoMachine(t *testing.T) {
 	p, rec := fakePodman("", false, nil)
 	if err := p.EnsureReady(); err != nil {
@@ -161,8 +176,10 @@ func TestPodmanRealBinary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := p.EnsureReady(); err != nil {
-		t.Fatalf("EnsureReady: %v", err)
+	// Cold path, as `cog start` runs it: Status first, with no explicit
+	// EnsureReady. On macOS this must start a stopped machine itself.
+	if st, err := p.Status("cogos-definitely-absent"); err != nil || st.Exists {
+		t.Fatalf("cold Status: %+v %v", st, err)
 	}
 	const img = "docker.io/library/alpine:3.20"
 	if err := p.Pull(img); err != nil {
@@ -205,5 +222,85 @@ func TestPodmanRealBinary(t *testing.T) {
 	}
 	if st, _ := p.Status("cogos-definitely-absent"); st.Exists {
 		t.Fatal("absent container reported as existing")
+	}
+}
+
+// stoppedMachine fakes podman with the declared machine stopped: any
+// container command against the connection fails the way a dead connection
+// does, until `machine start` has run.
+func stoppedMachine() (*PodmanRuntime, *recorder, *bool) {
+	started := false
+	rec := &recorder{}
+	p := newPodmanRuntimeWithBin("/fake/podman", "cogos-node", true)
+	p.run = func(args ...string) ([]byte, error) {
+		rec.calls = append(rec.calls, append([]string(nil), args...))
+		switch {
+		case len(args) >= 2 && args[0] == "machine" && args[1] == "inspect":
+			if started {
+				return []byte(`[{"Name":"cogos-node","State":"running"}]`), nil
+			}
+			return []byte(`[{"Name":"cogos-node","State":"stopped"}]`), nil
+		case len(args) >= 2 && args[0] == "machine" && args[1] == "start":
+			started = true
+			return nil, nil
+		}
+		if !started {
+			return []byte("Cannot connect to Podman. Please verify your connection to the Linux system"), errors.New("exit 125")
+		}
+		if len(args) >= 4 && args[2] == "container" && args[3] == "inspect" {
+			return []byte("Error: no such container cog-x"), errors.New("exit 125")
+		}
+		return nil, nil
+	}
+	return p, rec, &started
+}
+
+// Regression for cog-review on #664: planStart calls Status before Start, so
+// a cold `cog start` with the machine stopped must start the machine, not
+// fail on the dead connection.
+func TestPodmanPlanStartWithStoppedMachine(t *testing.T) {
+	p, _, started := stoppedMachine()
+	root := makeWorkspace(t)
+	cfg := makeConfig(t, root)
+	cfg.Port = 6931
+	plan, err := planStart(cfg, p,
+		func(string, time.Duration) (*DaemonHealth, error) { return nil, errors.New("down") },
+		defaultDaemonImage)
+	if err != nil {
+		t.Fatalf("planStart with stopped machine: %v", err)
+	}
+	if !*started {
+		t.Fatal("planStart did not start the stopped machine")
+	}
+	if plan.Action != startFresh {
+		t.Fatalf("plan.Action = %s; want %s", plan.Action, startFresh)
+	}
+}
+
+// Every container operation brings a stopped machine up first (sibling sites
+// of the Status finding: Stop, Exec, Logs).
+func TestPodmanEveryOperationEnsuresMachine(t *testing.T) {
+	ops := map[string]func(p *PodmanRuntime) error{
+		"Status": func(p *PodmanRuntime) error { _, err := p.Status("cog-x"); return err },
+		"Stop":   func(p *PodmanRuntime) error { return p.Stop("cog-x") },
+		"Exec":   func(p *PodmanRuntime) error { _, err := p.Exec("cog-x", []string{"true"}); return err },
+		"Pull":   func(p *PodmanRuntime) error { return p.Pull("img") },
+		"Start":  func(p *PodmanRuntime) error { _, err := p.Start("img", ContainerConfig{Name: "cog-x"}); return err },
+	}
+	for name, op := range ops {
+		p, _, started := stoppedMachine()
+		if err := op(p); err != nil {
+			t.Errorf("%s with stopped machine: %v", name, err)
+		}
+		if !*started {
+			t.Errorf("%s did not start the stopped machine", name)
+		}
+	}
+	// Logs execs the real binary for streaming; check it fails on readiness,
+	// not on the connection, when the machine cannot be started.
+	p := newPodmanRuntimeWithBin("/fake/podman", "cogos-node", true)
+	p.run = func(args ...string) ([]byte, error) { return []byte("boom"), errors.New("inspect failed") }
+	if _, err := p.Logs("cog-x", false); err == nil || !strings.Contains(err.Error(), "machine inspect") {
+		t.Errorf("Logs must check machine readiness first, got %v", err)
 	}
 }
