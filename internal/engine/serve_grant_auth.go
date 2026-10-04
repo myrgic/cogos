@@ -265,6 +265,14 @@ func requiredScopeForRequest(r *http.Request) string {
 		return ScopeAdmin
 	}
 
+	// Service control: start/stop/restart/enable/disable declared services
+	// (serve_services.go). These act on processes outside the kernel —
+	// including agent gateways — so they are admin-shaped, not plain writes.
+	// GET /v1/services* stays exempt via the blanket GET rule.
+	if strings.HasPrefix(path, "/v1/services/") && r.Method != http.MethodGet {
+		return ScopeAdmin
+	}
+
 	// Inference: the routes that spend provider tokens.
 	if path == "/v1/chat/completions" || path == "/v1/messages" {
 		return ScopeInference

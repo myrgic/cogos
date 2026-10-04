@@ -350,11 +350,11 @@ Total subprocess sites: 83
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, p.nodeBin, args...)` | internal/engine/provider_lms_model_state.go:818 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("git", "rev-parse", "--show-toplevel")` | internal/engine/provider_lms_model_state.go:1324 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, p.piBinary, "--help")` | internal/engine/provider_pi.go:289 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "launchctl", args...)` | internal/engine/service_supervisor_launchctl.go:321 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "launchctl", args...)` | internal/engine/service_supervisor_launchctl.go:331 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "launchctl", args...)` | internal/engine/service_supervisor_launchctl.go:349 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("id", "-u")` | internal/engine/service_supervisor_launchctl.go:376 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("sh", "-c", "echo $HOME")` | internal/engine/service_supervisor_launchctl.go:386 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "launchctl", args...)` | internal/engine/service_supervisor_launchctl.go:388 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "launchctl", args...)` | internal/engine/service_supervisor_launchctl.go:398 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "launchctl", args...)` | internal/engine/service_supervisor_launchctl.go:416 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("id", "-u")` | internal/engine/service_supervisor_launchctl.go:443 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("sh", "-c", "echo $HOME")` | internal/engine/service_supervisor_launchctl.go:453 | internal:engine |
 | `{workspace}` | `exec.CommandContext(ctx, "sh", "-c", h.Shell)` | internal/engine/transition_hooks.go:225 | internal:engine |
 | `{repoRoot}` | `exec.CommandContext(ctx, "git", "worktree", "list", "--porcelain")` | internal/engine/worktree_reconciler.go:831 | internal:engine |
 | `{repoRoot}` | `exec.CommandContext(ctx, "git", "worktree", "remove", "--force", path)` | internal/engine/worktree_reconciler.go:862 | internal:engine |

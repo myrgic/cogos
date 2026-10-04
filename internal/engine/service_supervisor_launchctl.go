@@ -12,8 +12,9 @@
 //     load plist then kickstart.
 //   - Stop:    SIGTERM with 5s timeout, then SIGKILL. Returns immediately with
 //     Stopping=true; caller polls Status.
-//   - Restart: serialised per-service via mutex. Second concurrent call blocks
-//     until the first finishes, then runs its own stop+start (idempotent).
+//   - Restart: `launchctl kickstart -k` (launchd kills + relaunches in one
+//     step, so it completes even if the caller is the service itself), then
+//     waits for a new PID. Serialised per-service via mutex.
 //   - Enable:  launchctl load -w <plist>. Idempotent.
 //   - Disable: launchctl unload -w <plist>. Idempotent (unload of missing job
 //     is harmless — launchctl exits 0).
@@ -170,28 +171,94 @@ func (c *LaunchctlController) Stop(ctx context.Context, name string, def Service
 	return st2, nil
 }
 
-// Restart stops and then starts the service. Concurrent calls for the same
-// service serialise via a per-service mutex: the second caller blocks until
-// the first completes, then runs its own stop+start. Because stop+start is
-// idempotent, redundant work is safe. Each caller receives the result of its
-// own restart attempt.
+// Restart asks launchd to kill and relaunch the job in one step
+// (`launchctl kickstart -k`), then waits for a new PID to confirm the restart
+// landed. Concurrent calls for the same service serialise via a per-service
+// mutex.
+//
+// Why kickstart -k rather than stop+start: launchd owns the whole cycle, so
+// the restart completes even if the caller disappears mid-way — which is the
+// normal case when the caller IS the service being restarted (an agent
+// gateway restarting itself through the kernel). The old stop → sleep →
+// start sequence aborted at the sleep when the request context was
+// cancelled, and a gracefully-stopped job whose plist only relaunches on a
+// non-zero exit (KeepAlive.SuccessfulExit=false) then stayed down.
+//
+// If the job is not loaded at all, Restart falls back to Start (load +
+// kickstart). The returned status carries PreviousPID; Restarted is true
+// only when a different live PID was observed before the wait expired.
 func (c *LaunchctlController) Restart(ctx context.Context, name string, def ServiceDef) (*ServiceStatus, error) {
 	lock := c.restartLockFor(name)
 
 	lock.mu.Lock()
 	defer lock.mu.Unlock()
 
-	_, _ = c.Stop(ctx, name, def)
-	// Brief wait to allow launchd to process the stop before starting.
-	// We don't block on process exit here — Start() is idempotent and checks
-	// live state before kickstarting.
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-time.After(500 * time.Millisecond):
+	label := def.Launchd
+	if label == "" {
+		return nil, fmt.Errorf("service %q has no launchd label: cannot restart via launchctl", name)
 	}
 
-	return c.Start(ctx, name, def)
+	before, _ := c.Status(ctx, name, def)
+	if before == nil || !before.LaunchdRegistered {
+		return c.Start(ctx, name, def)
+	}
+	prevPID := before.PID
+
+	exitCode := 0
+	kickErr := c.runLaunchctlWithExit(ctx, &exitCode, "kickstart", "-k", "gui/"+currentUID()+"/"+label)
+	kickErr = wrapTransientErr(kickErr, exitCode)
+	if kickErr != nil {
+		st, _ := c.Status(ctx, name, def)
+		if st == nil {
+			st = &ServiceStatus{At: time.Now().UTC()}
+		}
+		st.PreviousPID = prevPID
+		st.LaunchctlExitCode = exitCode
+		return st, kickErr
+	}
+
+	st := c.awaitNewPID(ctx, name, def, prevPID, restartConfirmTimeout)
+	st.PreviousPID = prevPID
+	st.LaunchctlExitCode = exitCode
+	return st, nil
+}
+
+// restartConfirmTimeout bounds how long Restart waits for launchd to report a
+// new PID. Gateways drain in-flight work on SIGTERM, so this is generous.
+var restartConfirmTimeout = 30 * time.Second
+
+// awaitNewPID polls Status until the job reports a live PID different from
+// prevPID, the context ends, or timeout elapses. It always returns a status
+// (the last one observed) and never an error: an unconfirmed restart is
+// reported via Restarted=false, not as a failure of the kickstart itself.
+func (c *LaunchctlController) awaitNewPID(ctx context.Context, name string, def ServiceDef, prevPID int, timeout time.Duration) *ServiceStatus {
+	deadline := time.Now().Add(timeout)
+	var last *ServiceStatus
+	for {
+		st, _ := c.Status(ctx, name, def)
+		if st != nil {
+			last = st
+			if st.Running && st.PID != 0 && st.PID != prevPID {
+				st.Restarted = true
+				return st
+			}
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			if last == nil {
+				last = &ServiceStatus{At: time.Now().UTC()}
+			}
+			return last
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	if last == nil {
+		last = &ServiceStatus{At: time.Now().UTC()}
+	}
+	return last
 }
 
 // Enable loads the plist with -w (write boot preference) so the service

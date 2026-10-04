@@ -23,8 +23,10 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -353,12 +355,75 @@ func (s *Server) handleServiceStop(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleServiceRestart — POST /v1/services/{name}/restart
+// handleServiceRestart — POST /v1/services/{name}/restart[?wait=false]
+//
+// The restart runs on a context detached from the request: the caller may be
+// the service being restarted (an agent gateway restarting itself), and its
+// connection drops as soon as the old process exits. Cancelling the restart
+// at that moment would leave the service down. The response reports
+// previous_pid and restarted=true once a new PID is observed.
+//
+// ?wait=false returns 202 immediately and restarts in the background. A
+// caller restarting ITSELF must use it: a gateway drains in-flight work on
+// SIGTERM, and the in-flight work includes the very call that is waiting on
+// this response — waiting would deadlock until the drain timeout.
 func (s *Server) handleServiceRestart(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("wait") == "false" {
+		s.handleServiceRestartAsync(w, r)
+		return
+	}
 	s.dispatchMutation(w, r, "restart", func(sup ServiceSupervisor, name string, def ServiceDef) (*ServiceStatus, error) {
-		return sup.Restart(r.Context(), name, def)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), serviceRestartBudget)
+		defer cancel()
+		return sup.Restart(ctx, name, def)
 	})
 }
+
+// handleServiceRestartAsync accepts a restart and runs it in the background.
+// Same gate, lookup, and supervisor routing as dispatchMutation; a
+// non-controllable service still gets 409 synchronously.
+func (s *Server) handleServiceRestartAsync(w http.ResponseWriter, r *http.Request) {
+	if !s.requireServiceControl(w) {
+		return
+	}
+	name := r.PathValue("name")
+	def, ok := s.lookupServiceForMutation(w, name)
+	if !ok {
+		return
+	}
+	sup := supervisorFor(def, s.supervisorFromServer())
+	before, err := sup.Status(r.Context(), name, def)
+	if err != nil && errors.Is(err, ErrNotControllable) {
+		writeMutationResponse(w, http.StatusConflict, serviceMutationResponse{
+			Success: false, Action: "restart", ServiceName: name, Error: err.Error(),
+		})
+		return
+	}
+	if def.Kind.EffectiveKind() != ServiceKindManaged {
+		writeMutationResponse(w, http.StatusConflict, serviceMutationResponse{
+			Success: false, Action: "restart", ServiceName: name, Error: ErrNotControllable.Error(),
+		})
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), serviceRestartBudget)
+		defer cancel()
+		st, rerr := sup.Restart(ctx, name, def)
+		attrs := []any{"service", name, "err", rerr}
+		if st != nil {
+			attrs = append(attrs, "previous_pid", st.PreviousPID, "pid", st.PID, "restarted", st.Restarted)
+		}
+		slog.Info("services: async restart finished", attrs...)
+	}()
+
+	writeMutationResponse(w, http.StatusAccepted, serviceMutationResponse{
+		Success: true, Action: "restart", ServiceName: name, Status: before,
+	})
+}
+
+// serviceRestartBudget bounds a detached restart (kickstart + PID confirm).
+var serviceRestartBudget = 60 * time.Second
 
 // handleServiceEnable — POST /v1/services/{name}/enable
 func (s *Server) handleServiceEnable(w http.ResponseWriter, r *http.Request) {

@@ -60,6 +60,11 @@ type ServiceStatus struct {
 	// LaunchctlExitCode is the raw exit code from the launchctl subprocess.
 	// Included for diagnostics; zero on success.
 	LaunchctlExitCode int `json:"launchctl_exit_code,omitempty"`
+	// PreviousPID is the PID observed before a restart (restart only).
+	PreviousPID int `json:"previous_pid,omitempty"`
+	// Restarted is true when a restart was confirmed by observing a live PID
+	// different from PreviousPID (restart only).
+	Restarted bool `json:"restarted,omitempty"`
 }
 
 // ServiceSupervisor is the control-plane interface for a single service kind.
@@ -85,7 +90,9 @@ type ServiceSupervisor interface {
 	// with Stopping=true; the caller can poll Status for confirmation.
 	Stop(ctx context.Context, name string, def ServiceDef) (*ServiceStatus, error)
 
-	// Restart stops the service (graceful) then starts it. Per-service mutex
+	// Restart restarts the service and reports whether a new process was
+	// observed. Must complete even if the caller's connection drops (the
+	// caller may be the service being restarted). Per-service mutex
 	// serialises concurrent restart requests.
 	Restart(ctx context.Context, name string, def ServiceDef) (*ServiceStatus, error)
 
