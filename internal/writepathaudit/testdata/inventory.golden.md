@@ -295,7 +295,7 @@ These sites write to disk but this tool could not structurally resolve their pat
 
 v1 counts direct filesystem primitives + sqlite only (see the package doc). A spawned process can write anywhere its own logic chooses, which this tool cannot see without executing it — these sites are enumerated for visibility, with cmd.Dir resolved where possible, but are NOT classified into any bin above and do not contribute to the totals at the top of this document. Non-Go writers (shell/Python scripts this repo runs) are not enumerable by a Go source scanner at all and are not listed here either — see the package doc.
 
-Total subprocess sites: 80
+Total subprocess sites: 82
 
 | cmd.Dir | call | file:line | subsystem |
 |---|---|---|---|
@@ -332,6 +332,8 @@ Total subprocess sites: 80
 | _(not set — inherits the process's own working directory)_ | `exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port))` | internal/engine/node_cmd.go:132 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("ps", "-o", "etime=", "-p", pid)` | internal/engine/node_cmd.go:144 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("ps", "-o", "comm=", "-p", pid)` | internal/engine/node_cmd.go:193 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command(p.bin, args...)` | internal/engine/podman_runtime.go:71 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command(p.bin, p.global(args...)...)` | internal/engine/podman_runtime.go:231 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "python3", cogblockPath, "parse", sourcePath)` | internal/engine/projection_compiler.go:388 | internal:engine |
 | `{home}` | `exec.CommandContext(ctx, binary, "auth", "status", "--json")` | internal/engine/provider_claudecode.go:70 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, p.cliBinary, "--version")` | internal/engine/provider_claudecode.go:209 | internal:engine |
