@@ -344,14 +344,18 @@ func (s *Server) dispatchMutation(
 //	409 → service is not controllable (kind=observed|external)
 func (s *Server) handleServiceStart(w http.ResponseWriter, r *http.Request) {
 	s.dispatchMutation(w, r, "start", func(sup ServiceSupervisor, name string, def ServiceDef) (*ServiceStatus, error) {
-		return sup.Start(r.Context(), name, def)
+		ctx, cancel := detachedServiceContext(r)
+		defer cancel()
+		return sup.Start(ctx, name, def)
 	})
 }
 
 // handleServiceStop — POST /v1/services/{name}/stop
 func (s *Server) handleServiceStop(w http.ResponseWriter, r *http.Request) {
 	s.dispatchMutation(w, r, "stop", func(sup ServiceSupervisor, name string, def ServiceDef) (*ServiceStatus, error) {
-		return sup.Stop(r.Context(), name, def)
+		ctx, cancel := detachedServiceContext(r)
+		defer cancel()
+		return sup.Stop(ctx, name, def)
 	})
 }
 
@@ -373,7 +377,7 @@ func (s *Server) handleServiceRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.dispatchMutation(w, r, "restart", func(sup ServiceSupervisor, name string, def ServiceDef) (*ServiceStatus, error) {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), serviceRestartBudget)
+		ctx, cancel := detachedServiceContext(r)
 		defer cancel()
 		return sup.Restart(ctx, name, def)
 	})
@@ -391,23 +395,27 @@ func (s *Server) handleServiceRestartAsync(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	sup := supervisorFor(def, s.supervisorFromServer())
-	before, err := sup.Status(r.Context(), name, def)
-	if err != nil && errors.Is(err, ErrNotControllable) {
-		writeMutationResponse(w, http.StatusConflict, serviceMutationResponse{
-			Success: false, Action: "restart", ServiceName: name, Error: err.Error(),
-		})
-		return
-	}
 	if def.Kind.EffectiveKind() != ServiceKindManaged {
 		writeMutationResponse(w, http.StatusConflict, serviceMutationResponse{
 			Success: false, Action: "restart", ServiceName: name, Error: ErrNotControllable.Error(),
 		})
 		return
 	}
+	// Reject what the background restart would only be able to log: a
+	// managed service with no launchd label cannot be kickstarted, and a
+	// fire-and-forget 202 would hide that from the caller.
+	if def.Launchd == "" {
+		writeMutationResponse(w, http.StatusConflict, serviceMutationResponse{
+			Success: false, Action: "restart", ServiceName: name,
+			Error: "service " + name + " has no launchd label: cannot restart via launchctl",
+		})
+		return
+	}
+	sup := supervisorFor(def, s.supervisorFromServer())
+	before, _ := sup.Status(r.Context(), name, def)
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), serviceRestartBudget)
+		ctx, cancel := detachedServiceContext(r)
 		defer cancel()
 		st, rerr := sup.Restart(ctx, name, def)
 		attrs := []any{"service", name, "err", rerr}
@@ -422,19 +430,33 @@ func (s *Server) handleServiceRestartAsync(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// serviceRestartBudget bounds a detached restart (kickstart + PID confirm).
+// serviceRestartBudget bounds a detached service mutation (for restart:
+// kickstart + PID confirm).
 var serviceRestartBudget = 60 * time.Second
+
+// detachedServiceContext returns a context for a service mutation that
+// survives the request being cancelled (a dropped or timed-out client must not
+// abort a launchctl operation halfway), bounded by serviceRestartBudget.
+// Every mutation route uses it, not only restart: stop → client drops → the
+// job is left in whatever state launchctl reached is the same bug class.
+func detachedServiceContext(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(r.Context()), serviceRestartBudget)
+}
 
 // handleServiceEnable — POST /v1/services/{name}/enable
 func (s *Server) handleServiceEnable(w http.ResponseWriter, r *http.Request) {
 	s.dispatchMutation(w, r, "enable", func(sup ServiceSupervisor, name string, def ServiceDef) (*ServiceStatus, error) {
-		return sup.Enable(r.Context(), name, def)
+		ctx, cancel := detachedServiceContext(r)
+		defer cancel()
+		return sup.Enable(ctx, name, def)
 	})
 }
 
 // handleServiceDisable — POST /v1/services/{name}/disable
 func (s *Server) handleServiceDisable(w http.ResponseWriter, r *http.Request) {
 	s.dispatchMutation(w, r, "disable", func(sup ServiceSupervisor, name string, def ServiceDef) (*ServiceStatus, error) {
-		return sup.Disable(r.Context(), name, def)
+		ctx, cancel := detachedServiceContext(r)
+		defer cancel()
+		return sup.Disable(ctx, name, def)
 	})
 }

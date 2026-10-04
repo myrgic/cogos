@@ -204,8 +204,14 @@ func (c *LaunchctlController) Restart(ctx context.Context, name string, def Serv
 	}
 	prevPID := before.PID
 
+	// Same domain order as Start: system/ first (LaunchDaemons), then the
+	// user's gui/<uid>/ domain (LaunchAgents — every service CogOS manages
+	// today).
 	exitCode := 0
-	kickErr := c.runLaunchctlWithExit(ctx, &exitCode, "kickstart", "-k", "gui/"+currentUID()+"/"+label)
+	kickErr := c.runLaunchctlWithExit(ctx, &exitCode, "kickstart", "-k", "system/"+label)
+	if kickErr != nil {
+		kickErr = c.runLaunchctlWithExit(ctx, &exitCode, "kickstart", "-k", "gui/"+currentUID()+"/"+label)
+	}
 	kickErr = wrapTransientErr(kickErr, exitCode)
 	if kickErr != nil {
 		st, _ := c.Status(ctx, name, def)

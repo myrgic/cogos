@@ -3440,7 +3440,7 @@
     },
     {
       "file": "internal/engine/service_supervisor_launchctl.go",
-      "line": 388,
+      "line": 394,
       "column": 9,
       "func": "(*LaunchctlController).runLaunchctl",
       "subsystem": "internal:engine",
@@ -3450,7 +3450,7 @@
     },
     {
       "file": "internal/engine/service_supervisor_launchctl.go",
-      "line": 398,
+      "line": 404,
       "column": 9,
       "func": "(*LaunchctlController).runLaunchctlWithExit",
       "subsystem": "internal:engine",
@@ -3460,7 +3460,7 @@
     },
     {
       "file": "internal/engine/service_supervisor_launchctl.go",
-      "line": 416,
+      "line": 422,
       "column": 9,
       "func": "(*LaunchctlController).runLaunchctlOutput",
       "subsystem": "internal:engine",
@@ -3470,7 +3470,7 @@
     },
     {
       "file": "internal/engine/service_supervisor_launchctl.go",
-      "line": 443,
+      "line": 449,
       "column": 9,
       "func": "currentUID",
       "subsystem": "internal:engine",
@@ -3480,7 +3480,7 @@
     },
     {
       "file": "internal/engine/service_supervisor_launchctl.go",
-      "line": 453,
+      "line": 459,
       "column": 9,
       "func": "homeDir",
       "subsystem": "internal:engine",

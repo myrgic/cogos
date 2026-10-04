@@ -129,3 +129,75 @@ func TestServiceMutation_Restart_Async_GateAndKind(t *testing.T) {
 		}
 	}
 }
+
+// ctxProbeSupervisor records ctx.Err() as seen inside every mutation, after
+// the request context has already been cancelled.
+type ctxProbeSupervisor struct {
+	*stubSupervisor
+	cancel func()
+	mu     sync.Mutex
+	errs   map[string]error
+}
+
+func (c *ctxProbeSupervisor) probe(action string, ctx context.Context) {
+	c.cancel()
+	c.mu.Lock()
+	c.errs[action] = ctx.Err()
+	c.mu.Unlock()
+}
+func (c *ctxProbeSupervisor) Start(ctx context.Context, n string, d ServiceDef) (*ServiceStatus, error) {
+	c.probe("start", ctx)
+	return c.stubSupervisor.Start(ctx, n, d)
+}
+func (c *ctxProbeSupervisor) Stop(ctx context.Context, n string, d ServiceDef) (*ServiceStatus, error) {
+	c.probe("stop", ctx)
+	return c.stubSupervisor.Stop(ctx, n, d)
+}
+func (c *ctxProbeSupervisor) Enable(ctx context.Context, n string, d ServiceDef) (*ServiceStatus, error) {
+	c.probe("enable", ctx)
+	return c.stubSupervisor.Enable(ctx, n, d)
+}
+func (c *ctxProbeSupervisor) Disable(ctx context.Context, n string, d ServiceDef) (*ServiceStatus, error) {
+	c.probe("disable", ctx)
+	return c.stubSupervisor.Disable(ctx, n, d)
+}
+
+// TestServiceMutation_AllDetachedFromRequest: the dropped-client bug is not
+// restart-specific, so no mutation may run on the request context.
+func TestServiceMutation_AllDetachedFromRequest(t *testing.T) {
+	t.Parallel()
+	for _, action := range []string{"start", "stop", "enable", "disable"} {
+		action := action
+		t.Run(action, func(t *testing.T) {
+			t.Parallel()
+			reqCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			sup := &ctxProbeSupervisor{stubSupervisor: newStubSupervisor(), cancel: cancel, errs: map[string]error{}}
+			handler := newMutationTestServer(t, testManifest(), sup, true)
+			req := httptest.NewRequest(http.MethodPost, "/v1/services/kernel/"+action, nil).WithContext(reqCtx)
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+			sup.mu.Lock()
+			defer sup.mu.Unlock()
+			err, ok := sup.errs[action]
+			if !ok {
+				t.Fatalf("%s was not called", action)
+			}
+			if err != nil {
+				t.Fatalf("%s ran on the request context (%v); must be detached", action, err)
+			}
+		})
+	}
+}
+
+// TestServiceMutation_Restart_Async_NoLabel: a managed service without a
+// launchd label is rejected synchronously instead of a 202 that can only fail
+// in the logs. ("mod3" in testManifest is managed with no label.)
+func TestServiceMutation_Restart_Async_NoLabel(t *testing.T) {
+	t.Parallel()
+	h := newMutationTestServer(t, testManifest(), newStubSupervisor(), true)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/services/mod3/restart?wait=false", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d; want 409; body=%q", rec.Code, rec.Body.String())
+	}
+}
