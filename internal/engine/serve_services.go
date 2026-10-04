@@ -403,7 +403,7 @@ func (s *Server) handleServiceRestartAsync(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	sup := supervisorFor(def, s.supervisorFromServer())
-	if err := restartPreflight(sup, def); err != nil {
+	if err := restartPreflight(r.Context(), sup, name, def); err != nil {
 		writeMutationResponse(w, http.StatusConflict, serviceMutationResponse{
 			Success: false, Action: "restart", ServiceName: name, Error: err.Error(),
 		})
@@ -435,16 +435,21 @@ func (s *Server) handleServiceRestartAsync(w http.ResponseWriter, r *http.Reques
 // work: a non-launchctl supervisor (observed/external kind, or no supervisor
 // wired), a managed service with no launchd label, or a label whose plist is
 // absent (LaunchctlController.Start's own ErrNotControllable condition).
-func restartPreflight(sup ServiceSupervisor, def ServiceDef) error {
+func restartPreflight(ctx context.Context, sup ServiceSupervisor, name string, def ServiceDef) error {
 	if _, observer := sup.(*ObserverSupervisor); observer || def.Kind.EffectiveKind() != ServiceKindManaged {
 		return ErrNotControllable
 	}
 	if def.Launchd == "" {
 		return fmt.Errorf("%w: no launchd label", ErrNotControllable)
 	}
-	// The plist check is LaunchctlController's own precondition (Start
-	// refuses to load an absent plist), so apply it only to that supervisor.
+	// Mirror LaunchctlController.Restart exactly: a job already loaded in
+	// launchd is kickstarted and never needs its plist; only an UNLOADED job
+	// falls back to Start, whose precondition is that the plist exists.
 	if _, real := sup.(*LaunchctlController); real {
+		st, _ := sup.Status(ctx, name, def)
+		if st != nil && st.LaunchdRegistered {
+			return nil
+		}
 		if _, err := os.Stat(plistPathForLabel(def.Launchd)); os.IsNotExist(err) {
 			return fmt.Errorf("%w: plist %s not found", ErrNotControllable, plistPathForLabel(def.Launchd))
 		}

@@ -224,7 +224,7 @@ func TestServiceMutation_Restart_Async_AgreesWithSync(t *testing.T) {
 func TestRestartPreflight_MissingPlist(t *testing.T) {
 	t.Parallel()
 	def := ServiceDef{Kind: ServiceKindManaged, Launchd: "com.cogos.test.absent." + filepath.Base(t.TempDir())}
-	if err := restartPreflight(NewLaunchctlController(), def); !errors.Is(err, ErrNotControllable) {
+	if err := restartPreflight(context.Background(), NewLaunchctlController(), "t", def); !errors.Is(err, ErrNotControllable) {
 		t.Fatalf("err=%v; want ErrNotControllable", err)
 	}
 }

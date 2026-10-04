@@ -61,6 +61,18 @@ func TestLaunchctlController_Restart_RealJob(t *testing.T) {
 		t.Fatalf("job never started: %+v", before)
 	}
 
+	// A loaded job needs no plist to be restarted: preflight must accept it
+	// even with the plist gone (Restart kickstarts; it never re-loads).
+	if err := os.Rename(plist, plist+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := restartPreflight(ctx, c, "t", def); err != nil {
+		t.Fatalf("preflight rejected a loaded job with no plist: %v", err)
+	}
+	if err := os.Rename(plist+".moved", plist); err != nil {
+		t.Fatal(err)
+	}
+
 	st, err := c.Restart(ctx, "t", def)
 	if err != nil {
 		t.Fatalf("Restart: %v", err)
