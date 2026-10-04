@@ -2,8 +2,10 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -199,5 +201,30 @@ func TestServiceMutation_Restart_Async_NoLabel(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/services/mod3/restart?wait=false", nil))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status=%d; want 409; body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServiceMutation_Restart_Async_AgreesWithSync: the async path must not
+// 202 a restart the waited path would 409. With no launchctl supervisor wired
+// (ObserverSupervisor), both answer 409.
+func TestServiceMutation_Restart_Async_AgreesWithSync(t *testing.T) {
+	t.Parallel()
+	h := newMutationTestServer(t, testManifest(), nil, true) // nil → observer fallback
+	for _, q := range []string{"", "?wait=false"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/services/kernel/restart"+q, nil))
+		if rec.Code != http.StatusConflict {
+			t.Errorf("restart%s with observer supervisor: status=%d; want 409", q, rec.Code)
+		}
+	}
+}
+
+// TestRestartPreflight_MissingPlist: a managed, labelled service whose plist
+// is absent is rejected before any 202.
+func TestRestartPreflight_MissingPlist(t *testing.T) {
+	t.Parallel()
+	def := ServiceDef{Kind: ServiceKindManaged, Launchd: "com.cogos.test.absent." + filepath.Base(t.TempDir())}
+	if err := restartPreflight(NewLaunchctlController(), def); !errors.Is(err, ErrNotControllable) {
+		t.Fatalf("err=%v; want ErrNotControllable", err)
 	}
 }

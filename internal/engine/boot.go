@@ -268,6 +268,11 @@ func Boot(ctx context.Context, cfg *Config, opts ...BootOption) (*Kernel, error)
 	// Build the HTTP server.
 	server := NewServer(cfg, nucleus, process)
 	server.SetRouter(router)
+	// Service control (serve_services.go): without this the mutation routes
+	// fall back to ObserverSupervisor and every start/stop/restart 409s, so
+	// enable_service_control had no effect on a real kernel. On non-darwin
+	// NewLaunchctlController is the observer alias, so this is a no-op there.
+	server.SetServiceSupervisor(NewLaunchctlController())
 
 	// L5-HTTP-AUTHZ follow-up (board 75): the write-route grant-auth gate
 	// (serve_grant_auth.go) is on by default; log loudly if the operator

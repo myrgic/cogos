@@ -11,7 +11,10 @@
 // observer-only mode for all services.
 package engine
 
-import "os"
+import (
+	"os"
+	"path/filepath"
+)
 
 // LaunchctlController is a no-op alias for ObserverSupervisor on non-darwin
 // platforms. It compiles cleanly but returns ErrNotControllable for all
@@ -29,4 +32,12 @@ func NewLaunchctlController() *LaunchctlController {
 // provider must still construct cleanly so tests and cross-platform builds work.
 func homeDir() (string, error) {
 	return os.UserHomeDir()
+}
+
+// plistPathForLabel mirrors the darwin helper so platform-neutral callers
+// (restartPreflight) compile everywhere. Off darwin the observer supervisor
+// short-circuits restartPreflight before this path is ever consulted.
+func plistPathForLabel(label string) string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "LaunchAgents", label+".plist")
 }

@@ -26,8 +26,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -384,8 +386,13 @@ func (s *Server) handleServiceRestart(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleServiceRestartAsync accepts a restart and runs it in the background.
-// Same gate, lookup, and supervisor routing as dispatchMutation; a
-// non-controllable service still gets 409 synchronously.
+//
+// Everything that can be known before launchd is asked is checked here,
+// synchronously, with the same status codes as the waited path: gate (403),
+// lookup (404), supervisor/kind/label/plist controllability (409). Only the
+// kickstart itself runs after the 202, so a 202 means "launchd was about to
+// be asked", never "this could not have worked". The background outcome is
+// logged; callers confirm via GET /v1/services/{name} or a fresh PID.
 func (s *Server) handleServiceRestartAsync(w http.ResponseWriter, r *http.Request) {
 	if !s.requireServiceControl(w) {
 		return
@@ -395,23 +402,13 @@ func (s *Server) handleServiceRestartAsync(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	if def.Kind.EffectiveKind() != ServiceKindManaged {
-		writeMutationResponse(w, http.StatusConflict, serviceMutationResponse{
-			Success: false, Action: "restart", ServiceName: name, Error: ErrNotControllable.Error(),
-		})
-		return
-	}
-	// Reject what the background restart would only be able to log: a
-	// managed service with no launchd label cannot be kickstarted, and a
-	// fire-and-forget 202 would hide that from the caller.
-	if def.Launchd == "" {
-		writeMutationResponse(w, http.StatusConflict, serviceMutationResponse{
-			Success: false, Action: "restart", ServiceName: name,
-			Error: "service " + name + " has no launchd label: cannot restart via launchctl",
-		})
-		return
-	}
 	sup := supervisorFor(def, s.supervisorFromServer())
+	if err := restartPreflight(sup, def); err != nil {
+		writeMutationResponse(w, http.StatusConflict, serviceMutationResponse{
+			Success: false, Action: "restart", ServiceName: name, Error: err.Error(),
+		})
+		return
+	}
 	before, _ := sup.Status(r.Context(), name, def)
 
 	go func() {
@@ -422,12 +419,37 @@ func (s *Server) handleServiceRestartAsync(w http.ResponseWriter, r *http.Reques
 		if st != nil {
 			attrs = append(attrs, "previous_pid", st.PreviousPID, "pid", st.PID, "restarted", st.Restarted)
 		}
+		if rerr != nil {
+			slog.Warn("services: async restart failed", attrs...)
+			return
+		}
 		slog.Info("services: async restart finished", attrs...)
 	}()
 
 	writeMutationResponse(w, http.StatusAccepted, serviceMutationResponse{
 		Success: true, Action: "restart", ServiceName: name, Status: before,
 	})
+}
+
+// restartPreflight reports, without side effects, why a restart could not
+// work: a non-launchctl supervisor (observed/external kind, or no supervisor
+// wired), a managed service with no launchd label, or a label whose plist is
+// absent (LaunchctlController.Start's own ErrNotControllable condition).
+func restartPreflight(sup ServiceSupervisor, def ServiceDef) error {
+	if _, observer := sup.(*ObserverSupervisor); observer || def.Kind.EffectiveKind() != ServiceKindManaged {
+		return ErrNotControllable
+	}
+	if def.Launchd == "" {
+		return fmt.Errorf("%w: no launchd label", ErrNotControllable)
+	}
+	// The plist check is LaunchctlController's own precondition (Start
+	// refuses to load an absent plist), so apply it only to that supervisor.
+	if _, real := sup.(*LaunchctlController); real {
+		if _, err := os.Stat(plistPathForLabel(def.Launchd)); os.IsNotExist(err) {
+			return fmt.Errorf("%w: plist %s not found", ErrNotControllable, plistPathForLabel(def.Launchd))
+		}
+	}
+	return nil
 }
 
 // serviceRestartBudget bounds a detached service mutation (for restart:
