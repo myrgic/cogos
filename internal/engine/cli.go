@@ -486,7 +486,7 @@ func runStartCmd(args []string, defaultWorkspace string, defaultPort int) {
 		os.Exit(1)
 	}
 
-	runtime, err := NewNerdctlRuntime()
+	runtime, err := NewContainerRuntime()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -589,7 +589,7 @@ func runStopCmd(args []string, defaultWorkspace string, defaultPort int) {
 
 	switch state.Mode {
 	case daemonModeContainer:
-		runtime, err := NewNerdctlRuntime()
+		runtime, err := NewContainerRuntime()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -647,7 +647,7 @@ func runRestartCmd(args []string, defaultWorkspace string, defaultPort int) {
 		os.Exit(1)
 	}
 
-	runtime, err := NewNerdctlRuntime()
+	runtime, err := NewContainerRuntime()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -742,7 +742,7 @@ func runLogsCmd(args []string, defaultWorkspace string, defaultPort int) {
 		os.Exit(1)
 	}
 
-	runtime, err := NewNerdctlRuntime()
+	runtime, err := NewContainerRuntime()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

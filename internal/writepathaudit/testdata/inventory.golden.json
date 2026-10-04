@@ -3259,6 +3259,26 @@
       "dir_known": false
     },
     {
+      "file": "internal/engine/podman_runtime.go",
+      "line": 71,
+      "column": 10,
+      "func": "func literal (line 70)",
+      "subsystem": "internal:engine",
+      "raw": "exec.Command(p.bin, args...)",
+      "dir": "",
+      "dir_known": false
+    },
+    {
+      "file": "internal/engine/podman_runtime.go",
+      "line": 231,
+      "column": 9,
+      "func": "(*PodmanRuntime).Logs",
+      "subsystem": "internal:engine",
+      "raw": "exec.Command(p.bin, p.global(args...)...)",
+      "dir": "",
+      "dir_known": false
+    },
+    {
       "file": "internal/engine/projection_compiler.go",
       "line": 388,
       "column": 9,
