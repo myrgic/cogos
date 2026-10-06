@@ -130,6 +130,7 @@ func TestNodeWatch_UnknownIsNeverDown(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		*now = now.Add(time.Minute)
 		w.Tick(context.Background())
+		w.waitRestarts()
 	}
 	if st := w.health.Snapshot()["svc"]; st.Status != "unknown" {
 		t.Fatalf("precondition: status = %q, want unknown (the case under test)", st.Status)
@@ -151,6 +152,7 @@ func TestNodeWatch_ObservedIsNeverRestarted(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		*now = now.Add(time.Hour)
 		w.Tick(context.Background())
+		w.waitRestarts()
 	}
 	if r.n() != 0 {
 		t.Fatalf("observed service restarted %d times", r.n())
@@ -168,7 +170,7 @@ func TestNodeWatch_ManagedRestartsAfterThreeWithBackoffAndCap(t *testing.T) {
 	w, log, now := clockWatcher(t, ServiceDef{Kind: ServiceKindManaged, Port: portFromURL(t, s.ts.URL),
 		Health: "/health", Restart: "always", Launchd: "ai.example.svc"}, r)
 	ctx := context.Background()
-	tick := func(d time.Duration) { *now = now.Add(d); w.Tick(ctx) }
+	tick := func(d time.Duration) { *now = now.Add(d); w.Tick(ctx); w.waitRestarts() }
 
 	tick(0)
 	tick(time.Minute)
@@ -238,7 +240,7 @@ func TestNodeWatch_RecoveryResetsTheCount(t *testing.T) {
 	w, _, now := clockWatcher(t, ServiceDef{Kind: ServiceKindManaged, Port: portFromURL(t, s.ts.URL),
 		Health: "/health", Restart: "always", Launchd: "ai.example.svc"}, r)
 	ctx := context.Background()
-	tick := func(d time.Duration) { *now = now.Add(d); w.Tick(ctx) }
+	tick := func(d time.Duration) { *now = now.Add(d); w.Tick(ctx); w.waitRestarts() }
 	// two failures, a recovery, two failures: never 3 consecutive, never restarted
 	for _, ok := range []bool{false, false, true, false, false, true} {
 		s.ok.Store(ok)
@@ -277,6 +279,7 @@ func TestNodeWatch_NoRestarterMeansReportOnly(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		*now = now.Add(time.Minute)
 		w.Tick(context.Background())
+		w.waitRestarts()
 	}
 	if log.count(EventNodeServiceDown) != 1 || log.count(EventNodeServiceRestart) != 0 {
 		t.Fatalf("events = %v", log.ev)
@@ -338,4 +341,84 @@ func TestProcess_NewNodeWatcherWiring(t *testing.T) {
 	if (&Process{cfg: &Config{}}).newNodeWatcher() != nil {
 		t.Fatal("no manifest: want no watcher")
 	}
+}
+
+// blockingRestarter's Restart blocks until released, standing in for a slow
+// launchctl stop/start.
+type blockingRestarter struct {
+	ObserverSupervisor
+	started chan string
+	release chan struct{}
+}
+
+func (b *blockingRestarter) Restart(_ context.Context, name string, _ ServiceDef) (*ServiceStatus, error) {
+	b.started <- name
+	<-b.release
+	return &ServiceStatus{}, nil
+}
+
+// TestNodeWatch_SlowRestartDoesNotStallObservation: cog-review #667 round 3.
+// A restart that takes a long time must not hold the tick: the next tick still
+// probes every service and reports a second service's outage on time, and the
+// stuck service is not restarted twice while its first restart is in flight.
+func TestNodeWatch_SlowRestartDoesNotStallObservation(t *testing.T) {
+	t.Parallel()
+	a, b := newSwitchable(t), newSwitchable(t)
+	a.ok.Store(false)
+	log := &eventLog{}
+	m := &NodeManifest{Services: map[string]ServiceDef{
+		"a": {Kind: ServiceKindManaged, Port: portFromURL(t, a.ts.URL), Health: "/health", Restart: "always", Launchd: "la"},
+		"b": {Kind: ServiceKindManaged, Port: portFromURL(t, b.ts.URL), Health: "/health", Restart: "always", Launchd: "lb"},
+	}}
+	r := &blockingRestarter{started: make(chan string, 4), release: make(chan struct{})}
+	w := NewNodeWatcher(NewNodeHealth(), m, 1, log.emit, r)
+	w.RestartBackoff, w.RestartBackoffMax = time.Nanosecond, time.Nanosecond // backoff never the reason a restart is skipped
+	now := time.Date(2026, 10, 6, 18, 0, 0, 0, time.UTC)
+	w.now = func() time.Time { return now }
+	ctx := context.Background()
+	tick := func() {
+		now = now.Add(time.Minute)
+		done := make(chan struct{})
+		go func() { w.Tick(ctx); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Tick blocked behind a restart in flight")
+		}
+	}
+	for i := 0; i < 3; i++ {
+		tick()
+	}
+	select {
+	case got := <-r.started:
+		if got != "a" {
+			t.Fatalf("restarted %q, want a", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no restart of a after 3 failures")
+	}
+	// a's restart is now stuck. b goes down; the next tick must report it.
+	b.ok.Store(false)
+	tick()
+	found := false
+	log.mu.Lock()
+	for _, e := range log.ev {
+		if e.typ == EventNodeServiceDown && e.data["service"] == "b" {
+			found = true
+		}
+	}
+	log.mu.Unlock()
+	if !found {
+		t.Fatalf("b's outage not reported while a's restart is in flight: %v", log.ev)
+	}
+	tick() // a still down, its restart still running: no second restart of a
+	select {
+	case got := <-r.started:
+		if got == "a" {
+			t.Fatal("a restarted again while its first restart was in flight")
+		}
+	default:
+	}
+	close(r.release)
+	w.waitRestarts()
 }

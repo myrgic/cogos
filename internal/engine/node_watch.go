@@ -86,6 +86,9 @@ type NodeWatcher struct {
 
 	mu    sync.Mutex
 	state map[string]*watchState
+
+	// inflight counts restarts running off the tick (see remediate).
+	inflight sync.WaitGroup
 }
 
 // watchState is the watcher's memory of one service between ticks.
@@ -97,6 +100,7 @@ type watchState struct {
 	nextRestart time.Time // earliest time the next restart may run (backoff)
 	capped      bool      // remediation_capped emitted for the current capping episode
 	capEpisodes int       // capping episodes in the current outage (reset on recovery)
+	restarting  bool      // a restart for this service is running (off the tick)
 }
 
 // NewNodeWatcher returns a watcher with the production defaults.
@@ -241,14 +245,15 @@ func prevOrNone(s string) string {
 	return s
 }
 
-// remediate restarts a remediable service once it has failed RemediateAfter
-// consecutive probes, with exponential backoff and an hourly cap. Caller holds
-// w.mu.
+// remediate starts a restart of a remediable service once it has failed
+// RemediateAfter consecutive probes, with exponential backoff and an hourly cap.
+// Caller holds w.mu; the restart itself runs in its own goroutine, one per
+// service at a time.
 func (w *NodeWatcher) remediate(ctx context.Context, name string, svc ServiceDef, st *watchState, now time.Time) {
 	if !w.willRestart(svc) {
 		return
 	}
-	if st.consecutive < w.remediateAfter() || now.Before(st.nextRestart) {
+	if st.consecutive < w.remediateAfter() || now.Before(st.nextRestart) || st.restarting {
 		return
 	}
 	// Hourly cap over a rolling window.
@@ -280,27 +285,45 @@ func (w *NodeWatcher) remediate(ctx context.Context, name string, svc ServiceDef
 	st.capped = false
 
 	attempt := len(st.restarts) + 1
-	rctx, cancel := context.WithTimeout(ctx, nodeRestartTimeout)
-	_, err := w.restarter.Restart(rctx, name, svc)
-	cancel()
 	st.restarts = append(st.restarts, now)
 	st.nextRestart = now.Add(w.backoff(attempt))
+	st.restarting = true
 	data := map[string]interface{}{
 		"service":     name,
 		"launchd":     svc.Launchd,
 		"attempt":     attempt,
 		"consecutive": st.consecutive,
-		"ok":          err == nil,
 		"next_after":  st.nextRestart.Format(time.RFC3339),
 	}
-	if err != nil {
-		data["error"] = err.Error()
-		slog.Warn("node watch: restart failed", "service", name, "attempt", attempt, "err", err)
-	} else {
-		slog.Info("node watch: restarted", "service", name, "attempt", attempt)
-	}
-	w.emitEvent(EventNodeServiceRestart, data)
+	// The restart itself runs outside Tick and outside w.mu (cog-review #667
+	// round 3): launchctl stop/start can take up to nodeRestartTimeout, and a
+	// synchronous call here would stall observation of every other service and
+	// drop ticks. Decide under the lock, act off it; at most one restart per
+	// service is in flight (st.restarting), and the backoff already set above
+	// spaces the next one.
+	w.inflight.Add(1)
+	go func() {
+		defer w.inflight.Done()
+		rctx, cancel := context.WithTimeout(ctx, nodeRestartTimeout)
+		_, err := w.restarter.Restart(rctx, name, svc)
+		cancel()
+		data["ok"] = err == nil
+		if err != nil {
+			data["error"] = err.Error()
+			slog.Warn("node watch: restart failed", "service", name, "attempt", attempt, "err", err)
+		} else {
+			slog.Info("node watch: restarted", "service", name, "attempt", attempt)
+		}
+		w.emitEvent(EventNodeServiceRestart, data)
+		w.mu.Lock()
+		st.restarting = false
+		w.mu.Unlock()
+	}()
 }
+
+// waitRestarts blocks until every restart started so far has returned and
+// emitted its event. Tests use it; production never needs to.
+func (w *NodeWatcher) waitRestarts() { w.inflight.Wait() }
 
 // backoff is the wait after the n-th restart (1-based): RestartBackoff doubling,
 // capped at RestartBackoffMax.
