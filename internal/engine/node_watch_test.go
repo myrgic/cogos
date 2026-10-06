@@ -281,6 +281,27 @@ func TestNodeWatch_NoRestarterMeansReportOnly(t *testing.T) {
 	if log.count(EventNodeServiceDown) != 1 || log.count(EventNodeServiceRestart) != 0 {
 		t.Fatalf("events = %v", log.ev)
 	}
+	// The event must not promise what this watcher won't do (cog-review #667
+	// round 2): a remediable declaration with no restarter wired is "report".
+	if got := log.ev[0].data["remediation"]; got != "report" {
+		t.Fatalf("down event remediation = %v, want report (no restarter wired)", got)
+	}
+}
+
+func TestNodeWatch_DownEventSaysRestartWhenWired(t *testing.T) {
+	t.Parallel()
+	s := newSwitchable(t)
+	s.ok.Store(false)
+	w, log, now := clockWatcher(t, ServiceDef{Kind: ServiceKindManaged, Port: portFromURL(t, s.ts.URL),
+		Health: "/health", Restart: "always", Launchd: "x"}, &fakeRestarter{})
+	*now = now.Add(time.Minute)
+	w.Tick(context.Background())
+	if log.count(EventNodeServiceDown) != 1 {
+		t.Fatalf("events = %v", log.ev)
+	}
+	if got := log.ev[0].data["remediation"]; got != "restart" {
+		t.Fatalf("down event remediation = %v, want restart (restarter wired)", got)
+	}
 }
 
 func TestNodeWatch_RunProbesWhatever(t *testing.T) {

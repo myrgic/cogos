@@ -205,20 +205,30 @@ func (w *NodeWatcher) observe(ctx context.Context, name string, svc ServiceDef, 
 			"from":        prevOrNone(prev),
 			"port":        svc.Port,
 			"kind":        string(svc.Kind.EffectiveKind()),
-			"remediation": remediationPolicy(svc),
+			"remediation": w.remediationPolicy(svc),
 		})
 	}
 	w.remediate(ctx, name, svc, st, now)
 }
 
-// remediable reports whether the kernel may restart svc on its own.
+// remediable reports whether svc's declaration allows the kernel to restart it
+// (kind managed, restart: always, a launchd label). Necessary, not sufficient:
+// see willRestart.
 func remediable(svc ServiceDef) bool {
 	return svc.Kind.EffectiveKind() == ServiceKindManaged && svc.Restart == "always" && svc.Launchd != ""
 }
 
-// remediationPolicy names what the watcher will do about svc when it is down.
-func remediationPolicy(svc ServiceDef) string {
-	if remediable(svc) {
+// willRestart is the one predicate for "this watcher restarts svc when it stays
+// down": the declaration allows it AND a restarter is wired (enable_node_remediation).
+// Both the event payload and remediate read it, so what the event promises is
+// what the watcher does.
+func (w *NodeWatcher) willRestart(svc ServiceDef) bool {
+	return w.restarter != nil && remediable(svc)
+}
+
+// remediationPolicy names what this watcher will do about svc when it is down.
+func (w *NodeWatcher) remediationPolicy(svc ServiceDef) string {
+	if w.willRestart(svc) {
 		return "restart"
 	}
 	return "report"
@@ -235,7 +245,7 @@ func prevOrNone(s string) string {
 // consecutive probes, with exponential backoff and an hourly cap. Caller holds
 // w.mu.
 func (w *NodeWatcher) remediate(ctx context.Context, name string, svc ServiceDef, st *watchState, now time.Time) {
-	if !remediable(svc) || w.restarter == nil {
+	if !w.willRestart(svc) {
 		return
 	}
 	if st.consecutive < w.remediateAfter() || now.Before(st.nextRestart) {
