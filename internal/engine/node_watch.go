@@ -1,0 +1,344 @@
+package engine
+
+// node_watch.go — the node service watcher (#429): probe on its own cadence,
+// report transitions as ledger events, and remediate declared-restartable
+// services.
+//
+// Before this, NodeHealth.Probe ran only from emitHeartbeat, which returns early
+// whenever the process is StateActive. On a busy node that meant the sibling
+// services were looked at roughly once an hour (2026-10-06: probed_at 40+ min
+// stale on darkstar), and a service that went down was recorded in /health and
+// nothing else: "observation without reconciliation" (#429, mod3 wedged for ~20
+// minutes while the kernel watched it).
+//
+// The watcher closes that loop:
+//
+//  1. Cadence. It runs on its own ticker (node_probe_interval, default 60 s),
+//     independent of the process state machine, in its own goroutine so a slow
+//     probe or a restart never blocks the process run loop.
+//  2. Transitions. A probeable service that leaves "healthy" emits
+//     node.service.down once; when it comes back it emits node.service.recovered
+//     once. Ledger-first: the events go through EmitEvent (hash chain + broker),
+//     so subscribers see them without polling /health. "unknown" (unprobeable:
+//     no port, or an observed service with no health path) is an absence of
+//     evidence and never produces a down event.
+//  3. Remediation, by kind:
+//       - managed + restart: always + a launchd label: after RemediateAfter
+//         consecutive non-healthy probes, Restart via the ServiceSupervisor
+//         (LaunchctlController on darwin). Attempts back off exponentially from
+//         RestartBackoff and are capped at MaxRestartsPerHour; hitting the cap
+//         emits node.service.remediation_capped once and stops trying until the
+//         service recovers, so a crash-looping service is never hammered.
+//       - observed / external, or restart != always: never restarted, only
+//         reported. (The stage is observed: agents live inside its process, so
+//         the kernel must not kill it under live work.)
+//
+// The /health node map is unchanged in shape: it is still NodeHealth.Summary().
+
+import (
+	"context"
+	"log/slog"
+	"sync"
+	"time"
+)
+
+// Node watcher defaults (Config.NodeProbeInterval overrides the cadence).
+const (
+	DefaultNodeProbeInterval  = 60 * time.Second
+	DefaultRemediateAfter     = 3
+	DefaultRestartBackoff     = 2 * time.Minute
+	DefaultRestartBackoffMax  = 30 * time.Minute
+	DefaultMaxRestartsPerHour = 3
+	nodeRestartTimeout        = 30 * time.Second
+)
+
+// Event types emitted by the watcher.
+const (
+	EventNodeServiceDown              = "node.service.down"
+	EventNodeServiceRecovered         = "node.service.recovered"
+	EventNodeServiceRestart           = "node.service.restart"
+	EventNodeServiceRemediationCapped = "node.service.remediation_capped"
+)
+
+// NodeWatcher probes the manifest's sibling services on a fixed cadence and acts
+// on what it sees. Construct with NewNodeWatcher; drive with Run (production) or
+// Tick (tests).
+type NodeWatcher struct {
+	health   *NodeHealth
+	manifest *NodeManifest
+	selfPort int
+
+	// emit appends an event to the ledger (Process.EmitEvent in production).
+	emit func(eventType string, data map[string]interface{})
+	// restarter restarts a managed service (LaunchctlController on darwin). Nil
+	// means observe-only: transitions are still reported, nothing is restarted.
+	restarter ServiceSupervisor
+
+	Interval           time.Duration
+	RemediateAfter     int
+	RestartBackoff     time.Duration
+	RestartBackoffMax  time.Duration
+	MaxRestartsPerHour int
+
+	now func() time.Time
+
+	mu    sync.Mutex
+	state map[string]*watchState
+}
+
+// watchState is the watcher's memory of one service between ticks.
+type watchState struct {
+	status      string    // last probed status ("" = never seen)
+	downSince   time.Time // first non-healthy probe of the current outage
+	consecutive int       // consecutive non-healthy probes
+	restarts    []time.Time
+	nextRestart time.Time // earliest time the next restart may run (backoff)
+	capped      bool      // remediation_capped emitted for this outage
+}
+
+// NewNodeWatcher returns a watcher with the production defaults.
+func NewNodeWatcher(health *NodeHealth, manifest *NodeManifest, selfPort int,
+	emit func(string, map[string]interface{}), restarter ServiceSupervisor) *NodeWatcher {
+	return &NodeWatcher{
+		health:             health,
+		manifest:           manifest,
+		selfPort:           selfPort,
+		emit:               emit,
+		restarter:          restarter,
+		Interval:           DefaultNodeProbeInterval,
+		RemediateAfter:     DefaultRemediateAfter,
+		RestartBackoff:     DefaultRestartBackoff,
+		RestartBackoffMax:  DefaultRestartBackoffMax,
+		MaxRestartsPerHour: DefaultMaxRestartsPerHour,
+		now:                func() time.Time { return time.Now().UTC() },
+		state:              make(map[string]*watchState),
+	}
+}
+
+// Run probes once immediately, then every Interval until ctx is done.
+func (w *NodeWatcher) Run(ctx context.Context) {
+	if w == nil || w.manifest == nil {
+		return
+	}
+	interval := w.Interval
+	if interval <= 0 {
+		interval = DefaultNodeProbeInterval
+	}
+	w.Tick(ctx)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			w.Tick(ctx)
+		}
+	}
+}
+
+// Tick runs one probe pass and acts on it. Safe to call concurrently with
+// readers of NodeHealth; Tick itself is serialized.
+func (w *NodeWatcher) Tick(ctx context.Context) {
+	if w == nil || w.manifest == nil {
+		return
+	}
+	w.health.Probe(w.manifest, w.selfPort)
+	snap := w.health.Snapshot()
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	now := w.now()
+	for name, svc := range w.manifest.Services {
+		h, ok := snap[name]
+		if !ok {
+			continue // the kernel itself (selfPort) is never in the snapshot
+		}
+		w.observe(ctx, name, svc, h.Status, now)
+	}
+}
+
+// observe folds one probe result into the service's state: transition events,
+// then remediation. Caller holds w.mu.
+func (w *NodeWatcher) observe(ctx context.Context, name string, svc ServiceDef, status string, now time.Time) {
+	st := w.state[name]
+	if st == nil {
+		st = &watchState{}
+		w.state[name] = st
+	}
+	prev := st.status
+	st.status = status
+
+	if status == "unknown" {
+		// No evidence either way: never a transition, never a restart. An outage
+		// in progress is left as it was (the next real probe decides).
+		return
+	}
+
+	if status == "healthy" {
+		if prev != "" && prev != "healthy" && prev != "unknown" {
+			w.emitEvent(EventNodeServiceRecovered, map[string]interface{}{
+				"service":    name,
+				"from":       prev,
+				"down_for_s": int(now.Sub(st.downSince).Seconds()),
+				"restarts":   len(st.restarts),
+				"kind":       string(svc.Kind.EffectiveKind()),
+			})
+		}
+		st.consecutive, st.downSince, st.capped = 0, time.Time{}, false
+		st.nextRestart = time.Time{}
+		return
+	}
+
+	// down or degraded
+	st.consecutive++
+	if st.downSince.IsZero() {
+		st.downSince = now
+	}
+	if prev != status && (prev == "" || prev == "healthy" || prev == "unknown") {
+		w.emitEvent(EventNodeServiceDown, map[string]interface{}{
+			"service":     name,
+			"status":      status,
+			"from":        prevOrNone(prev),
+			"port":        svc.Port,
+			"kind":        string(svc.Kind.EffectiveKind()),
+			"remediation": remediationPolicy(svc),
+		})
+	}
+	w.remediate(ctx, name, svc, st, now)
+}
+
+// remediable reports whether the kernel may restart svc on its own.
+func remediable(svc ServiceDef) bool {
+	return svc.Kind.EffectiveKind() == ServiceKindManaged && svc.Restart == "always" && svc.Launchd != ""
+}
+
+// remediationPolicy names what the watcher will do about svc when it is down.
+func remediationPolicy(svc ServiceDef) string {
+	if remediable(svc) {
+		return "restart"
+	}
+	return "report"
+}
+
+func prevOrNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
+}
+
+// remediate restarts a remediable service once it has failed RemediateAfter
+// consecutive probes, with exponential backoff and an hourly cap. Caller holds
+// w.mu.
+func (w *NodeWatcher) remediate(ctx context.Context, name string, svc ServiceDef, st *watchState, now time.Time) {
+	if !remediable(svc) || w.restarter == nil {
+		return
+	}
+	if st.consecutive < w.remediateAfter() || now.Before(st.nextRestart) {
+		return
+	}
+	// Hourly cap over a rolling window.
+	cut := now.Add(-time.Hour)
+	kept := st.restarts[:0]
+	for _, t := range st.restarts {
+		if t.After(cut) {
+			kept = append(kept, t)
+		}
+	}
+	st.restarts = kept
+	if len(st.restarts) >= w.maxPerHour() {
+		if !st.capped {
+			st.capped = true
+			w.emitEvent(EventNodeServiceRemediationCapped, map[string]interface{}{
+				"service":  name,
+				"launchd":  svc.Launchd,
+				"restarts": len(st.restarts),
+				"window_s": 3600,
+				"down_s":   int(now.Sub(st.downSince).Seconds()),
+			})
+		}
+		return
+	}
+
+	attempt := len(st.restarts) + 1
+	rctx, cancel := context.WithTimeout(ctx, nodeRestartTimeout)
+	_, err := w.restarter.Restart(rctx, name, svc)
+	cancel()
+	st.restarts = append(st.restarts, now)
+	st.nextRestart = now.Add(w.backoff(attempt))
+	data := map[string]interface{}{
+		"service":     name,
+		"launchd":     svc.Launchd,
+		"attempt":     attempt,
+		"consecutive": st.consecutive,
+		"ok":          err == nil,
+		"next_after":  st.nextRestart.Format(time.RFC3339),
+	}
+	if err != nil {
+		data["error"] = err.Error()
+		slog.Warn("node watch: restart failed", "service", name, "attempt", attempt, "err", err)
+	} else {
+		slog.Info("node watch: restarted", "service", name, "attempt", attempt)
+	}
+	w.emitEvent(EventNodeServiceRestart, data)
+}
+
+// backoff is the wait after the n-th restart (1-based): RestartBackoff doubling,
+// capped at RestartBackoffMax.
+func (w *NodeWatcher) backoff(n int) time.Duration {
+	d := w.RestartBackoff
+	if d <= 0 {
+		d = DefaultRestartBackoff
+	}
+	max := w.RestartBackoffMax
+	if max <= 0 {
+		max = DefaultRestartBackoffMax
+	}
+	for i := 1; i < n && d < max; i++ {
+		d *= 2
+	}
+	if d > max {
+		d = max
+	}
+	return d
+}
+
+func (w *NodeWatcher) remediateAfter() int {
+	if w.RemediateAfter <= 0 {
+		return DefaultRemediateAfter
+	}
+	return w.RemediateAfter
+}
+
+func (w *NodeWatcher) maxPerHour() int {
+	if w.MaxRestartsPerHour <= 0 {
+		return DefaultMaxRestartsPerHour
+	}
+	return w.MaxRestartsPerHour
+}
+
+// newNodeWatcher builds the process's node watcher from its manifest and config,
+// or nil when there is no manifest. Remediation (a restarter) is wired only when
+// enable_node_remediation is set; without it the watcher probes and reports.
+func (p *Process) newNodeWatcher() *NodeWatcher {
+	if p == nil || p.nodeManifest == nil {
+		return nil
+	}
+	var restarter ServiceSupervisor
+	if p.cfg.EnableNodeRemediation {
+		restarter = NewLaunchctlController()
+	}
+	w := NewNodeWatcher(p.nodeHealth, p.nodeManifest, p.cfg.Port, p.emitEvent, restarter)
+	if p.cfg.NodeProbeInterval > 0 {
+		w.Interval = time.Duration(p.cfg.NodeProbeInterval) * time.Second
+	}
+	return w
+}
+
+func (w *NodeWatcher) emitEvent(eventType string, data map[string]interface{}) {
+	slog.Info("node watch: "+eventType, "service", data["service"])
+	if w.emit != nil {
+		w.emit(eventType, data)
+	}
+}

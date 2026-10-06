@@ -146,7 +146,8 @@ type Process struct {
 	// heartbeat can reuse it instead of recomputing.
 	lastCoherenceReport *CoherenceReport
 
-	// nodeHealth tracks sibling service health, probed each heartbeat.
+	// nodeHealth tracks sibling service health, probed by the node watcher
+	// (node_watch.go) on its own cadence, independent of process state.
 	nodeHealth *NodeHealth
 	// nodeManifest is the parsed node manifest (nil if not found).
 	nodeManifest *NodeManifest
@@ -474,6 +475,13 @@ func (p *Process) Run(ctx context.Context) error {
 	heartbeatTicker := time.NewTicker(time.Duration(p.cfg.HeartbeatInterval) * time.Second)
 	defer consolidationTicker.Stop()
 	defer heartbeatTicker.Stop()
+
+	// The node watcher (#429): its own goroutine and ticker, so the sibling
+	// services are probed every NodeProbeInterval even while the process is
+	// active, and a slow probe or a restart never blocks this run loop.
+	if w := p.newNodeWatcher(); w != nil {
+		go w.Run(ctx)
+	}
 
 	slog.Info("process: running", "state", p.State(), "session", p.sessionID)
 
@@ -804,12 +812,9 @@ func (p *Process) emitHeartbeat() {
 	// consolidation (M11) sharing this same suppression.
 	p.cadence.recordHeartbeat(time.Now().UTC(), p.State())
 
-	// Probe sibling services.
-	if p.nodeManifest != nil {
-		p.nodeHealth.Probe(p.nodeManifest, p.cfg.Port)
-		healthy, total := p.nodeHealth.Counts()
-		slog.Debug("process: node probe", "healthy", healthy, "total", total)
-	}
+	// Probe sibling services: no longer here. The node watcher (node_watch.go,
+	// started in Run) probes on its own ticker whatever the process state, so a
+	// busy kernel still sees its siblings every NodeProbeInterval (#429).
 
 	// Reuse the cached coherence report from the last consolidation tick
 	// instead of recomputing it. Fall back to a fresh check if no cache exists.
