@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -251,6 +252,43 @@ func TestNodeWatch_RecoveryResetsTheCount(t *testing.T) {
 	}
 }
 
+// TestNodeWatch_RecoveredCountsThisOutageOnly: cog-review #667 round 4. Two
+// outages inside one hour, one restart each: each recovered event says 1, not
+// the rolling-hour total (which only the cap uses).
+func TestNodeWatch_RecoveredCountsThisOutageOnly(t *testing.T) {
+	t.Parallel()
+	s := newSwitchable(t)
+	r := &fakeRestarter{}
+	w, log, now := clockWatcher(t, ServiceDef{Kind: ServiceKindManaged, Port: portFromURL(t, s.ts.URL),
+		Health: "/health", Restart: "always", Launchd: "ai.example.svc"}, r)
+	ctx := context.Background()
+	tick := func(d time.Duration) { *now = now.Add(d); w.Tick(ctx); w.waitRestarts() }
+	tick(time.Minute) // healthy first sight
+	for outage := 0; outage < 2; outage++ {
+		s.ok.Store(false)
+		for i := 0; i < 3; i++ {
+			tick(time.Minute)
+		}
+		s.ok.Store(true)
+		tick(time.Minute)
+		tick(10 * time.Minute) // still well inside the hour
+	}
+	if r.n() != 2 {
+		t.Fatalf("restarts = %d, want 2 (one per outage)", r.n())
+	}
+	var got []interface{}
+	log.mu.Lock()
+	for _, e := range log.ev {
+		if e.typ == EventNodeServiceRecovered {
+			got = append(got, e.data["restarts"])
+		}
+	}
+	log.mu.Unlock()
+	if len(got) != 2 || got[0] != 1 || got[1] != 1 {
+		t.Fatalf("recovered restarts = %v, want [1 1]", got)
+	}
+}
+
 func TestNodeWatch_NotRemediableWithoutPolicy(t *testing.T) {
 	t.Parallel()
 	for name, def := range map[string]ServiceDef{
@@ -335,8 +373,11 @@ func TestProcess_NewNodeWatcherWiring(t *testing.T) {
 		t.Fatalf("watcher = %+v; want 15s interval and no restarter (remediation off by default)", w)
 	}
 	p.cfg.EnableNodeRemediation = true
-	if w := p.newNodeWatcher(); w.restarter == nil {
-		t.Fatal("enable_node_remediation: watcher has no restarter")
+	// Only darwin has a restarter that can work (launchctl); elsewhere the
+	// stub would fail every Restart, so the watcher stays report-only
+	// (cog-review #667 round 4 note).
+	if w := p.newNodeWatcher(); (w.restarter != nil) != (runtime.GOOS == "darwin") {
+		t.Fatalf("enable_node_remediation on %s: restarter wired = %v, want %v", runtime.GOOS, w.restarter != nil, runtime.GOOS == "darwin")
 	}
 	if (&Process{cfg: &Config{}}).newNodeWatcher() != nil {
 		t.Fatal("no manifest: want no watcher")

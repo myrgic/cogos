@@ -40,6 +40,7 @@ package engine
 import (
 	"context"
 	"log/slog"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -93,14 +94,15 @@ type NodeWatcher struct {
 
 // watchState is the watcher's memory of one service between ticks.
 type watchState struct {
-	status      string    // last probed status ("" = never seen)
-	downSince   time.Time // first non-healthy probe of the current outage
-	consecutive int       // consecutive non-healthy probes
-	restarts    []time.Time
-	nextRestart time.Time // earliest time the next restart may run (backoff)
-	capped      bool      // remediation_capped emitted for the current capping episode
-	capEpisodes int       // capping episodes in the current outage (reset on recovery)
-	restarting  bool      // a restart for this service is running (off the tick)
+	status         string    // last probed status ("" = never seen)
+	downSince      time.Time // first non-healthy probe of the current outage
+	consecutive    int       // consecutive non-healthy probes
+	restarts       []time.Time
+	nextRestart    time.Time // earliest time the next restart may run (backoff)
+	capped         bool      // remediation_capped emitted for the current capping episode
+	capEpisodes    int       // capping episodes in the current outage (reset on recovery)
+	restarting     bool      // a restart for this service is running (off the tick)
+	outageRestarts int       // restarts started during the current outage (reset on recovery)
 }
 
 // NewNodeWatcher returns a watcher with the production defaults.
@@ -188,11 +190,11 @@ func (w *NodeWatcher) observe(ctx context.Context, name string, svc ServiceDef, 
 				"service":    name,
 				"from":       prev,
 				"down_for_s": int(now.Sub(st.downSince).Seconds()),
-				"restarts":   len(st.restarts),
+				"restarts":   st.outageRestarts, // this outage only; the hourly cap uses st.restarts
 				"kind":       string(svc.Kind.EffectiveKind()),
 			})
 		}
-		st.consecutive, st.downSince, st.capped, st.capEpisodes = 0, time.Time{}, false, 0
+		st.consecutive, st.downSince, st.capped, st.capEpisodes, st.outageRestarts = 0, time.Time{}, false, 0, 0
 		st.nextRestart = time.Time{}
 		return
 	}
@@ -286,6 +288,7 @@ func (w *NodeWatcher) remediate(ctx context.Context, name string, svc ServiceDef
 
 	attempt := len(st.restarts) + 1
 	st.restarts = append(st.restarts, now)
+	st.outageRestarts++
 	st.nextRestart = now.Add(w.backoff(attempt))
 	st.restarting = true
 	data := map[string]interface{}{
@@ -367,8 +370,15 @@ func (p *Process) newNodeWatcher() *NodeWatcher {
 		return nil
 	}
 	var restarter ServiceSupervisor
-	if p.cfg.EnableNodeRemediation {
+	switch {
+	case p.cfg.EnableNodeRemediation && runtime.GOOS == "darwin":
 		restarter = NewLaunchctlController()
+	case p.cfg.EnableNodeRemediation:
+		// No launchctl here (service_supervisor_stub.go: every Restart is
+		// ErrNotControllable until #101's SystemdSupervisor). Wiring the stub
+		// would announce "restart" and burn the hourly budget on guaranteed
+		// failures, so the watcher stays report-only and says why.
+		slog.Warn("node watch: enable_node_remediation has no effect on this platform; reporting only", "goos", runtime.GOOS)
 	}
 	w := NewNodeWatcher(p.nodeHealth, p.nodeManifest, p.cfg.Port, p.emitEvent, restarter)
 	if p.cfg.NodeProbeInterval > 0 {
