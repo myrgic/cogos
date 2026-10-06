@@ -211,6 +211,24 @@ func TestNodeWatch_ManagedRestartsAfterThreeWithBackoffAndCap(t *testing.T) {
 	if r.n() != 4 {
 		t.Fatalf("after the window rolled: restarts %d, want 4", r.n())
 	}
+	// Still down, and the cap is hit again in the SAME outage: a second capping
+	// episode is a second remediation_capped event (review finding on #667: the
+	// flag was only reset on recovery, so an operator saw one alert, then silence).
+	for i := 0; i < 12; i++ {
+		tick(10 * time.Minute)
+	}
+	if got := log.count(EventNodeServiceRemediationCapped); got < 2 {
+		t.Fatalf("capped events in one long outage = %d, want >= 2 (one per capping episode)", got)
+	}
+	var eps []interface{}
+	for _, e := range log.ev {
+		if e.typ == EventNodeServiceRemediationCapped {
+			eps = append(eps, e.data["episode"])
+		}
+	}
+	if eps[0] != 1 || eps[1] != 2 {
+		t.Fatalf("capping episodes = %v, want numbered 1, 2, ...", eps)
+	}
 }
 
 func TestNodeWatch_RecoveryResetsTheCount(t *testing.T) {

@@ -26,9 +26,11 @@ package engine
 //       - managed + restart: always + a launchd label: after RemediateAfter
 //         consecutive non-healthy probes, Restart via the ServiceSupervisor
 //         (LaunchctlController on darwin). Attempts back off exponentially from
-//         RestartBackoff and are capped at MaxRestartsPerHour; hitting the cap
-//         emits node.service.remediation_capped once and stops trying until the
-//         service recovers, so a crash-looping service is never hammered.
+//         RestartBackoff and are capped at MaxRestartsPerHour over a rolling
+//         hour; hitting the cap emits node.service.remediation_capped (once per
+//         capping episode, numbered) and makes no attempt until the window has
+//         room again, so a crash-looping service gets at most MaxRestartsPerHour
+//         restarts an hour and every capping episode is reported.
 //       - observed / external, or restart != always: never restarted, only
 //         reported. (The stage is observed: agents live inside its process, so
 //         the kernel must not kill it under live work.)
@@ -93,7 +95,8 @@ type watchState struct {
 	consecutive int       // consecutive non-healthy probes
 	restarts    []time.Time
 	nextRestart time.Time // earliest time the next restart may run (backoff)
-	capped      bool      // remediation_capped emitted for this outage
+	capped      bool      // remediation_capped emitted for the current capping episode
+	capEpisodes int       // capping episodes in the current outage (reset on recovery)
 }
 
 // NewNodeWatcher returns a watcher with the production defaults.
@@ -185,7 +188,7 @@ func (w *NodeWatcher) observe(ctx context.Context, name string, svc ServiceDef, 
 				"kind":       string(svc.Kind.EffectiveKind()),
 			})
 		}
-		st.consecutive, st.downSince, st.capped = 0, time.Time{}, false
+		st.consecutive, st.downSince, st.capped, st.capEpisodes = 0, time.Time{}, false, 0
 		st.nextRestart = time.Time{}
 		return
 	}
@@ -250,16 +253,21 @@ func (w *NodeWatcher) remediate(ctx context.Context, name string, svc ServiceDef
 	if len(st.restarts) >= w.maxPerHour() {
 		if !st.capped {
 			st.capped = true
+			st.capEpisodes++
 			w.emitEvent(EventNodeServiceRemediationCapped, map[string]interface{}{
 				"service":  name,
 				"launchd":  svc.Launchd,
 				"restarts": len(st.restarts),
 				"window_s": 3600,
 				"down_s":   int(now.Sub(st.downSince).Seconds()),
+				"episode":  st.capEpisodes,
 			})
 		}
 		return
 	}
+	// The rolling window has room again: this capping episode is over, so the
+	// next time the cap is hit (same outage or not) it is reported again.
+	st.capped = false
 
 	attempt := len(st.restarts) + 1
 	rctx, cancel := context.WithTimeout(ctx, nodeRestartTimeout)
