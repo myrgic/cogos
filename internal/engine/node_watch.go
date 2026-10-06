@@ -7,7 +7,7 @@ package engine
 // Before this, NodeHealth.Probe ran only from emitHeartbeat, which returns early
 // whenever the process is StateActive. On a busy node that meant the sibling
 // services were looked at roughly once an hour (2026-10-06: probed_at 40+ min
-// stale on darkstar), and a service that went down was recorded in /health and
+// stale on a busy node), and a service that went down was recorded in /health and
 // nothing else: "observation without reconciliation" (#429, mod3 wedged for ~20
 // minutes while the kernel watched it).
 //
