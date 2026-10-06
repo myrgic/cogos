@@ -143,6 +143,18 @@ type Config struct {
 	// operations. Set enable_service_control: true in kernel.yaml to opt in.
 	EnableServiceControl bool
 
+	// NodeProbeInterval is the node watcher's cadence in seconds (node_watch.go):
+	// every manifest service is probed this often, whatever the process state.
+	// 0 means DefaultNodeProbeInterval (60 s).
+	NodeProbeInterval int
+
+	// EnableNodeRemediation lets the node watcher restart kind=managed services
+	// with restart: always and a launchd label after repeated failed probes
+	// (#429). Default false: probing and the node.service.* events are always
+	// on, but the kernel restarting a sibling on its own is opt-in, like every
+	// other launchctl mutation. Set enable_node_remediation: true to opt in.
+	EnableNodeRemediation bool
+
 	// EnableConfigMutation gates the config-mutation HTTP endpoints:
 	// GET/PATCH /v1/config and POST /v1/config/rollback.
 	// Default false: live config read/mutation/rollback via HTTP is disabled by
@@ -274,6 +286,8 @@ type kernelConfigSection struct {
 	ToolCallValidation          *bool    `yaml:"tool_call_validation_enabled"`
 	EnableSkillExec             *bool    `yaml:"enable_skill_exec"`
 	EnableServiceControl        *bool    `yaml:"enable_service_control"`
+	NodeProbeInterval           int      `yaml:"node_probe_interval"`
+	EnableNodeRemediation       *bool    `yaml:"enable_node_remediation"`
 	EnableConfigMutation        *bool    `yaml:"enable_config_mutation"`
 	EnableReconcileControl      *bool    `yaml:"enable_reconcile_control"`
 	WriteRouteGrantAuthDisabled *bool    `yaml:"disable_write_route_grant_auth"`
@@ -438,6 +452,12 @@ func applyKernelSection(cfg *Config, s kernelConfigSection) {
 	}
 	if s.EnableServiceControl != nil {
 		cfg.EnableServiceControl = *s.EnableServiceControl
+	}
+	if s.NodeProbeInterval > 0 {
+		cfg.NodeProbeInterval = s.NodeProbeInterval
+	}
+	if s.EnableNodeRemediation != nil {
+		cfg.EnableNodeRemediation = *s.EnableNodeRemediation
 	}
 	if s.EnableConfigMutation != nil {
 		cfg.EnableConfigMutation = *s.EnableConfigMutation

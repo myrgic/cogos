@@ -1323,7 +1323,7 @@
     },
     {
       "file": "internal/engine/process.go",
-      "line": 1088,
+      "line": 1093,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "ensureBEPDeviceIdentity",
@@ -1335,7 +1335,7 @@
     },
     {
       "file": "internal/engine/process.go",
-      "line": 1127,
+      "line": 1132,
       "column": 14,
       "primitive": "os.Rename",
       "func": "ensureBEPDeviceIdentity",

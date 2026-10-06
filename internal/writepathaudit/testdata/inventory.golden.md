@@ -276,8 +276,8 @@ These sites write to disk but this tool could not structurally resolve their pat
 | `<call:u.runDir>` | (*selfUpdater).lockPath (`os.MkdirAll`) | internal/engine/cli_selfupdate_unix.go:430 | internal:engine |
 | `<expr>.tmp` | (*DecisionLineageReconciler).ApplyPlan (`os.WriteFile`) | internal/engine/decision_lineage_reconciler.go:238 | internal:engine |
 | `<expr>` | (*DecisionLineageReconciler).ApplyPlan (`os.Rename`) | internal/engine/decision_lineage_reconciler.go:245 | internal:engine |
-| `<call:nodeIDCertDir>` | ensureBEPDeviceIdentity (`os.MkdirAll`) | internal/engine/process.go:1088 | internal:engine |
-| `{p}<call:fmt.Sprintf>` | ensureBEPDeviceIdentity (`os.Rename`) | internal/engine/process.go:1127 | internal:engine |
+| `<call:nodeIDCertDir>` | ensureBEPDeviceIdentity (`os.MkdirAll`) | internal/engine/process.go:1093 | internal:engine |
+| `{p}<call:fmt.Sprintf>` | ensureBEPDeviceIdentity (`os.Rename`) | internal/engine/process.go:1132 | internal:engine |
 | `<expr>.tmp` | (*ProjectionReconciler).ApplyPlan (`os.WriteFile`) | internal/engine/projection_reconciler.go:426 | internal:engine |
 | `<expr>` | (*ProjectionReconciler).ApplyPlan (`os.Rename`) | internal/engine/projection_reconciler.go:436 | internal:engine |
 | `<call:fmt.Sprintf>` | (*rotatingWriter).rotateLocked (`os.Rename`) | internal/engine/rotating_writer.go:130 | internal:engine |
