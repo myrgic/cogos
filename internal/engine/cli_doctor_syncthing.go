@@ -7,18 +7,21 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/myrgic/cogos/pkg/substrate/bep"
 )
 
 // doctorSyncthingConflict reports a standalone Syncthing process on this node.
 //
 // The kernel speaks BEP natively (pkg/substrate/bep; bep_engine.go) and
 // derives its node identity from its own BEP device cert. A standalone
-// Syncthing is a second BEP speaker with a second device identity, usually
-// contending for the same :22000 listen port and, when it was installed
-// before the kernel's BEP landed, an operator-level source of confusion
-// ("BEP != Syncthing", Chaz 2026-10-03). Found live on both constellation
-// nodes that day: darkstar (homebrew launchd service, zero folders) and
-// eclipse (Windows service), both killed by hand. This check keeps them dead.
+// Syncthing is a second BEP speaker with a second device identity (and can
+// contend for a listen port if an operator pointed both at the same one),
+// and when it was installed before the kernel's BEP landed it is an
+// operator-level source of confusion ("BEP != Syncthing"). Found live on
+// both constellation nodes on 2026-10-03 (a homebrew launchd service with
+// zero folders, and a Windows service), both stopped by hand. This check
+// keeps them stopped.
 //
 // Severity is WARN, never FAIL: Syncthing is not wrong in itself, and a node
 // with BEP disabled may run it legitimately. The detail says what to do.
@@ -28,19 +31,27 @@ func doctorSyncthingConflict(g *DoctorGroup, bepEnabled bool, bepListen string) 
 		g.add("syncthing conflict", StatusOK, "no standalone syncthing process (kernel BEP is the only BEP speaker)")
 		return
 	}
-	detail := fmt.Sprintf("standalone syncthing running (pid %s). The kernel speaks BEP itself; a second BEP speaker is a second device identity and may contend for %s.",
-		strings.Join(pids, ","), orDefault(bepListen, ":22000"))
+	listen := orDefault(bepListen, defaultBEPListen)
+	detail := fmt.Sprintf("standalone syncthing running (pid %s). The kernel speaks BEP itself; a second BEP speaker is a second device identity (the kernel's BEP listen address is %s; a shared listen port would also collide).",
+		strings.Join(pids, ","), listen)
 	if bepEnabled {
 		detail += " Stop and disable it: macOS `brew services stop syncthing` (+ remove ~/Library/LaunchAgents/homebrew.mxcl.syncthing.plist); Windows `Stop-Service syncthing; Set-Service syncthing -StartupType Disabled`."
 	} else {
 		detail += " Kernel BEP is disabled on this node, so this may be intentional; if the node is meant to join the constellation, remove syncthing before enabling BEP."
 	}
 	// Second signal: who actually owns the listen port. If it isn't us, say so.
-	if owner := listenerHint(orDefault(bepListen, ":22000")); owner != "" {
+	if owner := listenerHint(listen); owner != "" {
 		detail += "\n" + owner
 	}
 	g.add("syncthing conflict", StatusWarn, detail)
 }
+
+// defaultBEPListen is the kernel's own BEP listen address when cluster.yaml
+// does not say (and when it cannot be read). Derived from the BEP package's
+// constant, never a literal: 6932 is deliberately NOT Syncthing's 22000, so a
+// hardcoded :22000 here pointed the operator at the wrong port exactly when
+// the config was unreadable.
+var defaultBEPListen = fmt.Sprintf(":%d", bep.DefaultListenPort)
 
 func orDefault(s, d string) string {
 	if strings.TrimSpace(s) == "" {
