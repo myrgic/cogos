@@ -492,7 +492,7 @@ func writeProvidersLocal(t *testing.T, endpoint string) string {
 }
 
 // TestHealth_UnreachableBackendIsSuspendedNotDegraded is the regression test
-// for the daemon/engine twin-instance bug (2026-10-01, Eclipse unreachable):
+// for the daemon/engine twin-instance bug (2026-10-01, a remote host unreachable):
 // an endpoint that refuses the connection must map to Suspended, matching the
 // engine-layer provider's precedent ("do NOT self-heal a box that is simply
 // off or unreachable"). Before this fix, Health() returned Degraded here,
@@ -534,5 +534,32 @@ func TestHealth_ReachableWrongStateIsStillDegraded(t *testing.T) {
 	}
 	if h.Sync != reconcile.SyncStatusOutOfSync {
 		t.Errorf("reachable-wrong-context: Sync = %s (want OutOfSync)", h.Sync)
+	}
+}
+
+// Review #659 round 1: "unreachable" means the backend gave no usable answer,
+// not only "connection refused". The engine-layer twin maps every probe
+// failure (transport, non-200, undecodable body) to Suspended; the daemon
+// stub must agree, or a proxy answering 502/503 (or a mid-restart server
+// with a truncated body) re-triggers the same unbounded self-heal loop.
+func TestHealth_UnusableAnswerIsSuspendedNotDegraded(t *testing.T) {
+	for name, handler := range map[string]http.HandlerFunc{
+		"non-200 (proxy 503)": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) },
+		"non-200 (502)":       func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) },
+		"undecodable body":    func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"data": [{"id": "tar`)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(handler)
+			t.Cleanup(srv.Close)
+			root := writeProvidersLocal(t, srv.URL)
+			SetWorkspaceRoot(root)
+			t.Cleanup(func() { SetWorkspaceRoot("") })
+
+			p := &lmsModelStateProvider{stubMethods: stubMethods{name: "lms-model-state"}}
+			h := p.Health()
+			if h.Health != reconcile.HealthSuspended || h.Sync != reconcile.SyncStatusUnknown {
+				t.Fatalf("Health=%s Sync=%s (want Suspended/Unknown); message: %q", h.Health, h.Sync, h.Message)
+			}
+		})
 	}
 }

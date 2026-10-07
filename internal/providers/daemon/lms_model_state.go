@@ -18,7 +18,7 @@
 // model/context/state is HealthDegraded. Before this split (fixed 2026-10),
 // both cases folded into Degraded here, which autonomic_ticker's
 // healDegradedProviders treats as actionable — so an unreachable LAN box
-// (Eclipse) drove an unbounded self-heal reconcile loop (measured: ~79k
+// (a remote model host) drove an unbounded self-heal reconcile loop (measured: ~79k
 // cycles, thousands of escalations to claude-oauth) against a condition no
 // self-heal action could ever resolve. See the go-cogos-kernel-patterns
 // skill's "degenerate status signals" pattern.
@@ -49,8 +49,13 @@ import (
 	"github.com/myrgic/cogos/pkg/substrate/reconcile"
 )
 
-// unreachableError marks a probe failure caused by the backend being off or
-// off-LAN, as opposed to a reachable backend reporting the wrong model/state.
+// unreachableError marks a probe failure where the backend gave no usable
+// answer: off or off-LAN (transport error), answering but unhealthy (non-200,
+// e.g. a proxy's 502/503 while the real server is down), or answering with a
+// body that can't be decoded (mid-restart). All three are the same to the
+// self-heal driver: no reconcile action can fix them, so they are NOT drift.
+// This is the opposite of a reachable backend that parses cleanly and reports
+// the wrong model/context/state, which stays a plain error (Degraded).
 // Health() uses errors.As to route these to Suspended instead of Degraded —
 // see the package doc comment and the engine-layer precedent this mirrors
 // (provider_lms_model_state.go's lastErr ⇒ Suspended mapping, "do NOT
@@ -133,7 +138,7 @@ func (p *lmsModelStateProvider) Health() reconcile.ResourceStatus {
 		// unreachable LAN box drove a self-heal reconcile cycle roughly
 		// every minute indefinitely (measured 2026-10-01: 79,140 bare
 		// lms-model-state "starting reconcile cycle" lines; 4,085
-		// degraded_health escalations to claude-oauth in 24h while Eclipse
+		// degraded_health escalations to claude-oauth in 24h while the remote host
 		// was down). If some backends are unreachable and others merely
 		// report gap notes, that's still an incomplete-but-not-actionable
 		// watch — Suspended, not Degraded.
@@ -389,7 +394,7 @@ func probeModelStateEntry(ctx context.Context, e modelStateEntry) (progressing b
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return false, "", fmt.Errorf("/api/v0/models returned %d", resp.StatusCode)
+		return false, "", &unreachableError{err: fmt.Errorf("/api/v0/models returned %d", resp.StatusCode)}
 	}
 
 	var out struct {
@@ -400,7 +405,7 @@ func probeModelStateEntry(ctx context.Context, e modelStateEntry) (progressing b
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return false, "", fmt.Errorf("decode: %w", err)
+		return false, "", &unreachableError{err: fmt.Errorf("decode: %w", err)}
 	}
 
 	// Collect id-matching rows, preferring state=="loaded" so a not-loaded/loading

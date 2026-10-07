@@ -364,7 +364,7 @@ Total subprocess sites: 83
 | `{repoRoot}` | `exec.CommandContext(ctx, "git", args...)` | internal/engine/worktree_spawn.go:134 | internal:engine |
 | `{root}` | `exec.CommandContext(ctx, cogScript, args...)` | internal/linkfeed/linkfeed.go:977 | internal:linkfeed |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("git", "rev-parse", "--show-toplevel")` | internal/providers/all/all.go:126 | provider:all |
-| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(psCtx, e.lmsCLIPath, "ps", "--json")` | internal/providers/daemon/lms_model_state.go:449 | provider:daemon |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(psCtx, e.lmsCLIPath, "ps", "--json")` | internal/providers/daemon/lms_model_state.go:509 | provider:daemon |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "launchctl", "list", label)` | internal/providers/daemon/mlx_inference.go:217 | provider:daemon |
 | `{root}` | `exec.CommandContext(ctx, bin, argv[1:]...)` | internal/providers/discord/discord_reconcile.go:486 | provider:discord |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "gh", "api", path)` | internal/providers/marginbridge/marginbridge.go:455 | provider:marginbridge |
