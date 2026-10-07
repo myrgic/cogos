@@ -23,9 +23,13 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -342,34 +346,144 @@ func (s *Server) dispatchMutation(
 //	409 → service is not controllable (kind=observed|external)
 func (s *Server) handleServiceStart(w http.ResponseWriter, r *http.Request) {
 	s.dispatchMutation(w, r, "start", func(sup ServiceSupervisor, name string, def ServiceDef) (*ServiceStatus, error) {
-		return sup.Start(r.Context(), name, def)
+		ctx, cancel := detachedServiceContext(r)
+		defer cancel()
+		return sup.Start(ctx, name, def)
 	})
 }
 
 // handleServiceStop — POST /v1/services/{name}/stop
 func (s *Server) handleServiceStop(w http.ResponseWriter, r *http.Request) {
 	s.dispatchMutation(w, r, "stop", func(sup ServiceSupervisor, name string, def ServiceDef) (*ServiceStatus, error) {
-		return sup.Stop(r.Context(), name, def)
+		ctx, cancel := detachedServiceContext(r)
+		defer cancel()
+		return sup.Stop(ctx, name, def)
 	})
 }
 
-// handleServiceRestart — POST /v1/services/{name}/restart
+// handleServiceRestart — POST /v1/services/{name}/restart[?wait=false]
+//
+// The restart runs on a context detached from the request: the caller may be
+// the service being restarted (an agent gateway restarting itself), and its
+// connection drops as soon as the old process exits. Cancelling the restart
+// at that moment would leave the service down. The response reports
+// previous_pid and restarted=true once a new PID is observed.
+//
+// ?wait=false returns 202 immediately and restarts in the background. A
+// caller restarting ITSELF must use it: a gateway drains in-flight work on
+// SIGTERM, and the in-flight work includes the very call that is waiting on
+// this response — waiting would deadlock until the drain timeout.
 func (s *Server) handleServiceRestart(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("wait") == "false" {
+		s.handleServiceRestartAsync(w, r)
+		return
+	}
 	s.dispatchMutation(w, r, "restart", func(sup ServiceSupervisor, name string, def ServiceDef) (*ServiceStatus, error) {
-		return sup.Restart(r.Context(), name, def)
+		ctx, cancel := detachedServiceContext(r)
+		defer cancel()
+		return sup.Restart(ctx, name, def)
 	})
+}
+
+// handleServiceRestartAsync accepts a restart and runs it in the background.
+//
+// Everything that can be known before launchd is asked is checked here,
+// synchronously, with the same status codes as the waited path: gate (403),
+// lookup (404), supervisor/kind/label/plist controllability (409). Only the
+// kickstart itself runs after the 202, so a 202 means "launchd was about to
+// be asked", never "this could not have worked". The background outcome is
+// logged; callers confirm via GET /v1/services/{name} or a fresh PID.
+func (s *Server) handleServiceRestartAsync(w http.ResponseWriter, r *http.Request) {
+	if !s.requireServiceControl(w) {
+		return
+	}
+	name := r.PathValue("name")
+	def, ok := s.lookupServiceForMutation(w, name)
+	if !ok {
+		return
+	}
+	sup := supervisorFor(def, s.supervisorFromServer())
+	if err := restartPreflight(r.Context(), sup, name, def); err != nil {
+		writeMutationResponse(w, http.StatusConflict, serviceMutationResponse{
+			Success: false, Action: "restart", ServiceName: name, Error: err.Error(),
+		})
+		return
+	}
+	before, _ := sup.Status(r.Context(), name, def)
+
+	go func() {
+		ctx, cancel := detachedServiceContext(r)
+		defer cancel()
+		st, rerr := sup.Restart(ctx, name, def)
+		attrs := []any{"service", name, "err", rerr}
+		if st != nil {
+			attrs = append(attrs, "previous_pid", st.PreviousPID, "pid", st.PID, "restarted", st.Restarted)
+		}
+		if rerr != nil {
+			slog.Warn("services: async restart failed", attrs...)
+			return
+		}
+		slog.Info("services: async restart finished", attrs...)
+	}()
+
+	writeMutationResponse(w, http.StatusAccepted, serviceMutationResponse{
+		Success: true, Action: "restart", ServiceName: name, Status: before,
+	})
+}
+
+// restartPreflight reports, without side effects, why a restart could not
+// work: a non-launchctl supervisor (observed/external kind, or no supervisor
+// wired), a managed service with no launchd label, or a label whose plist is
+// absent (LaunchctlController.Start's own ErrNotControllable condition).
+func restartPreflight(ctx context.Context, sup ServiceSupervisor, name string, def ServiceDef) error {
+	if _, observer := sup.(*ObserverSupervisor); observer || def.Kind.EffectiveKind() != ServiceKindManaged {
+		return ErrNotControllable
+	}
+	if def.Launchd == "" {
+		return fmt.Errorf("%w: no launchd label", ErrNotControllable)
+	}
+	// Mirror LaunchctlController.Restart exactly: a job already loaded in
+	// launchd is kickstarted and never needs its plist; only an UNLOADED job
+	// falls back to Start, whose precondition is that the plist exists.
+	if _, real := sup.(*LaunchctlController); real {
+		st, _ := sup.Status(ctx, name, def)
+		if st != nil && st.LaunchdRegistered {
+			return nil
+		}
+		if _, err := os.Stat(plistPathForLabel(def.Launchd)); os.IsNotExist(err) {
+			return fmt.Errorf("%w: plist %s not found", ErrNotControllable, plistPathForLabel(def.Launchd))
+		}
+	}
+	return nil
+}
+
+// serviceRestartBudget bounds a detached service mutation (for restart:
+// kickstart + PID confirm).
+var serviceRestartBudget = 60 * time.Second
+
+// detachedServiceContext returns a context for a service mutation that
+// survives the request being cancelled (a dropped or timed-out client must not
+// abort a launchctl operation halfway), bounded by serviceRestartBudget.
+// Every mutation route uses it, not only restart: stop → client drops → the
+// job is left in whatever state launchctl reached is the same bug class.
+func detachedServiceContext(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(r.Context()), serviceRestartBudget)
 }
 
 // handleServiceEnable — POST /v1/services/{name}/enable
 func (s *Server) handleServiceEnable(w http.ResponseWriter, r *http.Request) {
 	s.dispatchMutation(w, r, "enable", func(sup ServiceSupervisor, name string, def ServiceDef) (*ServiceStatus, error) {
-		return sup.Enable(r.Context(), name, def)
+		ctx, cancel := detachedServiceContext(r)
+		defer cancel()
+		return sup.Enable(ctx, name, def)
 	})
 }
 
 // handleServiceDisable — POST /v1/services/{name}/disable
 func (s *Server) handleServiceDisable(w http.ResponseWriter, r *http.Request) {
 	s.dispatchMutation(w, r, "disable", func(sup ServiceSupervisor, name string, def ServiceDef) (*ServiceStatus, error) {
-		return sup.Disable(r.Context(), name, def)
+		ctx, cancel := detachedServiceContext(r)
+		defer cancel()
+		return sup.Disable(ctx, name, def)
 	})
 }

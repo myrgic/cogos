@@ -1,0 +1,255 @@
+package engine
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"sync"
+	"testing"
+)
+
+// ctxCapturingSupervisor records the context Restart was called with so the
+// test can check it outlives the HTTP request.
+type ctxCapturingSupervisor struct {
+	*stubSupervisor
+	mu sync.Mutex
+	// midRestart runs inside Restart, standing in for "the old process
+	// exits and the caller's connection drops".
+	midRestart  func()
+	errAfter    error
+	hadDeadline bool
+	called      bool
+}
+
+func (c *ctxCapturingSupervisor) Restart(ctx context.Context, name string, def ServiceDef) (*ServiceStatus, error) {
+	if c.midRestart != nil {
+		c.midRestart()
+	}
+	c.mu.Lock()
+	c.called = true
+	c.errAfter = ctx.Err()
+	_, c.hadDeadline = ctx.Deadline()
+	c.mu.Unlock()
+	return c.stubSupervisor.Restart(ctx, name, def)
+}
+
+// TestServiceMutation_Restart_DetachedFromRequest pins the self-restart
+// contract: the caller may be the service being restarted, so its request
+// context is cancelled the moment the old process exits. The restart must
+// run on a context that survives that cancellation.
+func TestServiceMutation_Restart_DetachedFromRequest(t *testing.T) {
+	t.Parallel()
+	sup := &ctxCapturingSupervisor{stubSupervisor: newStubSupervisor()}
+	handler := newMutationTestServer(t, testManifest(), sup, true)
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sup.midRestart = cancel // the caller goes away mid-restart
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/services/kernel/restart", nil).WithContext(reqCtx)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	sup.mu.Lock()
+	defer sup.mu.Unlock()
+	if !sup.called {
+		t.Fatal("Restart was not called")
+	}
+	if reqCtx.Err() == nil {
+		t.Fatal("test bug: request context was not cancelled")
+	}
+	if sup.errAfter != nil {
+		t.Fatalf("restart context was cancelled with the request (%v); it must be detached", sup.errAfter)
+	}
+	if !sup.hadDeadline {
+		t.Error("restart context has no deadline; a detached restart must still be bounded")
+	}
+}
+
+// TestRequiredScope_ServiceMutationIsAdmin pins service control to the admin
+// scope: restarting a gateway is not a plain write.
+func TestRequiredScope_ServiceMutationIsAdmin(t *testing.T) {
+	t.Parallel()
+	for _, action := range []string{"start", "stop", "restart", "enable", "disable"} {
+		r := httptest.NewRequest(http.MethodPost, "/v1/services/hermes-cog/"+action, nil)
+		if got := requiredScopeForRequest(r); got != ScopeAdmin {
+			t.Errorf("POST %s: scope=%q; want %q", action, got, ScopeAdmin)
+		}
+	}
+	r := httptest.NewRequest(http.MethodGet, "/v1/services/hermes-cog", nil)
+	if got := requiredScopeForRequest(r); got == ScopeAdmin {
+		t.Errorf("GET /v1/services/{name} must not require admin")
+	}
+}
+
+// TestServiceMutation_Restart_Async returns 202 before the restart runs and
+// still performs it — the self-restart path.
+func TestServiceMutation_Restart_Async(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	done := make(chan struct{})
+	sup := &ctxCapturingSupervisor{stubSupervisor: newStubSupervisor()}
+	sup.midRestart = func() { <-release; close(done) }
+	handler := newMutationTestServer(t, testManifest(), sup, true)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/services/kernel/restart?wait=false", nil))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d; want 202; body=%q", rec.Code, rec.Body.String())
+	}
+	close(release) // restart was blocked; the response came back anyway
+	<-done
+	sup.mu.Lock()
+	defer sup.mu.Unlock()
+	if !sup.called || sup.errAfter != nil {
+		t.Fatalf("background restart: called=%v ctxErr=%v", sup.called, sup.errAfter)
+	}
+}
+
+// TestServiceMutation_Restart_Async_GateAndKind keeps the 403/409 contract on
+// the async path.
+func TestServiceMutation_Restart_Async_GateAndKind(t *testing.T) {
+	t.Parallel()
+	off := newMutationTestServer(t, testManifest(), newStubSupervisor(), false)
+	rec := httptest.NewRecorder()
+	off.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/services/kernel/restart?wait=false", nil))
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("gate off: status=%d; want 403", rec.Code)
+	}
+	on := newMutationTestServer(t, testManifest(), newStubSupervisor(), true)
+	for name := range testManifest().Services {
+		def := testManifest().Services[name]
+		if def.Kind.EffectiveKind() == ServiceKindManaged {
+			continue
+		}
+		rec := httptest.NewRecorder()
+		on.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/services/"+name+"/restart?wait=false", nil))
+		if rec.Code != http.StatusConflict {
+			t.Errorf("%s (kind=%s): status=%d; want 409", name, def.Kind.EffectiveKind(), rec.Code)
+		}
+	}
+}
+
+// ctxProbeSupervisor records ctx.Err() as seen inside every mutation, after
+// the request context has already been cancelled.
+type ctxProbeSupervisor struct {
+	*stubSupervisor
+	cancel func()
+	mu     sync.Mutex
+	errs   map[string]error
+}
+
+func (c *ctxProbeSupervisor) probe(action string, ctx context.Context) {
+	c.cancel()
+	c.mu.Lock()
+	c.errs[action] = ctx.Err()
+	c.mu.Unlock()
+}
+func (c *ctxProbeSupervisor) Start(ctx context.Context, n string, d ServiceDef) (*ServiceStatus, error) {
+	c.probe("start", ctx)
+	return c.stubSupervisor.Start(ctx, n, d)
+}
+func (c *ctxProbeSupervisor) Stop(ctx context.Context, n string, d ServiceDef) (*ServiceStatus, error) {
+	c.probe("stop", ctx)
+	return c.stubSupervisor.Stop(ctx, n, d)
+}
+func (c *ctxProbeSupervisor) Enable(ctx context.Context, n string, d ServiceDef) (*ServiceStatus, error) {
+	c.probe("enable", ctx)
+	return c.stubSupervisor.Enable(ctx, n, d)
+}
+func (c *ctxProbeSupervisor) Disable(ctx context.Context, n string, d ServiceDef) (*ServiceStatus, error) {
+	c.probe("disable", ctx)
+	return c.stubSupervisor.Disable(ctx, n, d)
+}
+
+// TestServiceMutation_AllDetachedFromRequest: the dropped-client bug is not
+// restart-specific, so no mutation may run on the request context.
+func TestServiceMutation_AllDetachedFromRequest(t *testing.T) {
+	t.Parallel()
+	for _, action := range []string{"start", "stop", "enable", "disable"} {
+		action := action
+		t.Run(action, func(t *testing.T) {
+			t.Parallel()
+			reqCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			sup := &ctxProbeSupervisor{stubSupervisor: newStubSupervisor(), cancel: cancel, errs: map[string]error{}}
+			handler := newMutationTestServer(t, testManifest(), sup, true)
+			req := httptest.NewRequest(http.MethodPost, "/v1/services/kernel/"+action, nil).WithContext(reqCtx)
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+			sup.mu.Lock()
+			defer sup.mu.Unlock()
+			err, ok := sup.errs[action]
+			if !ok {
+				t.Fatalf("%s was not called", action)
+			}
+			if err != nil {
+				t.Fatalf("%s ran on the request context (%v); must be detached", action, err)
+			}
+		})
+	}
+}
+
+// TestServiceMutation_Restart_Async_NoLabel: a managed service without a
+// launchd label is rejected synchronously instead of a 202 that can only fail
+// in the logs. ("mod3" in testManifest is managed with no label.)
+func TestServiceMutation_Restart_Async_NoLabel(t *testing.T) {
+	t.Parallel()
+	h := newMutationTestServer(t, testManifest(), newStubSupervisor(), true)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/services/mod3/restart?wait=false", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d; want 409; body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServiceMutation_Restart_Async_AgreesWithSync: the async path must not
+// 202 a restart the waited path would 409. With no launchctl supervisor wired
+// (ObserverSupervisor), both answer 409.
+func TestServiceMutation_Restart_Async_AgreesWithSync(t *testing.T) {
+	t.Parallel()
+	h := newMutationTestServer(t, testManifest(), nil, true) // nil → observer fallback
+	for _, q := range []string{"", "?wait=false"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/services/kernel/restart"+q, nil))
+		if rec.Code != http.StatusConflict {
+			t.Errorf("restart%s with observer supervisor: status=%d; want 409", q, rec.Code)
+		}
+	}
+}
+
+// TestRestartPreflight_MissingPlist: a managed, labelled service whose plist
+// is absent is rejected before any 202.
+func TestRestartPreflight_MissingPlist(t *testing.T) {
+	t.Parallel()
+	def := ServiceDef{Kind: ServiceKindManaged, Launchd: "com.cogos.test.absent." + filepath.Base(t.TempDir())}
+	if err := restartPreflight(context.Background(), NewLaunchctlController(), "t", def); !errors.Is(err, ErrNotControllable) {
+		t.Fatalf("err=%v; want ErrNotControllable", err)
+	}
+}
+
+// Review #665: the waited path and the async path must agree for a managed
+// service with no launchd label, and every mutation route must treat that
+// precondition the same way (409, not 500). The real LaunchctlController is
+// wired (as boot.go now does); the label check precedes any launchctl call,
+// so nothing touches launchd.
+func TestServiceMutation_NoLaunchdLabel_Is409OnEveryRoute(t *testing.T) {
+	t.Parallel()
+	h := newMutationTestServer(t, testManifest(), NewLaunchctlController(), true)
+	// "mod3" in testManifest is kind=managed with no Launchd label.
+	for _, route := range []string{
+		"/v1/services/mod3/start",
+		"/v1/services/mod3/stop",
+		"/v1/services/mod3/restart",
+		"/v1/services/mod3/restart?wait=false",
+		"/v1/services/mod3/enable",
+		"/v1/services/mod3/disable",
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, route, nil))
+		if rec.Code != http.StatusConflict {
+			t.Errorf("POST %s: status=%d body=%s; want 409", route, rec.Code, rec.Body.String())
+		}
+	}
+}
