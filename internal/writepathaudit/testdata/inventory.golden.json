@@ -1851,7 +1851,7 @@
     },
     {
       "file": "internal/providers/discord/discord_provider.go",
-      "line": 415,
+      "line": 421,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "writeDiscordServerYAML",
@@ -1863,7 +1863,7 @@
     },
     {
       "file": "internal/providers/discord/discord_provider.go",
-      "line": 418,
+      "line": 424,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "writeDiscordServerYAML",
@@ -1875,7 +1875,7 @@
     },
     {
       "file": "internal/providers/discord/discord_reconcile.go",
-      "line": 1180,
+      "line": 1243,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "writeState",
@@ -1887,7 +1887,7 @@
     },
     {
       "file": "internal/providers/discord/discord_reconcile.go",
-      "line": 1183,
+      "line": 1246,
       "column": 12,
       "primitive": "os.Rename",
       "func": "writeState",
@@ -3600,7 +3600,7 @@
     },
     {
       "file": "internal/providers/discord/discord_reconcile.go",
-      "line": 467,
+      "line": 486,
       "column": 9,
       "func": "runTokenCommand",
       "subsystem": "provider:discord",
