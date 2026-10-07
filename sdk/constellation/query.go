@@ -25,7 +25,7 @@ func (c *Constellation) Search(query string, limit int) ([]Node, error) {
 		SELECT d.id, d.path, d.title, d.type, d.sector, d.status, d.content,
 		       bm25(documents_fts) AS rank
 		FROM documents_fts
-		JOIN documents d ON d.rowid = documents_fts.rowid
+		JOIN documents d ON d.id = documents_fts.id
 		WHERE documents_fts MATCH ?
 		  AND d.status != 'deprecated'
 		ORDER BY rank
@@ -125,7 +125,7 @@ func (c *Constellation) QueryRelevantWithSubstance(anchor, goal string, maxCandi
 		       COALESCE(d.substance_ratio, 0.0) AS substance_ratio,
 		       COALESCE(d.ref_count, 0) AS ref_count
 		FROM documents_fts
-		JOIN documents d ON d.rowid = documents_fts.rowid
+		JOIN documents d ON d.id = documents_fts.id
 		WHERE documents_fts MATCH ?
 		  AND d.status != 'deprecated'
 		ORDER BY rank
@@ -237,7 +237,7 @@ func (c *Constellation) QueryRelevantWithEmbedding(anchor, goal string, maxCandi
 		       COALESCE(d.ref_count, 0) AS ref_count,
 		       d.embedding_128
 		FROM documents_fts
-		JOIN documents d ON d.rowid = documents_fts.rowid
+		JOIN documents d ON d.id = documents_fts.id
 		WHERE documents_fts MATCH ?
 		  AND d.status != 'deprecated'
 		ORDER BY rank
@@ -340,7 +340,7 @@ func SortNodesByScore(candidates []NodeWithScore) {
 // SearchWithFilters performs filtered full-text search.
 func (c *Constellation) SearchWithFilters(query string, types []string, sector string, limit int) ([]Node, error) {
 	// Build WHERE clause
-	whereClauses := []string{"fts MATCH ?", "d.status != 'deprecated'"}
+	whereClauses := []string{"documents_fts MATCH ?", "d.status != 'deprecated'"}
 	args := []interface{}{query}
 
 	if len(types) > 0 {
@@ -361,9 +361,9 @@ func (c *Constellation) SearchWithFilters(query string, types []string, sector s
 
 	querySQL := fmt.Sprintf(`
 		SELECT d.id, d.path, d.title, d.type, d.sector, d.status, d.content,
-		       bm25(fts) AS rank
-		FROM documents_fts fts
-		JOIN documents d ON d.rowid = fts.rowid
+		       bm25(documents_fts) AS rank
+		FROM documents_fts
+		JOIN documents d ON d.id = documents_fts.id
 		WHERE %s
 		ORDER BY rank
 		LIMIT ?
