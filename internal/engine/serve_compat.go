@@ -888,9 +888,10 @@ func (s *Server) handleTAA(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleMemorySearch searches CogDocs by query string.
+// handleMemorySearch searches CogDocs and conversation transcripts by query
+// string (see memory_search_fusion.go for the fusion/ranking contract).
 //
-// Delegates to SearchMemory (constellation FTS5 + bm25, grep fallback) — the
+// The cogdoc half delegates to SearchMemory (constellation FTS5 + bm25, grep fallback) — the
 // same path the MCP memory_search tool uses. It must NOT re-implement ranking:
 // a previous version scored docs with queryRelevance()*2.0 + salience, where
 // relevance is capped at 1.0 and salience is unbounded (observed 4.2–4.3). The
@@ -908,15 +909,21 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Request surface is deliberately unchanged: `query` only, limit fixed at
-	// the 20 this endpoint always returned. SearchMemory supports limit and
-	// sector, but exposing them here would widen a deprecated endpoint's
-	// contract inside a bugfix — a separate change if anyone wants it.
+	// Request surface: `query`, plus optional `kind` (comma list of "cogdoc",
+	// "transcript"; default both — myrgic/cogos#650). Limit stays fixed at the
+	// 20 this endpoint always returned.
 	const limit = 20
+	wantCogdoc, wantTranscript, err := parseMemoryKinds(r.URL.Query().Get("kind"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// A retrieval error must surface as an error, not as an empty result set:
-	// the caller has to be able to tell "no matches" from "I am broken".
-	out, err := SearchMemory(s.cfg.WorkspaceRoot, query, limit, "")
+	// the caller has to be able to tell "no matches" from "I am broken". The
+	// transcript half reports degradation in-band under "sources" instead of
+	// failing the request, because the cogdoc half is still a valid answer.
+	out, err := SearchMemoryFused(r.Context(), s.cfg.WorkspaceRoot, query, limit, wantCogdoc, wantTranscript)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("memory search failed: %v", err),
 			http.StatusInternalServerError)
