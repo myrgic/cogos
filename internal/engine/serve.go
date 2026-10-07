@@ -142,6 +142,11 @@ type Server struct {
 	// engine starts successfully; nil in all other cases. The
 	// /v1/cluster/status handler reads this field — nil → {"enabled":false}.
 	bepEngine *BEPEngine
+
+	// managedSessions is the kernel-owned agent-session driver behind the
+	// ADR-093 §7 /v1/managed-sessions surface (serve_managed_sessions.go).
+	// Processes start only when a client creates a session.
+	managedSessions *HermesACPDriver
 }
 
 // NewServer constructs a Server bound to the configured port.
@@ -211,6 +216,7 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 	}
 	s.identityGrants = identityGrants
 	s.grantMintLimiter = newGrantMintLimiter(defaultGrantMintRateLimit, defaultGrantMintRateWindow)
+	s.managedSessions = NewHermesACPDriver(HermesACPDriverConfig{})
 
 	mux := http.NewServeMux()
 	s.routeH(mux, "GET /", dashboard.Handler())
@@ -302,6 +308,10 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 
 	// ACP-client surface: list/browse Claude Code projects+sessions, spawn subprocess.
 	s.registerClaudeCodeRoutes(mux)
+
+	// ADR-093 §7: kernel-managed agent sessions (Hermes ACP driver) with a
+	// replayable event WebSocket. See serve_managed_sessions.go.
+	s.registerManagedSessionRoutes(mux)
 
 	// Diagnostic surface: pprof + expvar under /debug/, loopback-gated
 	// regardless of bind address. See serve_debug.go / #505 — the daemon had
@@ -554,6 +564,9 @@ func (s *Server) Serve(ln net.Listener) error {
 // Shutdown gracefully drains the server and stops its background reaper.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.stopBackground()
+	if s.managedSessions != nil {
+		s.managedSessions.Close()
+	}
 	return s.srv.Shutdown(ctx)
 }
 

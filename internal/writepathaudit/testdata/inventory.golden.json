@@ -1587,7 +1587,7 @@
     },
     {
       "file": "internal/engine/serve.go",
-      "line": 1367,
+      "line": 1380,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",
@@ -3187,6 +3187,16 @@
       "raw": "exec.Command(\"tasklist\", \"/FI\", fmt.Sprintf(\"PID eq %d\", pid), \"/NH\")",
       "dir": "",
       "dir_known": false
+    },
+    {
+      "file": "internal/engine/managed_session_hermes.go",
+      "line": 176,
+      "column": 9,
+      "func": "(*hermesProcess).start",
+      "subsystem": "internal:engine",
+      "raw": "exec.Command(argv[0], argv[1:]...)",
+      "dir": "{cwd}",
+      "dir_known": true
     },
     {
       "file": "internal/engine/mcp_architecture.go",
