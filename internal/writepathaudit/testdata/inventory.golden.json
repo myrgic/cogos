@@ -3600,7 +3600,7 @@
     },
     {
       "file": "internal/providers/daemon/lms_model_state.go",
-      "line": 449,
+      "line": 513,
       "column": 17,
       "func": "checkParallelDrift",
       "subsystem": "provider:daemon",
