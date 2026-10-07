@@ -123,7 +123,10 @@ func (p *lmsModelStateProvider) Health() reconcile.ResourceStatus {
 			Sync:      reconcile.SyncStatusOutOfSync,
 			Health:    reconcile.HealthDegraded,
 			Operation: reconcile.OperationIdle,
-			Message:   healthIssuesMessage(issues, gapNotes),
+			// Unreachable backends in the same cycle are listed too: the status
+			// stays Degraded (a reachable entry has real drift), but an outage
+			// beside it must not vanish from the operator-facing message.
+			Message: healthIssuesMessage(append(append([]string{}, issues...), unreachable...), gapNotes),
 		}
 	}
 
@@ -380,7 +383,8 @@ func probeModelStateEntry(ctx context.Context, e modelStateEntry) (progressing b
 	url := base + "/api/v0/models"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return false, "", fmt.Errorf("build request: %w", err)
+		// Engine twin parity: every probe failure before an answer is Suspended.
+		return false, "", &unreachableError{err: fmt.Errorf("build request: %w", err)}
 	}
 	if e.apiKeyEnv != "" {
 		if tok := os.Getenv(e.apiKeyEnv); tok != "" {

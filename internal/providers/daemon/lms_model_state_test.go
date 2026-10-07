@@ -563,3 +563,39 @@ func TestHealth_UnusableAnswerIsSuspendedNotDegraded(t *testing.T) {
 		})
 	}
 }
+
+// Review #659 round 2: one backend reachable-but-wrong and another down in the
+// same cycle must stay Degraded (real drift) AND name both in the message.
+func TestHealth_MixedWrongAndUnreachableNamesBoth(t *testing.T) {
+	wrong := msModelsServer(t, msRow{ID: "target", State: "loaded", Ctx: msIntp(65536)}) // want 262144
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	root := t.TempDir()
+	cfgDir := filepath.Join(root, ".cog", "config")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "providers:\n"
+	for name, ep := range map[string]string{"wrong-ctx": wrong.URL, "down-box": deadURL} {
+		body += "  " + name + ":\n    type: openai\n    endpoint: " + ep + "\n    options:\n" +
+			"      model_state:\n        manage: true\n        model: target\n        context_length: 262144\n"
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "providers.local.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	SetWorkspaceRoot(root)
+	t.Cleanup(func() { SetWorkspaceRoot("") })
+
+	p := &lmsModelStateProvider{stubMethods: stubMethods{name: "lms-model-state"}}
+	h := p.Health()
+	if h.Health != reconcile.HealthDegraded || h.Sync != reconcile.SyncStatusOutOfSync {
+		t.Fatalf("a reachable backend with real drift must stay Degraded/OutOfSync: Health=%s Sync=%s", h.Health, h.Sync)
+	}
+	for _, want := range []string{"wrong-ctx", "down-box"} {
+		if !strings.Contains(h.Message, want) {
+			t.Errorf("message must name %q (an outage beside drift must not vanish): %q", want, h.Message)
+		}
+	}
+}
