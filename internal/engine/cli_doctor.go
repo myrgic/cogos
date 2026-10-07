@@ -87,10 +87,12 @@ import (
 	"context"
 	"database/sql"
 	"debug/buildinfo"
+
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	bep "github.com/myrgic/cogos/pkg/substrate/bep"
 	"io/fs"
 	"net/http"
 	neturl "net/url"
@@ -490,6 +492,9 @@ func doctorInstallIntegrity(report *DoctorReport, root string, opts DoctorOption
 
 	// -- Enumerate every cogos/cog binary on disk, dev-artifact flagged --
 	doctorBinarySprawl(g, root, opts)
+
+	// -- Standalone Syncthing beside the kernel's own BEP engine ----------
+	doctorBEPAndSyncthing(g, root)
 }
 
 // lookPathAll resolves name against every directory on PATH, returning every
@@ -2293,4 +2298,28 @@ func doctorDeadHooks(g *DoctorGroup, home string) {
 	sort.Strings(dead)
 	g.add("dead hook commands", StatusWarn, fmt.Sprintf(
 		"%d hook-referenced path(s) do not exist on disk:\n%s", len(dead), strings.Join(dead, "\n")))
+}
+
+// doctorBEPAndSyncthing reads the node's BEP config and runs the standalone
+// Syncthing check against it. A corrupt or unreadable cluster.yaml is reported
+// as UNKNOWN (no other check reads that file) rather than collapsed into
+// "BEP disabled"; the Syncthing check then falls back to the kernel's default
+// BEP listen address.
+func doctorBEPAndSyncthing(g *DoctorGroup, root string) {
+	bepEnabled, bepListen := false, ""
+	if root != "" {
+		cc, err := NewBEPProvider(root).LoadConfig()
+		switch {
+		case err != nil:
+			g.add("bep cluster config", StatusUnknown, fmt.Sprintf("could not read cluster.yaml, so whether kernel BEP is enabled is unknown: %v", err))
+		case cc != nil:
+			bepEnabled = cc.Enabled
+			port := cc.ListenPort
+			if port == 0 {
+				port = bep.DefaultListenPort
+			}
+			bepListen = fmt.Sprintf(":%d", port)
+		}
+	}
+	doctorSyncthingConflict(g, bepEnabled, bepListen)
 }
