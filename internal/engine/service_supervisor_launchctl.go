@@ -86,7 +86,7 @@ func (c *LaunchctlController) Start(ctx context.Context, name string, def Servic
 
 	label := def.Launchd
 	if label == "" {
-		return nil, fmt.Errorf("service %q has no launchd label: cannot start via launchctl", name)
+		return nil, fmt.Errorf("%w: service %q has no launchd label: cannot start via launchctl", ErrNotControllable, name)
 	}
 
 	// If launchd doesn't know about the job, load it first.
@@ -146,7 +146,7 @@ func (c *LaunchctlController) Start(ctx context.Context, name string, def Servic
 func (c *LaunchctlController) Stop(ctx context.Context, name string, def ServiceDef) (*ServiceStatus, error) {
 	label := def.Launchd
 	if label == "" {
-		return nil, fmt.Errorf("service %q has no launchd label: cannot stop via launchctl", name)
+		return nil, fmt.Errorf("%w: service %q has no launchd label: cannot stop via launchctl", ErrNotControllable, name)
 	}
 
 	st, _ := c.Status(ctx, name, def)
@@ -195,7 +195,7 @@ func (c *LaunchctlController) Restart(ctx context.Context, name string, def Serv
 
 	label := def.Launchd
 	if label == "" {
-		return nil, fmt.Errorf("service %q has no launchd label: cannot restart via launchctl", name)
+		return nil, fmt.Errorf("%w: service %q has no launchd label: cannot restart via launchctl", ErrNotControllable, name)
 	}
 
 	before, _ := c.Status(ctx, name, def)
@@ -272,7 +272,7 @@ func (c *LaunchctlController) awaitNewPID(ctx context.Context, name string, def 
 func (c *LaunchctlController) Enable(ctx context.Context, name string, def ServiceDef) (*ServiceStatus, error) {
 	label := def.Launchd
 	if label == "" {
-		return nil, fmt.Errorf("service %q has no launchd label: cannot enable via launchctl", name)
+		return nil, fmt.Errorf("%w: service %q has no launchd label: cannot enable via launchctl", ErrNotControllable, name)
 	}
 	plistPath := plistPathForLabel(label)
 	exitCode := 0
@@ -292,7 +292,7 @@ func (c *LaunchctlController) Enable(ctx context.Context, name string, def Servi
 func (c *LaunchctlController) Disable(ctx context.Context, name string, def ServiceDef) (*ServiceStatus, error) {
 	label := def.Launchd
 	if label == "" {
-		return nil, fmt.Errorf("service %q has no launchd label: cannot disable via launchctl", name)
+		return nil, fmt.Errorf("%w: service %q has no launchd label: cannot disable via launchctl", ErrNotControllable, name)
 	}
 	plistPath := plistPathForLabel(label)
 	exitCode := 0

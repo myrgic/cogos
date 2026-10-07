@@ -228,3 +228,28 @@ func TestRestartPreflight_MissingPlist(t *testing.T) {
 		t.Fatalf("err=%v; want ErrNotControllable", err)
 	}
 }
+
+// Review #665: the waited path and the async path must agree for a managed
+// service with no launchd label, and every mutation route must treat that
+// precondition the same way (409, not 500). The real LaunchctlController is
+// wired (as boot.go now does); the label check precedes any launchctl call,
+// so nothing touches launchd.
+func TestServiceMutation_NoLaunchdLabel_Is409OnEveryRoute(t *testing.T) {
+	t.Parallel()
+	h := newMutationTestServer(t, testManifest(), NewLaunchctlController(), true)
+	// "mod3" in testManifest is kind=managed with no Launchd label.
+	for _, route := range []string{
+		"/v1/services/mod3/start",
+		"/v1/services/mod3/stop",
+		"/v1/services/mod3/restart",
+		"/v1/services/mod3/restart?wait=false",
+		"/v1/services/mod3/enable",
+		"/v1/services/mod3/disable",
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, route, nil))
+		if rec.Code != http.StatusConflict {
+			t.Errorf("POST %s: status=%d body=%s; want 409", route, rec.Code, rec.Body.String())
+		}
+	}
+}
