@@ -45,7 +45,7 @@ Total sites: 242  (cog: 100, home: 2, elsewhere: 14, unanchored: 85, dynamic: 41
 | `<Home>/.cog/vault/node-root-grant` | persistNodeRootGrant (`os.Rename`) | internal/engine/boot_node_root_grant.go:299 | internal:engine |
 | `<WorkspaceRoot>/.cog/run/bus` | (*ConsumerRegistry).persistLocked (`os.MkdirAll`) | internal/engine/bus_consumers.go:161 | internal:engine |
 | `<WorkspaceRoot>/.cog/run/bus/<call:pathsafe.SanitizeComponent>.cursors.jsonl` | (*ConsumerRegistry).persistLocked (`os.OpenFile`) | internal/engine/bus_consumers.go:166 | internal:engine |
-| `{root}/.cog/.state/constellation.db?mode=ro&_journal_mode=WAL&_busy_timeout=3000` | doctorIndexHealth (`sql.Open(sqlite3)`) | internal/engine/cli_doctor.go:1046 | internal:engine |
+| `{root}/.cog/.state/constellation.db?mode=ro&_journal_mode=WAL&_busy_timeout=3000` | doctorIndexHealth (`sql.Open(sqlite3)`) | internal/engine/cli_doctor.go:1035 | internal:engine |
 | `{home}/.cog/bin/cogos` | (*selfUpdater).runApply (`os.Rename`) | internal/engine/cli_selfupdate_unix.go:299 | internal:engine |
 | `{home}/.cog/bin/cogos` | (*selfUpdater).runApply (`os.Rename`) | internal/engine/cli_selfupdate_unix.go:303 | internal:engine |
 | `{home}/.cog/bin/cogos.bak.tmp` | copyFileMode (`os.OpenFile`) | internal/engine/cli_selfupdate_unix.go:730 | internal:engine |
@@ -163,7 +163,7 @@ These sites structurally resolved (the shape of the path is known) but the ROOT 
 | `{path}` | func literal (line 432) (`os.WriteFile`) | internal/engine/blobs_cmd.go:436 | internal:engine |
 | `{path}` | (*BlobStore).WritePointer (`os.WriteFile`) | internal/engine/blobstore.go:273 | internal:engine |
 | `:memory:` | func literal (line 49) (`sql.Open(sqlite3)`) | internal/engine/build_tags.go:50 | internal:engine |
-| `{path}?mode=ro&_busy_timeout=3000` | doctorOneStore (`sql.Open(sqlite3)`) | internal/engine/cli_doctor.go:1431 | internal:engine |
+| `{path}?mode=ro&_busy_timeout=3000` | doctorOneStore (`sql.Open(sqlite3)`) | internal/engine/cli_doctor.go:1420 | internal:engine |
 | `dirname({home}/.zshrc)` | addCogBinToPath (`os.MkdirAll`) | internal/engine/cli_install_unix.go:44 | internal:engine |
 | `{home}/.zshrc` | addCogBinToPath (`os.OpenFile`) | internal/engine/cli_install_unix.go:48 | internal:engine |
 | `{binPath}` | (*selfUpdater).rollback (`os.Rename`) | internal/engine/cli_selfupdate_unix.go:346 | internal:engine |
@@ -312,8 +312,8 @@ Total subprocess sites: 85
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, binPath, args...)` | internal/engine/cli_doctor_inference.go:313 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("git", "-C", dir, "ls-files", "--error-unmatch", filepath.Base(path))` | internal/engine/cli_doctor_secrets.go:382 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("git", "-C", dir, "check-ignore", "-q", filepath.Base(path))` | internal/engine/cli_doctor_secrets.go:389 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("tasklist", "/FI", "IMAGENAME eq syncthing.exe", "/FO", "CSV", "/NH")` | internal/engine/cli_doctor_syncthing.go:73 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("pgrep", "-x", "syncthing")` | internal/engine/cli_doctor_syncthing.go:86 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("tasklist", "/FI", "IMAGENAME eq syncthing.exe", "/FO", "CSV", "/NH")` | internal/engine/cli_doctor_syncthing.go:85 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("pgrep", "-x", "syncthing")` | internal/engine/cli_doctor_syncthing.go:98 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("git", "rev-parse", "--show-toplevel")` | internal/engine/cli_reconcile.go:271 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "launchctl", "kickstart", "-k", domainTarget)` | internal/engine/cli_selfupdate_unix.go:422 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, binPath, "version")` | internal/engine/cli_selfupdate_unix.go:673 | internal:engine |

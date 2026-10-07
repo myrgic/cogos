@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os/exec"
@@ -26,7 +27,14 @@ import (
 // Severity is WARN, never FAIL: Syncthing is not wrong in itself, and a node
 // with BEP disabled may run it legitimately. The detail says what to do.
 func doctorSyncthingConflict(g *DoctorGroup, bepEnabled bool, bepListen string) {
-	pids := syncthingProcesses()
+	pids, err := syncthingProcesses()
+	if err != nil {
+		// Could not observe the process table (no pgrep/tasklist, denied, ...).
+		// "I could not look" is UNKNOWN, never OK: doctor's lint contract is
+		// that an observation it could not perform is not a clean state.
+		g.add("syncthing conflict", StatusUnknown, fmt.Sprintf("could not list processes to look for a standalone syncthing: %v", err))
+		return
+	}
 	if len(pids) == 0 {
 		g.add("syncthing conflict", StatusOK, "no standalone syncthing process (kernel BEP is the only BEP speaker)")
 		return
@@ -61,18 +69,22 @@ func orDefault(s, d string) string {
 }
 
 // syncthingProcesses returns the pids of processes whose image name is
-// syncthing, on the host's native process lister. Empty on any error.
-// A package-level var so tests can inject a fixed list.
+// syncthing, on the host's native process lister. A nil error with an empty
+// list means "looked, none found"; a non-nil error means the lister itself
+// could not run or failed, so nothing was observed. A package-level var so
+// tests can inject a fixed list.
 var syncthingProcesses = findSyncthingProcesses
 
-func findSyncthingProcesses() []string {
+func findSyncthingProcesses() ([]string, error) {
 	var out []byte
 	var err error
 	switch runtime.GOOS {
 	case "windows":
+		// tasklist exits 0 even when nothing matches (it prints an INFO line),
+		// so any error here is a failure to observe.
 		out, err = exec.Command("tasklist", "/FI", "IMAGENAME eq syncthing.exe", "/FO", "CSV", "/NH").Output()
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("tasklist: %w", err)
 		}
 		var pids []string
 		for _, line := range strings.Split(string(out), "\n") {
@@ -81,13 +93,19 @@ func findSyncthingProcesses() []string {
 				pids = append(pids, strings.Trim(f[1], "\""))
 			}
 		}
-		return pids
+		return pids, nil
 	default:
 		out, err = exec.Command("pgrep", "-x", "syncthing").Output()
 		if err != nil {
-			return nil // pgrep exits 1 when nothing matches
+			// pgrep exits 1 when nothing matches: that is an observation. Any
+			// other failure (binary missing, exit >1, signal) is not.
+			var ee *exec.ExitError
+			if errors.As(err, &ee) && ee.ExitCode() == 1 {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("pgrep: %w", err)
 		}
-		return strings.Fields(string(out))
+		return strings.Fields(string(out)), nil
 	}
 }
 

@@ -651,7 +651,7 @@
     },
     {
       "file": "internal/engine/cli_doctor.go",
-      "line": 1046,
+      "line": 1035,
       "column": 13,
       "primitive": "sql.Open(sqlite3)",
       "func": "doctorIndexHealth",
@@ -663,7 +663,7 @@
     },
     {
       "file": "internal/engine/cli_doctor.go",
-      "line": 1431,
+      "line": 1420,
       "column": 13,
       "primitive": "sql.Open(sqlite3)",
       "func": "doctorOneStore",
@@ -3060,7 +3060,7 @@
     },
     {
       "file": "internal/engine/cli_doctor_syncthing.go",
-      "line": 73,
+      "line": 85,
       "column": 14,
       "func": "findSyncthingProcesses",
       "subsystem": "internal:engine",
@@ -3070,7 +3070,7 @@
     },
     {
       "file": "internal/engine/cli_doctor_syncthing.go",
-      "line": 86,
+      "line": 98,
       "column": 14,
       "func": "findSyncthingProcesses",
       "subsystem": "internal:engine",
