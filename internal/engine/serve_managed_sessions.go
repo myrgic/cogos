@@ -50,6 +50,8 @@ func managedSessionStatus(err error) (int, string) {
 	switch {
 	case errors.Is(err, ErrManagedSessionNotFound), errors.Is(err, ErrPermissionNotFound):
 		return http.StatusNotFound, "not_found"
+	case errors.Is(err, ErrInvalidManagedSession):
+		return http.StatusBadRequest, "invalid_request"
 	case errors.Is(err, ErrTurnInFlight), errors.Is(err, ErrSessionNotLive):
 		return http.StatusConflict, "conflict"
 	default:

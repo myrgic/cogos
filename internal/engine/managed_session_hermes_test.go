@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -486,5 +487,81 @@ func TestHermesACPDriver_ResumeOfCrashedDetachesOld(t *testing.T) {
 	}
 	if d.Get(old.ID()) != fresh || fresh.State() != StateLive {
 		t.Fatalf("registry does not point at the live replacement (state %s)", fresh.State())
+	}
+}
+
+// Review #666 round 2: the old generation's watch() goroutine ends its
+// restart with setState(Live) for each session it re-loaded. If the NEW
+// process crashes inside CrashWindow first, its own watcher has already
+// decided Crashed (terminal, no retry); a stale Live landing after that
+// would leave the session "live" over a dead connection forever.
+func TestHermesACPDriver_StaleRestartCannotOverwriteNewCrash(t *testing.T) {
+	loaded, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	d := fakeHermesDriver(t, func(c *HermesACPDriverConfig) {
+		c.CrashWindow = 400 * time.Millisecond
+		c.RestartBackoff = time.Millisecond
+		c.afterRestartLoad = func(*HermesACPSession) {
+			once.Do(func() { close(loaded) })
+			<-release // old generation parked between its session/load and its state write
+		}
+	})
+	s, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond) // outlive CrashWindow so the first crash is "late" and restarts
+	_, _ = s.Prompt(json.RawMessage(`"crash now"`))
+	<-loaded
+
+	// The new process dies at once: inside CrashWindow, so its watcher marks Crashed.
+	s.proc.mu.Lock()
+	cmd := s.proc.cmd
+	s.proc.mu.Unlock()
+	_ = cmd.Process.Kill()
+	waitState(t, s, StateCrashed)
+
+	close(release) // the stale old-generation goroutine now tries setState(Live)
+	time.Sleep(300 * time.Millisecond)
+	if st := s.State(); st != StateCrashed {
+		t.Fatalf("stale restart overwrote the new generation's verdict: state %s, want crashed", st)
+	}
+}
+
+func TestHermesACPDriver_CreateRejectsForkWithLoad(t *testing.T) {
+	d := fakeHermesDriver(t, nil)
+	a, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = d.Create(context.Background(), HermesACPOpts{ForkOf: a.ID(), Load: "other"})
+	if !errors.Is(err, ErrInvalidManagedSession) {
+		t.Fatalf("fork_of+load returned %v, want ErrInvalidManagedSession", err)
+	}
+	if n := len(d.List()); n != 1 {
+		t.Fatalf("a rejected create registered a session (%d sessions)", n)
+	}
+}
+
+// Sibling of review #666 round 2: Create's own Live write is subject to the
+// same stale-write hazard. If the process dies after session/new returned but
+// before registration, Create must fail, not register a "live" session over a
+// dead connection.
+func TestHermesACPDriver_CreateOverDeadProcessFails(t *testing.T) {
+	d := fakeHermesDriver(t, func(c *HermesACPDriverConfig) {
+		c.afterCreateCall = func(p *hermesProcess) {
+			p.mu.Lock()
+			cmd, conn := p.cmd, p.conn
+			p.mu.Unlock()
+			_ = cmd.Process.Kill()
+			<-conn.Done()
+		}
+	})
+	s, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err == nil {
+		t.Fatalf("Create over a dead process returned a session in state %s", s.State())
+	}
+	if n := len(d.List()); n != 0 {
+		t.Fatalf("a failed create left %d session(s) registered", n)
 	}
 }

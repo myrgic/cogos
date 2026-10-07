@@ -48,6 +48,7 @@ const DriverHermesACP = "hermes-acp"
 var (
 	ErrManagedSessionNotFound = errors.New("managed session: not found")
 	ErrTurnInFlight           = errors.New("managed session: a turn is already in flight")
+	ErrInvalidManagedSession  = errors.New("managed session: invalid request")
 	ErrPermissionNotFound     = errors.New("managed session: no such pending permission request")
 )
 
@@ -79,6 +80,13 @@ type HermesACPDriverConfig struct {
 	CrashWindow    time.Duration // default 10s
 	MaxRestarts    int           // default 3
 	RestartBackoff time.Duration // default 1s, doubled per restart
+
+	// afterRestartLoad is a test seam: called after each restart's
+	// session/load returns, before its state write.
+	afterRestartLoad func(*HermesACPSession)
+	// afterCreateCall is a test seam: called in Create after the agent's
+	// session/new|load|fork returned, before the session is registered Live.
+	afterCreateCall func(*hermesProcess)
 }
 
 func (c *HermesACPDriverConfig) defaults() {
@@ -160,10 +168,10 @@ func (d *HermesACPDriver) newProcess(profile, cwd string) *hermesProcess {
 
 // start spawns the subprocess and runs initialize. The process is NOT tied
 // to any request context: the kernel owns its lifetime.
-func (p *hermesProcess) start(ctx context.Context) error {
+func (p *hermesProcess) start(ctx context.Context) (*acprpc.Conn, error) {
 	argv := p.d.cfg.Command(p.profile)
 	if len(argv) == 0 {
-		return errors.New("hermes-acp: empty command")
+		return nil, errors.New("hermes-acp: empty command")
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = p.cwd
@@ -174,14 +182,14 @@ func (p *hermesProcess) start(ctx context.Context) error {
 	cmd.Stderr = io.Discard
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("hermes-acp: start %v: %w", argv, err)
+		return nil, fmt.Errorf("hermes-acp: start %v: %w", argv, err)
 	}
 	conn := acprpc.NewConn(stdout, stdin, p)
 	p.mu.Lock()
@@ -201,13 +209,13 @@ func (p *hermesProcess) start(ctx context.Context) error {
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return fmt.Errorf("hermes-acp: initialize: %w", err)
+		return nil, fmt.Errorf("hermes-acp: initialize: %w", err)
 	}
 	p.mu.Lock()
 	p.agentInfo = res.AgentInfo
 	p.mu.Unlock()
 	go p.watch(cmd, conn)
-	return nil
+	return conn, nil
 }
 
 func (p *hermesProcess) currentConn() *acprpc.Conn {
@@ -258,7 +266,8 @@ func (p *hermesProcess) watch(cmd *exec.Cmd, conn *acprpc.Conn) {
 		return
 	}
 	p.mu.Unlock()
-	if err := p.start(context.Background()); err != nil {
+	conn, err := p.start(context.Background())
+	if err != nil {
 		for _, s := range sessions {
 			s.setState(StateCrashed, err)
 		}
@@ -271,16 +280,43 @@ func (p *hermesProcess) watch(cmd *exec.Cmd, conn *acprpc.Conn) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), p.d.cfg.InitTimeout)
-		err := p.currentConn().Call(ctx, "session/load", map[string]any{
+		err := conn.Call(ctx, "session/load", map[string]any{
 			"sessionId": s.id, "cwd": s.cwd, "mcpServers": s.mcpServers(),
 		}, nil)
 		cancel()
+		if hook := p.d.cfg.afterRestartLoad; hook != nil {
+			hook(s)
+		}
 		if err != nil {
-			s.setState(StateCrashed, fmt.Errorf("restart: session/load: %w", err))
+			p.setIfCurrent(conn, s, StateCrashed, fmt.Errorf("restart: session/load: %w", err))
 			continue
 		}
-		s.setState(StateLive, nil)
+		p.setIfCurrent(conn, s, StateLive, nil)
 	}
+}
+
+// setIfCurrent applies a state change decided by a restart that loaded
+// sessions into conn, but only while conn is still this process's current
+// connection and has not died. This goroutine is the OLD generation's
+// watcher: the new generation has its own watch() that decides its own
+// crash policy, and a stale Live (or Crashed) landing after that decision
+// would overwrite it, leaving a session "live" over a dead connection with
+// no retry. Checked under p.mu, the lock the new watcher takes to snapshot
+// its sessions, so either this write lands first and the new watcher's
+// verdict follows it, or conn is already Done and this write is skipped.
+func (p *hermesProcess) setIfCurrent(conn *acprpc.Conn, s *HermesACPSession, st ManagedSessionState, err error) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.conn != conn {
+		return false
+	}
+	select {
+	case <-conn.Done():
+		return false
+	default:
+	}
+	s.setState(st, err)
+	return true
 }
 
 // stop closes stdin (graceful), then kills after a grace period.
@@ -613,6 +649,9 @@ func (s *HermesACPSession) cancelAllPermissions(by string) {
 // already Live or restarting returns that session (idempotent attach,
 // ADR-093 §6); overlapping loads of one id share a single process.
 func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*HermesACPSession, error) {
+	if opts.ForkOf != "" && opts.Load != "" {
+		return nil, fmt.Errorf("%w: fork_of and load are mutually exclusive", ErrInvalidManagedSession)
+	}
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
@@ -690,7 +729,7 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		}
 	} else {
 		proc = d.newProcess(opts.Profile, opts.Cwd)
-		if err := proc.start(ctx); err != nil {
+		if _, err := proc.start(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -746,7 +785,18 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		proc.sessions[sid] = sess
 		proc.mu.Unlock()
 	}
-	sess.setState(StateLive, nil)
+	if hook := d.cfg.afterCreateCall; hook != nil {
+		hook(proc)
+	}
+	// The process may have died while the session/new|load|fork call was in
+	// flight; its watcher then already decided this session's fate. Only go
+	// Live over a connection that is still current and alive (same guard as
+	// the restart path), else report the death instead of registering a
+	// "live" session over a dead process.
+	if !proc.setIfCurrent(proc.currentConn(), sess, StateLive, nil) {
+		d.detach(sess)
+		return nil, fmt.Errorf("hermes-acp: create session: agent process exited during session setup")
+	}
 
 	d.mu.Lock()
 	replaced := d.sessions[sid]
