@@ -63,6 +63,11 @@ type ChannelConfig struct {
 	NSFW                 bool                `yaml:"nsfw"`
 	ManagedBy            string              `yaml:"managed_by"`
 	PermissionOverwrites []PermOverwriteConf `yaml:"permission_overwrites"`
+
+	// Forum-only (type: forum). See discord_forum.go for semantics.
+	Tags          []TagConfig `yaml:"tags,omitempty"`
+	DefaultSort   string      `yaml:"default_sort,omitempty"`   // latest_activity | creation_date
+	DefaultLayout string      `yaml:"default_layout,omitempty"` // list | gallery
 }
 
 type PermOverwriteConf struct {
@@ -93,6 +98,12 @@ type DiscordChannel struct {
 	NSFW                 bool                   `json:"nsfw"`
 	RateLimitPerUser     int                    `json:"rate_limit_per_user"`
 	ParentID             *string                `json:"parent_id"`
+
+	// Forum-only; nil/empty on other channel types.
+	AvailableTags        []DiscordForumTag       `json:"available_tags,omitempty"`
+	DefaultReactionEmoji *DiscordDefaultReaction `json:"default_reaction_emoji,omitempty"`
+	DefaultSortOrder     *int                    `json:"default_sort_order,omitempty"`
+	DefaultForumLayout   *int                    `json:"default_forum_layout,omitempty"`
 }
 
 type DiscordPermOverwrite struct {
@@ -264,6 +275,14 @@ type discordClient struct {
 	httpClient *http.Client
 	apiCalls   int
 	maxCalls   int
+	baseURL    string // defaults to discordAPIBase; overridable for tests
+}
+
+func (c *discordClient) apiBase() string {
+	if c.baseURL != "" {
+		return c.baseURL
+	}
+	return discordAPIBase
 }
 
 func newDiscordClient(token string, maxCalls int) *discordClient {
@@ -280,7 +299,7 @@ func (c *discordClient) get(path string) ([]byte, error) {
 	}
 	c.apiCalls++
 
-	url := discordAPIBase + path
+	url := c.apiBase() + path
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -315,7 +334,7 @@ func (c *discordClient) doMutation(method, path string, payload any) ([]byte, er
 	}
 	c.apiCalls++
 
-	url := discordAPIBase + path
+	url := c.apiBase() + path
 
 	var bodyReader io.Reader
 	if payload != nil {
@@ -484,7 +503,10 @@ func runTokenCommand(root string, argv []string) (string, error) {
 
 // ─── Diff / plan computation ────────────────────────────────────────────────
 
-func computePlan(cfg *DiscordServerConfig, channels []DiscordChannel, roles []DiscordRole) *Plan {
+func computePlan(cfg *DiscordServerConfig, channels []DiscordChannel, roles []DiscordRole) (*Plan, error) {
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
 	plan := &Plan{
 		GuildID:     cfg.Guild.ID,
 		GuildName:   cfg.Guild.Name,
@@ -583,7 +605,7 @@ func computePlan(cfg *DiscordServerConfig, channels []DiscordChannel, roles []Di
 							Action:       "update",
 							ResourceType: "channel",
 							Name:         ch.Name,
-							Details:      map[string]any{"changes": chDiffs, "id": liveCh.ID, "category": cat.Name},
+							Details:      channelUpdateDetails(ch, chDiffs, liveCh.ID, cat.Name),
 						})
 					}
 				} else {
@@ -591,13 +613,7 @@ func computePlan(cfg *DiscordServerConfig, channels []DiscordChannel, roles []Di
 						Action:       "create",
 						ResourceType: "channel",
 						Name:         ch.Name,
-						Details: map[string]any{
-							"type":     ch.Type,
-							"category": cat.Name,
-							"topic":    ch.Topic,
-							"position": ch.Position,
-							"slowmode": ch.Slowmode,
-						},
+						Details:      channelCreateDetails(cat.Name, ch),
 					})
 				}
 			}
@@ -614,13 +630,7 @@ func computePlan(cfg *DiscordServerConfig, channels []DiscordChannel, roles []Di
 					Action:       "create",
 					ResourceType: "channel",
 					Name:         ch.Name,
-					Details: map[string]any{
-						"type":     ch.Type,
-						"category": cat.Name,
-						"topic":    ch.Topic,
-						"position": ch.Position,
-						"slowmode": ch.Slowmode,
-					},
+					Details:      channelCreateDetails(cat.Name, ch),
 				})
 			}
 		}
@@ -724,7 +734,40 @@ func computePlan(cfg *DiscordServerConfig, channels []DiscordChannel, roles []Di
 		}
 	}
 
-	return plan
+	return plan, nil
+}
+
+// channelCreateDetails is the plan-action detail map for a channel create.
+func channelCreateDetails(catName string, ch ChannelConfig) map[string]any {
+	d := map[string]any{
+		"type":     ch.Type,
+		"category": catName,
+		"topic":    ch.Topic,
+		"position": ch.Position,
+		"slowmode": ch.Slowmode,
+	}
+	forumDetails(d, ch)
+	return d
+}
+
+// channelUpdateDetails is the plan-action detail map for a channel update.
+// Forum fields ride along only when their diff line is present, so an update
+// that touches only the topic does not resend the tag list.
+func channelUpdateDetails(ch ChannelConfig, diffs []string, id, catName string) map[string]any {
+	d := map[string]any{"changes": diffs, "id": id, "category": catName}
+	var want ChannelConfig
+	for _, line := range diffs {
+		switch {
+		case strings.HasPrefix(line, "tags:"):
+			want.Tags = ch.Tags
+		case strings.HasPrefix(line, "default_sort:"):
+			want.DefaultSort = ch.DefaultSort
+		case strings.HasPrefix(line, "default_layout:"):
+			want.DefaultLayout = ch.DefaultLayout
+		}
+	}
+	forumDetails(d, want)
+	return d
 }
 
 func diffRole(desired RoleConfig, live DiscordRole) []string {
@@ -772,6 +815,7 @@ func diffChannel(desired ChannelConfig, live DiscordChannel, expectedParentID st
 	if live.ParentID != nil && *live.ParentID != expectedParentID {
 		diffs = append(diffs, "parent: moved to correct category")
 	}
+	diffs = append(diffs, diffForum(desired, live)...)
 
 	return diffs
 }
@@ -792,6 +836,8 @@ type ApplyResult struct {
 	Status    string `json:"status"` // succeeded, failed, skipped
 	Error     string `json:"error,omitempty"`
 	CreatedID string `json:"created_id,omitempty"`
+	// TagIDs is tag name -> Discord id as returned by a forum create/update.
+	TagIDs map[string]string `json:"tag_ids,omitempty"`
 }
 
 func applyPlan(client *discordClient, plan *Plan, guildID string, roles []DiscordRole, channels []DiscordChannel) ([]ApplyResult, error) {
@@ -930,6 +976,7 @@ func applyPlan(client *discordClient, plan *Plan, guildID string, roles []Discor
 			if sm, ok := a.Details["slowmode"]; ok {
 				payload["rate_limit_per_user"] = sm
 			}
+			forumPayload(payload, a.Details, nil)
 
 			// Resolve parent category ID (newly created or pre-existing)
 			if catName != "" {
@@ -950,7 +997,7 @@ func applyPlan(client *discordClient, plan *Plan, guildID string, roles []Discor
 			var created DiscordChannel
 			json.Unmarshal(body, &created)
 			createdChannelIDs[strings.ToLower(a.Name)] = created.ID
-			results = append(results, ApplyResult{Phase: "channels", Action: "create", Name: a.Name, Status: "succeeded", CreatedID: created.ID})
+			results = append(results, ApplyResult{Phase: "channels", Action: "create", Name: a.Name, Status: "succeeded", CreatedID: created.ID, TagIDs: tagIDsByName(created.AvailableTags)})
 		}
 
 		if a.Action == "update" {
@@ -984,12 +1031,25 @@ func applyPlan(client *discordClient, plan *Plan, guildID string, roles []Discor
 				}
 			}
 
+			// Tag ids come from the channel as fetched for this apply, so
+			// name-matched tags keep their ids even if they moved since plan.
+			var liveTags []DiscordForumTag
+			for _, c := range channels {
+				if c.ID == id {
+					liveTags = c.AvailableTags
+					break
+				}
+			}
+			forumPayload(payload, a.Details, liveTags)
+
 			if len(payload) > 0 {
-				_, err := client.doMutation("PATCH", fmt.Sprintf("/channels/%s", id), payload)
+				body, err := client.doMutation("PATCH", fmt.Sprintf("/channels/%s", id), payload)
 				if err != nil {
 					results = append(results, ApplyResult{Phase: "channels", Action: "update", Name: a.Name, Status: "failed", Error: err.Error()})
 				} else {
-					results = append(results, ApplyResult{Phase: "channels", Action: "update", Name: a.Name, Status: "succeeded"})
+					var updated DiscordChannel
+					json.Unmarshal(body, &updated)
+					results = append(results, ApplyResult{Phase: "channels", Action: "update", Name: a.Name, Status: "succeeded", TagIDs: tagIDsByName(updated.AvailableTags)})
 				}
 			}
 		}
@@ -1132,6 +1192,9 @@ type DiscordState struct {
 	GuildID     string          `json:"guild_id"`
 	GeneratedAt string          `json:"generated_at"`
 	Resources   []StateResource `json:"resources"`
+	// TagIDs maps channel address -> forum tag name -> Discord tag id, so a
+	// consumer can resolve a tag name without re-fetching the channel.
+	TagIDs map[string]map[string]string `json:"tag_ids,omitempty"`
 }
 
 type StateResource struct {
@@ -1336,7 +1399,10 @@ func diffRolePermissions(desired []string, live string) string {
 
 // ─── State-aware plan computation ────────────────────────────────────────────
 
-func computePlanWithState(cfg *DiscordServerConfig, channels []DiscordChannel, roles []DiscordRole, state *DiscordState) *Plan {
+func computePlanWithState(cfg *DiscordServerConfig, channels []DiscordChannel, roles []DiscordRole, state *DiscordState) (*Plan, error) {
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
 	if state == nil {
 		return computePlan(cfg, channels, roles)
 	}
@@ -1582,7 +1648,7 @@ func computePlanWithState(cfg *DiscordServerConfig, channels []DiscordChannel, r
 							Action:       "update",
 							ResourceType: "channel",
 							Name:         ch.Name,
-							Details:      map[string]any{"changes": chDiffs, "id": liveCh.ID, "category": cat.Name},
+							Details:      channelUpdateDetails(ch, chDiffs, liveCh.ID, cat.Name),
 						})
 					}
 				} else {
@@ -1590,13 +1656,7 @@ func computePlanWithState(cfg *DiscordServerConfig, channels []DiscordChannel, r
 						Action:       "create",
 						ResourceType: "channel",
 						Name:         ch.Name,
-						Details: map[string]any{
-							"type":     ch.Type,
-							"category": cat.Name,
-							"topic":    ch.Topic,
-							"position": ch.Position,
-							"slowmode": ch.Slowmode,
-						},
+						Details:      channelCreateDetails(cat.Name, ch),
 					})
 				}
 			}
@@ -1615,13 +1675,7 @@ func computePlanWithState(cfg *DiscordServerConfig, channels []DiscordChannel, r
 					Action:       "create",
 					ResourceType: "channel",
 					Name:         ch.Name,
-					Details: map[string]any{
-						"type":     ch.Type,
-						"category": cat.Name,
-						"topic":    ch.Topic,
-						"position": ch.Position,
-						"slowmode": ch.Slowmode,
-					},
+					Details:      channelCreateDetails(cat.Name, ch),
 				})
 			}
 		}
@@ -1885,7 +1939,7 @@ func computePlanWithState(cfg *DiscordServerConfig, channels []DiscordChannel, r
 	// suppress unused warning for stateByID
 	_ = stateByID
 
-	return plan
+	return plan, nil
 }
 
 // ─── Build state from live server data ───────────────────────────────────────
@@ -2045,6 +2099,12 @@ func buildStateFromLive(guildID string, cfg *DiscordServerConfig, channels []Dis
 		addr := channelAddress(catName, ch.Name)
 		if catName == "" {
 			addr = "channel/" + ch.Name // uncategorized
+		}
+		if ids := tagIDsByName(ch.AvailableTags); ids != nil {
+			if state.TagIDs == nil {
+				state.TagIDs = map[string]map[string]string{}
+			}
+			state.TagIDs[addr] = ids
 		}
 
 		state.Resources = append(state.Resources, StateResource{
