@@ -3,8 +3,10 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -296,5 +298,193 @@ func TestEventRing_ReplayGapAndOverflow(t *testing.T) {
 	r.Close()
 	if _, ok := <-r.Subscribe(0, 1).Live; ok {
 		t.Fatal("subscribe after close should yield a closed channel")
+	}
+}
+
+// countingDriver wraps fakeHermesDriver's command with a spawn counter and an
+// optional gate: while gate is non-nil every spawn blocks in Command until it
+// is closed, which holds a Create inside its load deterministically.
+func countingDriver(t *testing.T, gate chan struct{}, mut func(*HermesACPDriverConfig)) (*HermesACPDriver, *atomic.Int32) {
+	t.Helper()
+	var spawns atomic.Int32
+	d := fakeHermesDriver(t, func(c *HermesACPDriverConfig) {
+		c.Command = func(string) []string {
+			spawns.Add(1)
+			if gate != nil {
+				<-gate
+			}
+			return []string{os.Args[0], "-test.run=^$"}
+		}
+		if mut != nil {
+			mut(c)
+		}
+	})
+	return d, &spawns
+}
+
+func waitState(t *testing.T, s *HermesACPSession, want ManagedSessionState) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for s.State() != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("session %s: state %s, want %s", s.ID(), s.State(), want)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// Review #666 finding 1a: a resume that arrives while the driver's own
+// crash-restart is in flight (state Starting) must attach to that session,
+// not spawn a second process and load the same id into it.
+func TestHermesACPDriver_ResumeDuringRestartAttaches(t *testing.T) {
+	d, spawns := countingDriver(t, nil, func(c *HermesACPDriverConfig) {
+		c.CrashWindow = time.Nanosecond
+		c.RestartBackoff = 1500 * time.Millisecond // holds the Starting window open
+	})
+	s, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = s.Prompt(json.RawMessage(`"crash now"`))
+	waitState(t, s, StateStarting)
+
+	got, err := d.Create(context.Background(), HermesACPOpts{Load: s.ID(), Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != s {
+		t.Fatal("resume during restart returned a different session object (split brain)")
+	}
+	waitState(t, s, StateLive)
+	if n := spawns.Load(); n != 2 { // the original process + the driver's own restart; the resume spawns none
+		t.Fatalf("spawned %d hermes processes, want 2 (original + restart)", n)
+	}
+}
+
+// Review #666 finding 1b: two overlapping resumes of one unregistered id
+// share one process and one session.
+func TestHermesACPDriver_ConcurrentLoadsShareOneProcess(t *testing.T) {
+	gate := make(chan struct{})
+	d, spawns := countingDriver(t, gate, nil)
+	type res struct {
+		s   *HermesACPSession
+		err error
+	}
+	out := make(chan res, 2)
+	load := func() {
+		s, err := d.Create(context.Background(), HermesACPOpts{Load: "ext-1", Cwd: t.TempDir()})
+		out <- res{s, err}
+	}
+	go load()
+	for spawns.Load() < 1 { // first load is now parked inside Command, holding the claim
+		time.Sleep(time.Millisecond)
+	}
+	go load()
+	time.Sleep(200 * time.Millisecond) // a second spawn, if the bug is present, happens within microseconds
+	if n := spawns.Load(); n != 1 {
+		close(gate)
+		t.Fatalf("second concurrent load spawned its own process (spawns=%d)", n)
+	}
+	close(gate)
+	a, b := <-out, <-out
+	if a.err != nil || b.err != nil {
+		t.Fatalf("loads failed: %v / %v", a.err, b.err)
+	}
+	if a.s != b.s {
+		t.Fatal("concurrent loads of one id returned different session objects")
+	}
+	if n := spawns.Load(); n != 1 {
+		t.Fatalf("spawns = %d, want 1", n)
+	}
+}
+
+// Review #666 finding 2: a session deleted while its process is in the
+// crash-restart backoff must stay Detached and must not be session/load'ed.
+func TestHermesACPDriver_DeleteDuringRestartStaysDeleted(t *testing.T) {
+	d, _ := countingDriver(t, nil, func(c *HermesACPDriverConfig) {
+		c.CrashWindow = time.Nanosecond
+		c.RestartBackoff = 1500 * time.Millisecond
+	})
+	a, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := d.Create(context.Background(), HermesACPOpts{ForkOf: a.ID()}) // shares a's process
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = a.Prompt(json.RawMessage(`"crash now"`))
+	waitState(t, a, StateStarting)
+	waitState(t, b, StateStarting)
+	if err := d.Delete(b.ID()); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, a, StateLive) // the restart finished and loaded a
+	if st := b.State(); st != StateDetached {
+		t.Fatalf("deleted session resurrected: state %s", st)
+	}
+	evs, _ := b.Events().Since(0)
+	for _, ev := range evs {
+		if ev.Kind == MSEventSessionUpdate && strings.Contains(string(ev.Data), "replayed history for "+b.ID()) {
+			t.Fatal("restart session/load'ed a session that was deleted during the backoff")
+		}
+	}
+}
+
+// A Delete that lands while a load of that id is still in flight is honoured
+// when the load finishes: the id is not resurrected and the process is not leaked.
+func TestHermesACPDriver_DeleteDuringLoadIsHonoured(t *testing.T) {
+	gate := make(chan struct{})
+	d, _ := countingDriver(t, gate, nil)
+	done := make(chan error, 1)
+	go func() {
+		_, err := d.Create(context.Background(), HermesACPOpts{Load: "ext-2", Cwd: t.TempDir()})
+		done <- err
+	}()
+	for {
+		d.mu.Lock()
+		_, inflight := d.loads["ext-2"]
+		d.mu.Unlock()
+		if inflight {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := d.Delete("ext-2"); err != nil {
+		t.Fatal(err)
+	}
+	close(gate)
+	if err := <-done; !errors.Is(err, ErrManagedSessionNotFound) {
+		t.Fatalf("load of a deleted id returned %v, want ErrManagedSessionNotFound", err)
+	}
+	if d.Get("ext-2") != nil {
+		t.Fatal("deleted id is registered after its load finished")
+	}
+}
+
+// Sibling of review #666 finding 1: resuming a Crashed session replaces its
+// registry entry, so the old one must be detached (not left behind with a
+// live process and a ring nobody serves).
+func TestHermesACPDriver_ResumeOfCrashedDetachesOld(t *testing.T) {
+	d := fakeHermesDriver(t, nil) // CrashWindow = 1h: an early crash is terminal
+	old, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = old.Prompt(json.RawMessage(`"crash now"`))
+	waitState(t, old, StateCrashed)
+
+	fresh, err := d.Create(context.Background(), HermesACPOpts{Load: old.ID(), Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh == old {
+		t.Fatal("resume of a crashed session returned the crashed object")
+	}
+	if st := old.State(); st != StateDetached {
+		t.Fatalf("old crashed session state = %s, want detached (orphaned otherwise)", st)
+	}
+	if d.Get(old.ID()) != fresh || fresh.State() != StateLive {
+		t.Fatalf("registry does not point at the live replacement (state %s)", fresh.State())
 	}
 }

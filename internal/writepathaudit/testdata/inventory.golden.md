@@ -325,7 +325,7 @@ Total subprocess sites: 83
 | _(not set — inherits the process's own working directory)_ | `exec.Command("taskkill", "/PID", strconv.Itoa(pid))` | internal/engine/daemon_stop_windows.go:37 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))` | internal/engine/daemon_stop_windows.go:56 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH")` | internal/engine/daemon_stop_windows.go:77 | internal:engine |
-| `{cwd}` | `exec.Command(argv[0], argv[1:]...)` | internal/engine/managed_session_hermes.go:157 | internal:engine |
+| `{cwd}` | `exec.Command(argv[0], argv[1:]...)` | internal/engine/managed_session_hermes.go:168 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "python3", cmdArgs...)` | internal/engine/mcp_architecture.go:156 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command(player, args...)` | internal/engine/mcp_modality_proxy.go:879 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, rgPath, args...)` | internal/engine/mcp_server.go:3268 | internal:engine |

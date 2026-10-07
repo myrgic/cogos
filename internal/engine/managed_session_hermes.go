@@ -116,13 +116,24 @@ type HermesACPDriver struct {
 
 	mu       sync.Mutex
 	sessions map[string]*HermesACPSession
+	loads    map[string]*loadClaim // in-flight Create{Load: id}, one per id
 	closed   bool
+}
+
+// loadClaim is the single in-flight load of one session id. A second
+// Create{Load: id} (an overlapping /resume) waits on done and returns the
+// same result instead of spawning a second process for the same session.
+type loadClaim struct {
+	done      chan struct{}
+	sess      *HermesACPSession
+	err       error
+	cancelled bool // Delete(id) arrived while the load was in flight; guarded by HermesACPDriver.mu
 }
 
 // NewHermesACPDriver returns a driver with no sessions.
 func NewHermesACPDriver(cfg HermesACPDriverConfig) *HermesACPDriver {
 	cfg.defaults()
-	return &HermesACPDriver{cfg: cfg, sessions: map[string]*HermesACPSession{}}
+	return &HermesACPDriver{cfg: cfg, sessions: map[string]*HermesACPSession{}, loads: map[string]*loadClaim{}}
 }
 
 // ── process ─────────────────────────────────────────────────────────────────
@@ -254,6 +265,11 @@ func (p *hermesProcess) watch(cmd *exec.Cmd, conn *acprpc.Conn) {
 		return
 	}
 	for _, s := range sessions {
+		// A session deleted during the backoff or the restart is gone from
+		// p.sessions: do not load it into the new process.
+		if p.session(s.id) != s {
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), p.d.cfg.InitTimeout)
 		err := p.currentConn().Call(ctx, "session/load", map[string]any{
 			"sessionId": s.id, "cwd": s.cwd, "mcpServers": s.mcpServers(),
@@ -402,7 +418,9 @@ func (s *HermesACPSession) State() ManagedSessionState {
 
 func (s *HermesACPSession) setState(st ManagedSessionState, err error) {
 	s.mu.Lock()
-	if s.state == st && err == nil {
+	// Detached is terminal: Delete() removed the session, so a restart that
+	// snapshotted it earlier must not resurrect it (Starting/Live/Crashed).
+	if s.state == StateDetached || (s.state == st && err == nil) {
 		s.mu.Unlock()
 		return
 	}
@@ -461,6 +479,11 @@ func (s *HermesACPSession) Prompt(content json.RawMessage) (string, error) {
 		blocks, _ = json.Marshal([]map[string]any{{"type": "text", "text": text}})
 	}
 	s.mu.Lock()
+	if s.state != StateLive { // re-check under the lock that registers the turn: it may have changed since live()
+		st := s.state
+		s.mu.Unlock()
+		return "", fmt.Errorf("%w: session %s is %s", ErrSessionNotLive, s.id, st)
+	}
 	if s.turn != nil {
 		s.mu.Unlock()
 		return "", ErrTurnInFlight
@@ -586,7 +609,9 @@ func (s *HermesACPSession) cancelAllPermissions(by string) {
 
 // Create starts a new session (fresh process + session/new), forks an
 // existing managed session (its process + session/fork), or loads an
-// on-disk session (fresh process + session/load).
+// on-disk session (fresh process + session/load). A load of an id that is
+// already Live or restarting returns that session (idempotent attach,
+// ADR-093 §6); overlapping loads of one id share a single process.
 func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*HermesACPSession, error) {
 	d.mu.Lock()
 	if d.closed {
@@ -601,14 +626,52 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 			return nil, fmt.Errorf("%w: fork_of %s", ErrManagedSessionNotFound, opts.ForkOf)
 		}
 	}
-	if opts.Load != "" {
-		if existing := d.sessions[opts.Load]; existing != nil && existing.State() == StateLive {
+	if opts.Load == "" {
+		d.mu.Unlock()
+		return d.create(ctx, opts, parent)
+	}
+	// Decided under d.mu so two resumes of one id cannot both start a
+	// process. Live: return it. Starting: the driver's own crash-restart is
+	// in flight; return it too (the caller sees state=starting and tails
+	// events) instead of racing it with a second process for the same id.
+	if existing := d.sessions[opts.Load]; existing != nil {
+		if st := existing.State(); st == StateLive || st == StateStarting {
 			d.mu.Unlock()
-			return existing, nil // idempotent attach (ADR-093 §6)
+			return existing, nil
 		}
 	}
+	if claim := d.loads[opts.Load]; claim != nil { // a load of this id is in flight: share it
+		d.mu.Unlock()
+		select {
+		case <-claim.done:
+			return claim.sess, claim.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	claim := &loadClaim{done: make(chan struct{})}
+	d.loads[opts.Load] = claim
 	d.mu.Unlock()
 
+	claim.sess, claim.err = d.create(ctx, opts, parent)
+
+	d.mu.Lock()
+	delete(d.loads, opts.Load)
+	cancelled := claim.cancelled
+	d.mu.Unlock()
+	if cancelled && claim.sess != nil {
+		// Delete(id) landed while the load was in flight and found nothing
+		// registered yet: honour it now, so a deleted id is not resurrected.
+		_ = d.Delete(claim.sess.id)
+		claim.sess, claim.err = nil, fmt.Errorf("%w: %s deleted during load", ErrManagedSessionNotFound, opts.Load)
+	}
+	close(claim.done)
+	return claim.sess, claim.err
+}
+
+// create does the spawning for Create; callers have already resolved the
+// fork parent and (for loads) claimed the id.
+func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent *HermesACPSession) (*HermesACPSession, error) {
 	mcp := opts.McpServers
 	if mcp == nil {
 		mcp = []json.RawMessage{}
@@ -686,8 +749,15 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 	sess.setState(StateLive, nil)
 
 	d.mu.Lock()
+	replaced := d.sessions[sid]
 	d.sessions[sid] = sess
 	d.mu.Unlock()
+	if replaced != nil && replaced != sess {
+		// A Crashed/Detached entry for this id (a resume of a dead session):
+		// detach it so its process is stopped and its watchers see the end,
+		// instead of overwriting the registry entry and orphaning both.
+		d.detach(replaced)
+	}
 	return sess, nil
 }
 
@@ -720,16 +790,28 @@ func (d *HermesACPDriver) Delete(id string) error {
 	d.mu.Lock()
 	s := d.sessions[id]
 	delete(d.sessions, id)
+	if claim := d.loads[id]; claim != nil {
+		claim.cancelled = true
+	}
 	d.mu.Unlock()
 	if s == nil {
 		return nil
 	}
+	d.detach(s)
+	return nil
+}
+
+// detach ends a session that is no longer in (or never made it into) the
+// registry: cancels its turn, leaves its process, and closes its ring.
+func (d *HermesACPDriver) detach(s *HermesACPSession) {
 	if s.State() == StateLive {
 		_ = s.Cancel()
 	}
 	p := s.proc
 	p.mu.Lock()
-	delete(p.sessions, id)
+	if p.sessions[s.id] == s {
+		delete(p.sessions, s.id)
+	}
 	empty := len(p.sessions) == 0
 	p.mu.Unlock()
 	s.setState(StateDetached, nil)
@@ -737,7 +819,6 @@ func (d *HermesACPDriver) Delete(id string) error {
 		p.stop()
 	}
 	s.ring.Close()
-	return nil
 }
 
 // TurnsInFlight counts sessions with a running turn (self-update gate seam:
