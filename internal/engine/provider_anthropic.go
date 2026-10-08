@@ -270,15 +270,18 @@ type anthropicSSEUsage struct {
 // opus-4-7+ behavior.
 //
 // "claude-haiku-5" and "claude-mythos-5" were pruned 2026-09-15 (#632): no
-// catalog lists either model, so their inclusion was an unverified guess
-// rather than an observed 400. Add them back only alongside a live
-// verification note like the ones above.
+// catalog listed either model, so their inclusion was an unverified guess.
+// claude-haiku-5 is back: verified live 2026-10-07 through this kernel,
+// claude-haiku-5-5 400s on temperature=0.7, top_p=0.5 and temperature=0
+// ("temperature is deprecated for this model"), matching Anthropic's model
+// docs. claude-mythos-5 stays out until it is observed the same way.
 var temperatureDeprecatedPrefixes = []string{
 	"claude-opus-4-7",
 	"claude-opus-4-8",
 	"claude-sonnet-5",
 	"claude-opus-5",
 	"claude-fable-5",
+	"claude-haiku-5",
 }
 
 // modelDeprecatesTemperature reports whether the given Anthropic model id

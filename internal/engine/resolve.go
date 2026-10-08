@@ -171,7 +171,7 @@ var intentAliases = map[string]ModelResolution{
 	// the CURRENT generation; older generations stay reachable via their raw ids
 	// (dynamically on the gateway path, via dispatchFrontierAliases on dispatch).
 	"claude": {PreferProvider: "claude-oauth"},
-	"haiku":  {PreferProvider: "claude-oauth", ModelOverride: "claude-haiku-4-5-20251001"},
+	"haiku":  {PreferProvider: "claude-oauth", ModelOverride: "claude-haiku-5-5"},
 	"sonnet": {PreferProvider: "claude-oauth", ModelOverride: "claude-sonnet-5"},
 	"opus":   {PreferProvider: "claude-oauth", ModelOverride: "claude-opus-4-8"},
 	"fable":  {PreferProvider: "claude-oauth", ModelOverride: "claude-fable-5"},
@@ -214,6 +214,7 @@ var dispatchFrontierAliases = map[string]ModelResolution{
 	"claude-sonnet-5":           {PreferProvider: "claude-oauth", ModelOverride: "claude-sonnet-5"},
 	"claude-opus-4-8":           {PreferProvider: "claude-oauth", ModelOverride: "claude-opus-4-8"},
 	"claude-fable-5":            {PreferProvider: "claude-oauth", ModelOverride: "claude-fable-5"},
+	"claude-haiku-5-5":          {PreferProvider: "claude-oauth", ModelOverride: "claude-haiku-5-5"},
 	"claude-haiku-4-5-20251001": {PreferProvider: "claude-oauth", ModelOverride: "claude-haiku-4-5-20251001"},
 	// Previous-generation ids, moved here from intentAliases so dispatch callers
 	// pinning them keep the #430 wrong-model protection while the gateway path

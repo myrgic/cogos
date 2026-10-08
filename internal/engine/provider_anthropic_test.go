@@ -780,6 +780,10 @@ func TestBuildAnthropicRequest_TemperatureDeprecation(t *testing.T) {
 	for _, model := range []string{
 		"claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-5",
 		"claude-fable-5", "claude-sonnet-5-20260501",
+		// Verified live 2026-10-07 through this kernel: claude-haiku-5-5 400s on
+		// temperature=0.7, top_p=0.5 and temperature=0 ("temperature is
+		// deprecated for this model"); Anthropic's docs say the same.
+		"claude-haiku-5-5", "claude-haiku-5",
 	} {
 		ar := buildAnthropicRequest(model, req, false, 1024)
 		if ar.Temperature != nil || ar.TopP != nil {
