@@ -271,6 +271,47 @@ func TestHermesACPDriver_LateCrashRestartsAndLoads(t *testing.T) {
 	})
 }
 
+// A crash-restart's session/load rebuilds the session with the agent's
+// defaults; the client's chosen model and mode must be put back, or a work
+// thread pinned to one model silently continues on another.
+func TestHermesACPDriver_SetModelSurvivesCrashRestart(t *testing.T) {
+	d := fakeHermesDriver(t, func(c *HermesACPDriverConfig) { c.CrashWindow = time.Nanosecond })
+	s, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetModel(context.Background(), "custom:cogos:sentinel-model-777"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMode(context.Background(), "accept_edits"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Info().Model; got != "custom:cogos:sentinel-model-777" {
+		t.Fatalf("info model = %q", got)
+	}
+	if err := s.SetModel(context.Background(), ""); err == nil {
+		t.Fatal("empty model id should be refused by the agent")
+	}
+	if got := s.Info().Model; got != "custom:cogos:sentinel-model-777" {
+		t.Fatalf("a refused set_model must not change the recorded model: %q", got)
+	}
+
+	_, _ = s.Prompt(json.RawMessage(`"crash now"`))
+	ev := waitEvent(t, s, 0, func(ev ManagedSessionEvent) bool {
+		return ev.Kind == MSEventSessionUpdate && strings.Contains(string(ev.Data), "replayed history for "+s.ID())
+	})
+	waitEvent(t, s, ev.Seq, func(ev ManagedSessionEvent) bool {
+		return ev.Kind == MSEventState && strings.Contains(string(ev.Data), `"live"`)
+	})
+	if _, err := s.Prompt(json.RawMessage(`"settings?"`)); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, s, ev.Seq, func(ev ManagedSessionEvent) bool {
+		return ev.Kind == MSEventSessionUpdate &&
+			strings.Contains(string(ev.Data), "settings:mode=accept_edits:model=custom:cogos:sentinel-model-777")
+	})
+}
+
 func TestEventRing_ReplayGapAndOverflow(t *testing.T) {
 	r := NewEventRing("s", 3)
 	for i := 0; i < 5; i++ {

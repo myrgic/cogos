@@ -49,13 +49,14 @@ type agent struct {
 	mu      sync.Mutex
 	next    int
 	modes   map[string]string
+	models  map[string]string
 	cancels map[string]chan struct{}
 }
 
 // Serve runs the fake agent over r/w. The returned channel closes when r
 // ends. subprocess enables the "crash" behaviour (os.Exit).
 func Serve(r io.Reader, w io.Writer, subprocess bool) <-chan struct{} {
-	a := &agent{subprocess: subprocess, modes: map[string]string{}, cancels: map[string]chan struct{}{}}
+	a := &agent{subprocess: subprocess, modes: map[string]string{}, models: map[string]string{}, cancels: map[string]chan struct{}{}}
 	a.conn = acprpc.NewConn(r, w, a)
 	return a.conn.Done()
 }
@@ -64,6 +65,7 @@ type sessionParams struct {
 	SessionID string `json:"sessionId"`
 	Cwd       string `json:"cwd"`
 	ModeID    string `json:"modeId"`
+	ModelID   string `json:"modelId"`
 	Prompt    []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -130,6 +132,14 @@ func (a *agent) HandleRequest(method string, params json.RawMessage) (any, error
 		a.mu.Unlock()
 		a.update(p.SessionID, map[string]any{"sessionUpdate": "current_mode_update", "currentModeId": p.ModeID})
 		return map[string]any{}, nil
+	case "session/set_model":
+		if p.ModelID == "" {
+			return nil, &acprpc.Error{Code: -32602, Message: "set_model needs modelId"}
+		}
+		a.mu.Lock()
+		a.models[p.SessionID] = p.ModelID
+		a.mu.Unlock()
+		return map[string]any{}, nil
 	case "session/prompt":
 		return a.prompt(p)
 	}
@@ -171,6 +181,14 @@ func (a *agent) prompt(p sessionParams) (any, error) {
 			return nil, err
 		}
 		a.update(p.SessionID, chunk("permission:"+res.Outcome.Outcome+":"+res.Outcome.OptionID))
+		return map[string]any{"stopReason": "end_turn"}, nil
+	case strings.HasPrefix(text, "settings"):
+		// Reports what THIS agent process holds for the session (a fresh
+		// process after a crash knows only what was re-applied to it).
+		a.mu.Lock()
+		mode, model := a.modes[p.SessionID], a.models[p.SessionID]
+		a.mu.Unlock()
+		a.update(p.SessionID, chunk("settings:mode="+mode+":model="+model))
 		return map[string]any{"stopReason": "end_turn"}, nil
 	}
 	a.update(p.SessionID, chunk("echo:"+text))
