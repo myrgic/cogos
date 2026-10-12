@@ -283,6 +283,9 @@ func (p *hermesProcess) watch(cmd *exec.Cmd, conn *acprpc.Conn) {
 		err := conn.Call(ctx, "session/load", map[string]any{
 			"sessionId": s.id, "cwd": s.cwd, "mcpServers": s.mcpServers(),
 		}, nil)
+		if err == nil {
+			s.reapplySettings(ctx, conn) // load rebuilds with defaults: put back the client's model and mode
+		}
 		cancel()
 		if hook := p.d.cfg.afterRestartLoad; hook != nil {
 			hook(s)
@@ -402,6 +405,7 @@ type HermesACPSession struct {
 	lastErr  error
 	turn     *hermesTurn
 	mode     string
+	model    string
 	perms    map[string]*pendingPermission
 	permSeq  atomic.Uint64
 	turnSeq  atomic.Uint64
@@ -430,6 +434,7 @@ type ManagedSessionInfo struct {
 	State              string               `json:"state"`
 	Error              string               `json:"error,omitempty"`
 	Mode               string               `json:"mode,omitempty"`
+	Model              string               `json:"model,omitempty"`
 	CreatedAt          time.Time            `json:"created_at"`
 	LastSeq            uint64               `json:"last_seq"`
 	TurnInFlight       string               `json:"turn_in_flight,omitempty"`
@@ -478,7 +483,7 @@ func (s *HermesACPSession) Info() ManagedSessionInfo {
 	defer s.mu.Unlock()
 	info := ManagedSessionInfo{
 		SessionID: s.id, Driver: DriverHermesACP, Profile: s.profile, Cwd: s.cwd, ForkOf: s.forkOf,
-		State: s.state.String(), Mode: s.mode, CreatedAt: s.createdAt, LastSeq: s.ring.LastSeq(),
+		State: s.state.String(), Mode: s.mode, Model: s.model, CreatedAt: s.createdAt, LastSeq: s.ring.LastSeq(),
 		PendingPermissions: make([]*pendingPermission, 0, len(s.perms)),
 	}
 	if s.lastErr != nil {
@@ -575,6 +580,43 @@ func (s *HermesACPSession) SetMode(ctx context.Context, modeID string) error {
 	s.mode = modeID
 	s.mu.Unlock()
 	return nil
+}
+
+// SetModel calls session/set_model (Hermes rebuilds the session's agent on
+// modelId and keeps its history). Hermes resolves a named custom provider
+// only from the full "custom:<provider>:<model>" form; the id is passed
+// through verbatim and remembered so a crash-restart re-applies it.
+func (s *HermesACPSession) SetModel(ctx context.Context, modelID string) error {
+	if err := s.live(); err != nil {
+		return err
+	}
+	if err := s.proc.currentConn().Call(ctx, "session/set_model", map[string]any{"sessionId": s.id, "modelId": modelID}, nil); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.model = modelID
+	s.mu.Unlock()
+	return nil
+}
+
+// reapplySettings restores the mode and model a client chose after a
+// crash-restart's session/load, which rebuilds the session from the agent's
+// store with its defaults. Best effort: a failure is recorded on the event
+// stream, not fatal (the session is usable, only on the default setting).
+func (s *HermesACPSession) reapplySettings(ctx context.Context, conn *acprpc.Conn) {
+	s.mu.Lock()
+	mode, model := s.mode, s.model
+	s.mu.Unlock()
+	if model != "" {
+		if err := conn.Call(ctx, "session/set_model", map[string]any{"sessionId": s.id, "modelId": model}, nil); err != nil {
+			s.ring.Append(MSEventState, map[string]any{"state": s.State().String(), "error": "restart: re-apply model: " + err.Error()})
+		}
+	}
+	if mode != "" {
+		if err := conn.Call(ctx, "session/set_mode", map[string]any{"sessionId": s.id, "modeId": mode}, nil); err != nil {
+			s.ring.Append(MSEventState, map[string]any{"state": s.State().String(), "error": "restart: re-apply mode: " + err.Error()})
+		}
+	}
 }
 
 // parkPermission records a request, emits it, and blocks until answered,

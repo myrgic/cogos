@@ -268,6 +268,21 @@ func TestManagedSessionHTTP_Validation(t *testing.T) {
 	if code := msDo(t, ts, "GET", "/v1/managed-sessions/disk-1/events?since=x", nil, nil); code != http.StatusBadRequest {
 		t.Fatalf("bad since = %d", code)
 	}
+	// model: required field, unknown session 404, a set model shows on GET.
+	if code := msDo(t, ts, "POST", "/v1/managed-sessions/missing/model", map[string]any{"model_id": "m"}, nil); code != http.StatusNotFound {
+		t.Fatalf("model on missing = %d", code)
+	}
+	if code := msDo(t, ts, "POST", "/v1/managed-sessions/disk-1/model", map[string]any{}, nil); code != http.StatusBadRequest {
+		t.Fatalf("model without model_id = %d", code)
+	}
+	if code := msDo(t, ts, "POST", "/v1/managed-sessions/disk-1/model", map[string]any{"model_id": "custom:cogos:m-1"}, nil); code != http.StatusOK {
+		t.Fatalf("model = %d", code)
+	}
+	var c ManagedSessionInfo
+	msDo(t, ts, "GET", "/v1/managed-sessions/disk-1", nil, &c)
+	if c.Model != "custom:cogos:m-1" {
+		t.Fatalf("model after set = %q", c.Model)
+	}
 }
 
 func TestManagedSessionHTTP_WritesNeedGrant(t *testing.T) {

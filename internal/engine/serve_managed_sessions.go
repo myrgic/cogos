@@ -9,6 +9,7 @@
 //	POST   /v1/managed-sessions/{id}/prompt        {prompt: "text" | [ACP content blocks]} -> 202 {turn_id}
 //	POST   /v1/managed-sessions/{id}/cancel        session/cancel
 //	POST   /v1/managed-sessions/{id}/mode          {mode_id}
+//	POST   /v1/managed-sessions/{id}/model         {model_id}  (ACP session/set_model; re-applied after a crash-restart)
 //	POST   /v1/managed-sessions/{id}/permission    {request_id, option_id}  ("" option_id = cancelled)
 //	GET    /v1/managed-sessions/{id}/events?since=N
 //	       WebSocket when the request is an upgrade: a "hello" frame, then
@@ -41,6 +42,7 @@ func (s *Server) registerManagedSessionRoutes(mux *http.ServeMux) {
 	s.route(mux, "POST /v1/managed-sessions/{id}/prompt", s.handleManagedSessionPrompt)
 	s.route(mux, "POST /v1/managed-sessions/{id}/cancel", s.handleManagedSessionCancel)
 	s.route(mux, "POST /v1/managed-sessions/{id}/mode", s.handleManagedSessionMode)
+	s.route(mux, "POST /v1/managed-sessions/{id}/model", s.handleManagedSessionModel)
 	s.route(mux, "POST /v1/managed-sessions/{id}/permission", s.handleManagedSessionPermission)
 	s.route(mux, "GET /v1/managed-sessions/{id}/events", s.handleManagedSessionEvents)
 }
@@ -194,6 +196,31 @@ func (s *Server) handleManagedSessionMode(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "mode_id": req.ModeID})
+}
+
+func (s *Server) handleManagedSessionModel(w http.ResponseWriter, r *http.Request) {
+	sess := s.managedSession(w, r)
+	if sess == nil {
+		return
+	}
+	var req struct {
+		ModelID string `json:"model_id"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if req.ModelID == "" {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request", "model_id is required")
+		return
+	}
+	// set_model rebuilds the agent (Hermes keeps history); allow longer than set_mode.
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	if err := sess.SetModel(ctx, req.ModelID); err != nil {
+		writeManagedSessionError(w, err)
+		return
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "model_id": req.ModelID})
 }
 
 func (s *Server) handleManagedSessionPermission(w http.ResponseWriter, r *http.Request) {
