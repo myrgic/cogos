@@ -307,7 +307,7 @@ Total subprocess sites: 85
 | `<unresolved>` | `exec.CommandContext(ctx, CodexCommand, args...)` | harness/codex.go:547 | harness |
 | `<unresolved>` | `exec.CommandContext(ctx, ClaudeCommand, args...)` | harness/harness.go:435 | harness |
 | `<unresolved>` | `exec.CommandContext(ctx, ClaudeCommand, args...)` | harness/harness.go:882 | harness |
-| `{opts.Cwd}` | `exec.CommandContext(ctx, bin, args...)` | internal/acp/claudecli.go:91 | internal:acp |
+| `{opts.Cwd}` | `exec.CommandContext(ctx, bin, args...)` | internal/acp/claudecli.go:99 | internal:acp |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "git", args...)` | internal/coherence/coherence.go:95 | internal:coherence |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, binPath, args...)` | internal/engine/cli_doctor_inference.go:313 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("git", "-C", dir, "ls-files", "--error-unmatch", filepath.Base(path))` | internal/engine/cli_doctor_secrets.go:382 | internal:engine |

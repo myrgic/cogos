@@ -3010,7 +3010,7 @@
     },
     {
       "file": "internal/acp/claudecli.go",
-      "line": 91,
+      "line": 99,
       "column": 9,
       "func": "Spawn",
       "subsystem": "internal:acp",
