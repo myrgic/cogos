@@ -548,9 +548,9 @@ func TestRound3GateFindings_Fixed(t *testing.T) {
 						t.Errorf("%s:%d pattern %q does not contain %q", file, line, s.Pattern, want)
 					}
 				}
-				wantBucket("internal/engine/serve_identity_grants.go", 725, "identity-grants")
-				wantBucket("internal/engine/serve_identity_grants.go", 782, "identity-grants")
-				wantBucket("internal/engine/serve_identity_grants.go", 825, "identity-grants")
+				wantBucket("internal/engine/serve_identity_grants.go", 744, "identity-grants")
+				wantBucket("internal/engine/serve_identity_grants.go", 802, "identity-grants")
+				wantBucket("internal/engine/serve_identity_grants.go", 846, "identity-grants")
 				wantBucket("internal/engine/worktree_spawn.go", 273, "worktree-reconciler")
 				wantBucket("internal/engine/mcp_stubs.go", 643, "mcp-client")
 

@@ -33,6 +33,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -50,6 +51,9 @@ var (
 	ErrTurnInFlight           = errors.New("managed session: a turn is already in flight")
 	ErrInvalidManagedSession  = errors.New("managed session: invalid request")
 	ErrPermissionNotFound     = errors.New("managed session: no such pending permission request")
+	// ErrManagedSessionForbidden: the request is well-formed but the caller
+	// may not do it (today: a fork naming a room other than its parent's).
+	ErrManagedSessionForbidden = errors.New("managed session: forbidden")
 )
 
 // HermesACPOpts configures one Create call.
@@ -59,7 +63,18 @@ type HermesACPOpts struct {
 	ForkOf     string            `json:"fork_of,omitempty"`     // parent session id (must be managed here)
 	Load       string            `json:"load,omitempty"`        // existing on-disk session id to session/load
 	McpServers []json.RawMessage `json:"mcp_servers,omitempty"` // passed through verbatim
+	Room       string            `json:"room,omitempty"`        // declared room this session lives in (validated)
+	// Actor is the person acting, taken from the authenticated grant by the
+	// HTTP layer. json:"-" so a request body can never supply it.
+	Actor string `json:"-"`
 }
+
+// roomIDPattern bounds a managed session's room name.
+const roomIDPattern = `^[a-z0-9][a-z0-9-]{0,62}$`
+
+var roomIDRe = regexp.MustCompile(roomIDPattern)
+
+func validRoomID(s string) bool { return roomIDRe.MatchString(s) }
 
 // HermesACPDriverConfig tunes the driver. Zero values pick defaults.
 type HermesACPDriverConfig struct {
@@ -394,6 +409,8 @@ type HermesACPSession struct {
 	profile   string
 	cwd       string
 	forkOf    string
+	room      string // declared room; immutable after create
+	actor     string // person from the creating grant; immutable after create
 	createdAt time.Time
 	proc      *hermesProcess
 	ring      *EventRing
@@ -431,6 +448,8 @@ type ManagedSessionInfo struct {
 	Profile            string               `json:"profile,omitempty"`
 	Cwd                string               `json:"cwd,omitempty"`
 	ForkOf             string               `json:"fork_of,omitempty"`
+	Room               string               `json:"room,omitempty"`
+	Actor              string               `json:"actor,omitempty"`
 	State              string               `json:"state"`
 	Error              string               `json:"error,omitempty"`
 	Mode               string               `json:"mode,omitempty"`
@@ -482,7 +501,7 @@ func (s *HermesACPSession) Info() ManagedSessionInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	info := ManagedSessionInfo{
-		SessionID: s.id, Driver: DriverHermesACP, Profile: s.profile, Cwd: s.cwd, ForkOf: s.forkOf,
+		SessionID: s.id, Driver: DriverHermesACP, Profile: s.profile, Cwd: s.cwd, ForkOf: s.forkOf, Room: s.room, Actor: s.actor,
 		State: s.state.String(), Mode: s.mode, Model: s.model, CreatedAt: s.createdAt, LastSeq: s.ring.LastSeq(),
 		PendingPermissions: make([]*pendingPermission, 0, len(s.perms)),
 	}
@@ -694,6 +713,9 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 	if opts.ForkOf != "" && opts.Load != "" {
 		return nil, fmt.Errorf("%w: fork_of and load are mutually exclusive", ErrInvalidManagedSession)
 	}
+	if opts.Room != "" && !validRoomID(opts.Room) {
+		return nil, fmt.Errorf("%w: room must match %s", ErrInvalidManagedSession, roomIDPattern)
+	}
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
@@ -769,6 +791,15 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		if opts.Profile == "" {
 			opts.Profile = parent.profile
 		}
+		// Room and actor are inherited. Cross-room fork is not in G0, so a
+		// room that differs from the parent's is refused.
+		if opts.Room != "" && opts.Room != parent.room {
+			return nil, fmt.Errorf("%w: fork_of %s lives in room %q; cross-room fork is not supported", ErrManagedSessionForbidden, opts.ForkOf, parent.room)
+		}
+		opts.Room = parent.room
+		if parent.actor != "" {
+			opts.Actor = parent.actor
+		}
 	} else {
 		proc = d.newProcess(opts.Profile, opts.Cwd)
 		if _, err := proc.start(ctx); err != nil {
@@ -783,7 +814,7 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 	// Register before session/load returns: load replays history as
 	// session/update notifications, which must land in the ring.
 	sess := &HermesACPSession{
-		profile: opts.Profile, cwd: opts.Cwd, forkOf: opts.ForkOf, createdAt: time.Now().UTC(),
+		profile: opts.Profile, cwd: opts.Cwd, forkOf: opts.ForkOf, room: opts.Room, actor: opts.Actor, createdAt: time.Now().UTC(),
 		proc: proc, permTO: d.cfg.PermissionTimeout, mcp: opts.McpServers, state: StateStarting,
 		perms: map[string]*pendingPermission{},
 	}

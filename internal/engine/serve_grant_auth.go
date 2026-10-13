@@ -120,6 +120,7 @@ package engine
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -239,6 +240,27 @@ const (
 	// ScopeWrite — a surface that may write cogdocs should not thereby be
 	// able to mint itself a grant for any other surface.
 	ScopeAdmin = "admin"
+
+	// ScopeManagedSessions authorizes driving kernel-managed agent sessions
+	// (ADR-093): create, fork, resume, prompt, cancel, mode, model,
+	// permission answers, and detach. Separate from ScopeWrite because a
+	// managed session is a live agent with tools: an inference-only or
+	// cogdoc-writing grant must not be able to start or steer one.
+	ScopeManagedSessions = "managed-sessions"
+
+	// ScopeRoomsWrite authorizes applying a declared room (the future
+	// room-apply route). Reserved ahead of the route so the mapping exists
+	// before the first handler does.
+	ScopeRoomsWrite = "rooms:write"
+)
+
+// managedSessionsRoutePrefix and roomsRoutePrefix are the route families the
+// two scopes above guard. Only non-GET methods are scoped: reads stay
+// grant-exempt (isGrantExemptRequest), projection of who-may-read is a later
+// concern.
+const (
+	managedSessionsRoutePrefix = "/v1/managed-sessions"
+	roomsRoutePrefix           = "/v1/rooms"
 )
 
 // requiredScopeForRequest returns the scope a caller's grant must carry to
@@ -271,6 +293,22 @@ func requiredScopeForRequest(r *http.Request) string {
 	// GET /v1/services* stays exempt via the blanket GET rule.
 	if strings.HasPrefix(path, "/v1/services/") && r.Method != http.MethodGet {
 		return ScopeAdmin
+	}
+
+	// Managed-session writes (create/fork/resume/prompt/cancel/mode/model/
+	// permission/detach). Before this mapping the function returned "" for
+	// the whole family, and grantHasScope(g, "") passes, so any live grant
+	// of any scope could drive any session.
+	if r.Method != http.MethodGet && r.Method != http.MethodHead &&
+		(path == managedSessionsRoutePrefix || strings.HasPrefix(path, managedSessionsRoutePrefix+"/")) {
+		return ScopeManagedSessions
+	}
+
+	// Room apply: no route exists yet; the mapping is reserved so the first
+	// handler lands already gated.
+	if r.Method != http.MethodGet && r.Method != http.MethodHead &&
+		(path == roomsRoutePrefix || strings.HasPrefix(path, roomsRoutePrefix+"/")) {
+		return ScopeRoomsWrite
 	}
 
 	// Inference: the routes that spend provider tokens.
@@ -317,6 +355,35 @@ func grantHasScope(g *IdentityGrant, want string) bool {
 	}
 	return false
 }
+
+// legacyWriteDrivesManagedSessions is the one compatibility rule for G0: a
+// surface grant (no actor) carrying ScopeWrite may still drive managed
+// sessions, because the stage's `stage-studio` grant is minted with
+// scope ["write"] only and predates ScopeManagedSessions. Precedent says
+// write does NOT imply other scopes (grantHasScope is exact-match), so this
+// is an explicit, narrow exception rather than a widening of grantHasScope.
+// Actor grants never get it: a person's grant must name managed-sessions.
+//
+// REMOVE FIRST: re-mint stage-studio with ["managed-sessions"] (plus
+// whatever else it needs), then delete this function and its call site.
+// Logged once per grant so the remaining users are visible.
+func legacyWriteDrivesManagedSessions(g *IdentityGrant, want string) bool {
+	if want != ScopeManagedSessions || g == nil || g.Actor != "" {
+		return false
+	}
+	for _, have := range g.Scope {
+		if have == ScopeWrite {
+			if _, seen := legacyWriteGrantsLogged.LoadOrStore(g.GrantID, struct{}{}); !seen {
+				slog.Warn("grant-auth: DEPRECATED: surface grant with 'write' scope driving managed sessions; re-mint it with 'managed-sessions'",
+					"grant_id", g.GrantID, "surface", g.Surface)
+			}
+			return true
+		}
+	}
+	return false
+}
+
+var legacyWriteGrantsLogged sync.Map
 
 // defaultGrantMintRateLimit and defaultGrantMintRateWindow bound
 // POST /v1/identity/grants throughput (see the file header's BOOTSTRAP
@@ -433,7 +500,7 @@ func (s *Server) grantAuthMiddleware(next http.Handler) http.Handler {
 		// 403 rather than 401: the credential is genuine and the caller is
 		// authenticated, it simply lacks authority for THIS route, so
 		// re-presenting or refreshing the same grant will not help.
-		if want := requiredScopeForRequest(r); !grantHasScope(grant, want) {
+		if want := requiredScopeForRequest(r); !grantHasScope(grant, want) && !legacyWriteDrivesManagedSessions(grant, want) {
 			writeJSONError(w, http.StatusForbidden, "insufficient_scope",
 				"grant does not carry the '"+want+"' scope required for this route")
 			return
