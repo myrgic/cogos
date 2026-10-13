@@ -1,8 +1,8 @@
 // serve_managed_sessions.go — ADR-093 §7 HTTP surface + event WebSocket for
 // kernel-managed agent sessions (today: the hermes-acp driver).
 //
-//	GET    /v1/managed-sessions                    list
-//	POST   /v1/managed-sessions                    create / fork / load  {driver, profile, cwd, fork_of, load, mcp_servers}
+//	GET    /v1/managed-sessions[?room=<r>]         list (optionally one room)
+//	POST   /v1/managed-sessions                    create / fork / load  {driver, profile, cwd, room, fork_of, load, mcp_servers}
 //	GET    /v1/managed-sessions/{id}               one session
 //	DELETE /v1/managed-sessions/{id}               detach (idempotent)
 //	POST   /v1/managed-sessions/{id}/resume        attach an on-disk session (session/load; idempotent)
@@ -16,9 +16,11 @@
 //	       every retained event with seq > N, then the live tail. A plain
 //	       GET returns the same replay as JSON (no live tail).
 //
-// Writes go through the same grant-auth gate as every other POST/DELETE;
-// GETs (including the WS upgrade) are reads and exempt, matching the rest
-// of the kernel.
+// Writes go through the same grant-auth gate as every other POST/DELETE and
+// additionally require scope managed-sessions (requiredScopeForRequest); a
+// session records the creating grant's actor and an optional room. GETs
+// (including the WS upgrade) are reads and exempt, matching the rest of the
+// kernel.
 package engine
 
 import (
@@ -54,6 +56,8 @@ func managedSessionStatus(err error) (int, string) {
 		return http.StatusNotFound, "not_found"
 	case errors.Is(err, ErrInvalidManagedSession):
 		return http.StatusBadRequest, "invalid_request"
+	case errors.Is(err, ErrManagedSessionForbidden):
+		return http.StatusForbidden, "forbidden"
 	case errors.Is(err, ErrTurnInFlight), errors.Is(err, ErrSessionNotLive):
 		return http.StatusConflict, "conflict"
 	default:
@@ -84,7 +88,17 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 func (s *Server) handleManagedSessionList(w http.ResponseWriter, r *http.Request) {
-	writeJSONResp(w, http.StatusOK, map[string]any{"sessions": s.managedSessions.List()})
+	sessions := s.managedSessions.List()
+	if room := r.URL.Query().Get("room"); room != "" {
+		kept := sessions[:0:0]
+		for _, info := range sessions {
+			if info.Room == room {
+				kept = append(kept, info)
+			}
+		}
+		sessions = kept
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"sessions": sessions})
 }
 
 type managedSessionCreateRequest struct {
@@ -105,6 +119,7 @@ func (s *Server) handleManagedSessionCreate(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusBadRequest, "invalid_request", "fork_of and load are mutually exclusive")
 		return
 	}
+	req.Actor = actorFromRequest(r)
 	// The session outlives this request: only the handshake is bounded by it.
 	sess, err := s.managedSessions.Create(r.Context(), req.HermesACPOpts)
 	if err != nil {
@@ -114,12 +129,23 @@ func (s *Server) handleManagedSessionCreate(w http.ResponseWriter, r *http.Reque
 	writeJSONResp(w, http.StatusCreated, sess.Info())
 }
 
+// actorFromRequest is the authenticated grant's actor, "" when the request
+// carries no grant (gate disabled) or a legacy surface grant. It is the only
+// source of a session's actor; request bodies are never consulted.
+func actorFromRequest(r *http.Request) string {
+	if g, ok := grantFromContext(r.Context()); ok {
+		return g.Actor
+	}
+	return ""
+}
+
 func (s *Server) handleManagedSessionResume(w http.ResponseWriter, r *http.Request) {
 	var req HermesACPOpts
 	if r.ContentLength != 0 && !decodeBody(w, r, &req) {
 		return
 	}
 	req.Load, req.ForkOf = r.PathValue("id"), ""
+	req.Actor = actorFromRequest(r)
 	sess, err := s.managedSessions.Create(r.Context(), req)
 	if err != nil {
 		writeManagedSessionError(w, err)

@@ -129,6 +129,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -183,6 +184,7 @@ const defaultGrantTTL = 30 * 24 * time.Hour
 type IdentityGrant struct {
 	GrantID       string    `json:"grant_id"`
 	Surface       string    `json:"surface"`
+	Actor         string    `json:"actor,omitempty"` // person this grant acts for ("chaz"); "" = legacy surface grant
 	Scope         []string  `json:"scope"`
 	Token         string    `json:"-"` // never serialized; empty after ledger rebuild
 	IntegrityHash string    `json:"-"` // never serialized; sha256 hex of Token
@@ -352,8 +354,21 @@ var ErrGrantNotFound = errors.New("no live grant with that id")
 // all — so there is no window in which the ledger can disagree with itself
 // about which grant is live for this surface.
 func (r *IdentityGrantRegistry) MintOrReuse(surface string, scope []string, ttl time.Duration) (*IdentityGrant, error) {
+	return r.MintOrReuseActor(surface, "", scope, ttl)
+}
+
+// MintOrReuseActor is MintOrReuse for a grant that names the person it acts
+// for. actor is part of the reuse identity: a live grant is only reused when
+// its actor matches too, so re-minting a surface for a different actor (or
+// for none) supersedes rather than echoing back a token that carries the
+// wrong person. The registry is still keyed by surface (one live grant per
+// surface), so two actors on one surface need distinct surface names.
+func (r *IdentityGrantRegistry) MintOrReuseActor(surface, actor string, scope []string, ttl time.Duration) (*IdentityGrant, error) {
 	if surface == "" {
 		return nil, fmt.Errorf("surface is required")
+	}
+	if actor != "" && !validActorID(actor) {
+		return nil, fmt.Errorf("actor must match %s", actorIDPattern)
 	}
 	now := time.Now().UTC()
 
@@ -361,7 +376,7 @@ func (r *IdentityGrantRegistry) MintOrReuse(surface string, scope []string, ttl 
 	defer r.mu.Unlock()
 
 	existing, tracked := r.bySurface[surface]
-	if tracked && !existing.expired(now) && existing.Token != "" && scopeSetEqual(existing.Scope, scope) {
+	if tracked && !existing.expired(now) && existing.Token != "" && existing.Actor == actor && scopeSetEqual(existing.Scope, scope) {
 		return existing, nil
 	}
 
@@ -382,6 +397,7 @@ func (r *IdentityGrantRegistry) MintOrReuse(surface string, scope []string, ttl 
 	grant := &IdentityGrant{
 		GrantID:       "grant-" + mustHex(6),
 		Surface:       surface,
+		Actor:         actor,
 		Scope:         scope,
 		Token:         token,
 		IntegrityHash: sha256Hex(token),
@@ -519,6 +535,7 @@ func (r *IdentityGrantRegistry) RecoverToken(surface, token string) (*IdentityGr
 	recovered := &IdentityGrant{
 		GrantID:       g.GrantID,
 		Surface:       g.Surface,
+		Actor:         g.Actor,
 		Scope:         g.Scope,
 		Token:         token,
 		IntegrityHash: g.IntegrityHash,
@@ -682,6 +699,7 @@ func (r *IdentityGrantRegistry) ExtendGrant(surface string, ttl time.Duration) (
 	extended := &IdentityGrant{
 		GrantID:       g.GrantID,
 		Surface:       g.Surface,
+		Actor:         g.Actor,
 		Scope:         g.Scope,
 		Token:         g.Token,
 		IntegrityHash: g.IntegrityHash,
@@ -707,6 +725,7 @@ func (r *IdentityGrantRegistry) appendExtendEventLocked(grant *IdentityGrant, ne
 	data := map[string]interface{}{
 		"grant_id":       grant.GrantID,
 		"surface":        grant.Surface,
+		"actor":          grant.Actor,
 		"scope":          grant.Scope,
 		"integrity_hash": grant.IntegrityHash,
 		"issued_at":      grant.IssuedAt.Format(time.RFC3339),
@@ -762,6 +781,7 @@ func (r *IdentityGrantRegistry) appendGrantEventLocked(eventType string, grant *
 	data := map[string]interface{}{
 		"grant_id":       grant.GrantID,
 		"surface":        grant.Surface,
+		"actor":          grant.Actor,
 		"scope":          grant.Scope,
 		"integrity_hash": grant.IntegrityHash,
 		"issued_at":      grant.IssuedAt.Format(time.RFC3339),
@@ -807,6 +827,7 @@ func (r *IdentityGrantRegistry) appendSupersessionEventLocked(supersededGrant, g
 		"superseded_grant_id": supersededGrant.GrantID,
 		"grant_id":            grant.GrantID,
 		"surface":             grant.Surface,
+		"actor":               grant.Actor,
 		"scope":               grant.Scope,
 		"integrity_hash":      grant.IntegrityHash,
 		"issued_at":           grant.IssuedAt.Format(time.RFC3339),
@@ -903,12 +924,14 @@ func applyIdentityGrantLedgerEvent(reg *IdentityGrantRegistry, env *EventEnvelop
 	switch env.HashedPayload.Type {
 	case "identity.grant.issued":
 		scope := stringSliceFromAny(data["scope"])
+		actor, _ := data["actor"].(string)
 		integrityHash, _ := data["integrity_hash"].(string)
 		issuedAt := parseRFC3339Lenient(data["issued_at"])
 		expiresAt := parseRFC3339Lenient(data["expires_at"])
 		grant := &IdentityGrant{
 			GrantID:       grantID,
 			Surface:       surface,
+			Actor:         actor,
 			Scope:         scope,
 			Token:         "", // never persisted — see file header
 			IntegrityHash: integrityHash,
@@ -931,12 +954,14 @@ func applyIdentityGrantLedgerEvent(reg *IdentityGrantRegistry, env *EventEnvelop
 		// (see appendSupersessionEventLocked's doc comment).
 		supersededGrantID, _ := data["superseded_grant_id"].(string)
 		scope := stringSliceFromAny(data["scope"])
+		actor, _ := data["actor"].(string)
 		integrityHash, _ := data["integrity_hash"].(string)
 		issuedAt := parseRFC3339Lenient(data["issued_at"])
 		expiresAt := parseRFC3339Lenient(data["expires_at"])
 		grant := &IdentityGrant{
 			GrantID:       grantID,
 			Surface:       surface,
+			Actor:         actor,
 			Scope:         scope,
 			Token:         "", // never persisted — see file header
 			IntegrityHash: integrityHash,
@@ -971,6 +996,7 @@ func applyIdentityGrantLedgerEvent(reg *IdentityGrantRegistry, env *EventEnvelop
 			extended := &IdentityGrant{
 				GrantID:       current.GrantID,
 				Surface:       current.Surface,
+				Actor:         current.Actor,
 				Scope:         current.Scope,
 				Token:         current.Token, // "" during replay — never persisted, see file header
 				IntegrityHash: current.IntegrityHash,
@@ -1104,6 +1130,7 @@ type identityGrantCurrentRequest struct {
 
 type identityGrantMintRequest struct {
 	Surface  string   `json:"surface"`
+	Actor    string   `json:"actor,omitempty"`
 	Scope    []string `json:"scope,omitempty"`
 	TTLHours float64  `json:"ttl_hours,omitempty"`
 }
@@ -1112,6 +1139,7 @@ type identityGrantMintResponse struct {
 	GrantID   string   `json:"grant_id"`
 	Token     string   `json:"token"`
 	Surface   string   `json:"surface"`
+	Actor     string   `json:"actor,omitempty"`
 	Scope     []string `json:"scope,omitempty"`
 	ExpiresAt string   `json:"expires_at"`
 }
@@ -1119,6 +1147,7 @@ type identityGrantMintResponse struct {
 type identityGrantListEntry struct {
 	GrantID   string   `json:"grant_id"`
 	Surface   string   `json:"surface"`
+	Actor     string   `json:"actor,omitempty"`
 	Scope     []string `json:"scope,omitempty"`
 	IssuedAt  string   `json:"issued_at"`
 	ExpiresAt string   `json:"expires_at"`
@@ -1131,6 +1160,7 @@ type identityVerifyRequest struct {
 
 type identityVerifyResponse struct {
 	Valid     bool     `json:"valid"`
+	Actor     string   `json:"actor,omitempty"`
 	Scope     []string `json:"scope,omitempty"`
 	ExpiresAt string   `json:"expires_at,omitempty"`
 }
@@ -1174,6 +1204,10 @@ func (s *Server) handleIdentityGrantMint(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, http.StatusBadRequest, "invalid_request", "surface is required")
 		return
 	}
+	if req.Actor != "" && !validActorID(req.Actor) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request", "actor must match "+actorIDPattern)
+		return
+	}
 	if !s.grantAuthDisabled() {
 		presented, ok := grantFromContext(r.Context())
 		if !ok || (presented.Surface != nodeRootSurface && presented.Surface != req.Surface) {
@@ -1187,6 +1221,14 @@ func (s *Server) handleIdentityGrantMint(w http.ResponseWriter, r *http.Request)
 		// "inference" or "write" and escalate. Node-root is the issuing
 		// authority and is exempt. (Review finding on ledger L02.)
 		if ok && presented.Surface != nodeRootSurface {
+			// Actor attenuation, same shape as scope attenuation: a non-root
+			// caller may only mint the actor it already is. Otherwise a
+			// self-service rotation of its own surface could name any person.
+			if req.Actor != presented.Actor {
+				writeJSONError(w, http.StatusForbidden, "actor_escalation",
+					"the presented grant may not mint a grant for a different actor")
+				return
+			}
 			for _, want := range req.Scope {
 				if !grantHasScope(presented, want) {
 					writeJSONError(w, http.StatusForbidden, "scope_escalation",
@@ -1200,7 +1242,7 @@ func (s *Server) handleIdentityGrantMint(w http.ResponseWriter, r *http.Request)
 	if req.TTLHours > 0 {
 		ttl = time.Duration(req.TTLHours * float64(time.Hour))
 	}
-	grant, err := s.identityGrants.MintOrReuse(req.Surface, req.Scope, ttl)
+	grant, err := s.identityGrants.MintOrReuseActor(req.Surface, req.Actor, req.Scope, ttl)
 	if err != nil {
 		if errors.Is(err, ErrGrantStoreAtCapacity) {
 			writeJSONError(w, http.StatusTooManyRequests, "capacity_exceeded", err.Error())
@@ -1221,6 +1263,7 @@ func (s *Server) handleIdentityGrantMint(w http.ResponseWriter, r *http.Request)
 		GrantID:   grant.GrantID,
 		Token:     grant.Token,
 		Surface:   grant.Surface,
+		Actor:     grant.Actor,
 		Scope:     grant.Scope,
 		ExpiresAt: grant.ExpiresAt.Format(time.RFC3339),
 	})
@@ -1238,6 +1281,7 @@ func (s *Server) handleIdentityGrantList(w http.ResponseWriter, r *http.Request)
 		out = append(out, identityGrantListEntry{
 			GrantID:   g.GrantID,
 			Surface:   g.Surface,
+			Actor:     g.Actor,
 			Scope:     g.Scope,
 			IssuedAt:  g.IssuedAt.Format(time.RFC3339),
 			ExpiresAt: g.ExpiresAt.Format(time.RFC3339),
@@ -1290,6 +1334,7 @@ func (s *Server) handleIdentityGrantCurrent(w http.ResponseWriter, r *http.Reque
 		GrantID:   grant.GrantID,
 		Token:     grant.Token,
 		Surface:   grant.Surface,
+		Actor:     grant.Actor,
 		Scope:     grant.Scope,
 		ExpiresAt: grant.ExpiresAt.Format(time.RFC3339),
 	})
@@ -1318,6 +1363,7 @@ func (s *Server) handleIdentityVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSONResp(w, http.StatusOK, identityVerifyResponse{
 		Valid:     true,
+		Actor:     grant.Actor,
 		Scope:     grant.Scope,
 		ExpiresAt: grant.ExpiresAt.Format(time.RFC3339),
 	})
@@ -1396,3 +1442,10 @@ func (s *Server) handleIdentityGrantRevoke(w http.ResponseWriter, r *http.Reques
 		Surface: grant.Surface,
 	})
 }
+
+// actorIDPattern bounds a grant's actor (a person id such as "chaz").
+const actorIDPattern = `^[a-z0-9][a-z0-9_-]{0,62}$`
+
+var actorIDRe = regexp.MustCompile(actorIDPattern)
+
+func validActorID(s string) bool { return actorIDRe.MatchString(s) }
