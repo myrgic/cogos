@@ -10,7 +10,6 @@
 package engine
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -903,7 +902,7 @@ func parseOpenAISSE(ctx context.Context, r io.Reader, ch chan<- StreamChunk, mod
 		}
 	}
 
-	scanner := bufio.NewScanner(r)
+	scanner := newSSEScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
 
