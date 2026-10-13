@@ -17,7 +17,6 @@
 package engine
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -279,8 +278,7 @@ func (p *ClaudeCodeProvider) Complete(ctx context.Context, req *CompletionReques
 // that were emitted (finalized at content_block_stop), the token usage from
 // the result message, the stop reason, and any parse error.
 func (p *ClaudeCodeProvider) drainStreamJSON(r io.Reader) (content string, toolCalls []ToolCall, usage TokenUsage, stopReason string, err error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner := newStreamScanner(r)
 
 	state := newCCStreamState()
 	var sb strings.Builder
@@ -354,8 +352,7 @@ func (p *ClaudeCodeProvider) Stream(ctx context.Context, req *CompletionRequest)
 		defer close(ch)
 		defer p.procMgr.Remove(proc.ID)
 
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 256*1024), 256*1024) // 256KB line buffer
+		scanner := newStreamScanner(stdout)
 
 		state := newCCStreamState()
 

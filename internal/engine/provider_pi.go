@@ -21,7 +21,6 @@
 package engine
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -368,8 +367,7 @@ func (p *PiProvider) Stream(ctx context.Context, req *CompletionRequest) (<-chan
 		defer close(ch)
 		defer p.procMgr.Remove(proc.ID)
 
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 256*1024), 256*1024)
+		scanner := newStreamScanner(stdout)
 
 		for scanner.Scan() {
 			line := scanner.Bytes()

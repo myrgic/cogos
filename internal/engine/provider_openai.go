@@ -902,7 +902,7 @@ func parseOpenAISSE(ctx context.Context, r io.Reader, ch chan<- StreamChunk, mod
 		}
 	}
 
-	scanner := newSSEScanner(r)
+	scanner := newStreamScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
 

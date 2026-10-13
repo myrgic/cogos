@@ -3320,9 +3320,9 @@
     },
     {
       "file": "internal/engine/provider_claudecode.go",
-      "line": 70,
+      "line": 69,
       "column": 9,
-      "func": "func literal (line 69)",
+      "func": "func literal (line 68)",
       "subsystem": "internal:engine",
       "raw": "exec.CommandContext(ctx, binary, \"auth\", \"status\", \"--json\")",
       "dir": "{home}",
@@ -3330,7 +3330,7 @@
     },
     {
       "file": "internal/engine/provider_claudecode.go",
-      "line": 209,
+      "line": 208,
       "column": 9,
       "func": "(*ClaudeCodeProvider).Ping",
       "subsystem": "internal:engine",
@@ -3370,9 +3370,9 @@
     },
     {
       "file": "internal/engine/provider_codex.go",
-      "line": 133,
+      "line": 132,
       "column": 9,
-      "func": "func literal (line 132)",
+      "func": "func literal (line 131)",
       "subsystem": "internal:engine",
       "raw": "exec.CommandContext(ctx, binary, \"login\", \"status\")",
       "dir": "{home}",
@@ -3380,7 +3380,7 @@
     },
     {
       "file": "internal/engine/provider_codex.go",
-      "line": 372,
+      "line": 371,
       "column": 9,
       "func": "(*CodexProvider).Ping",
       "subsystem": "internal:engine",
@@ -3450,7 +3450,7 @@
     },
     {
       "file": "internal/engine/provider_pi.go",
-      "line": 289,
+      "line": 288,
       "column": 9,
       "func": "(*PiProvider).Ping",
       "subsystem": "internal:engine",

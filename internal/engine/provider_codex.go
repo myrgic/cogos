@@ -7,7 +7,6 @@
 package engine
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -519,8 +518,7 @@ func (p *CodexProvider) Stream(ctx context.Context, req *CompletionRequest) (<-c
 	go func() {
 		defer close(ch)
 
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 256*1024), 256*1024)
+		scanner := newStreamScanner(stdout)
 
 		for scanner.Scan() {
 			line := scanner.Bytes()
