@@ -377,15 +377,6 @@ func TestBuildHealthBlock_RealisticSubstrate(t *testing.T) {
 			Operation: reconcile.OperationIdle,
 			Message:   "exp-001 baseline stale (2h since refresh); 1 regression flagged",
 		}},
-		{name: "mcp-tools", status: greenStatus()},
-		{name: "openclaw-agents", status: greenStatus()},
-		{name: "openclaw-cron", status: greenStatus()},
-		{name: "openclaw-gateway", status: reconcile.ResourceStatus{
-			Sync:      reconcile.SyncStatusUnknown,
-			Health:    reconcile.HealthMissing,
-			Operation: reconcile.OperationIdle,
-			Message:   "openclaw daemon not reachable",
-		}},
 		{name: "service", status: reconcile.ResourceStatus{
 			Sync:      reconcile.SyncStatusSynced,
 			Health:    reconcile.HealthProgressing,

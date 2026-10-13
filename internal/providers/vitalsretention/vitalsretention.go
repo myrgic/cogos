@@ -35,7 +35,7 @@
 // other provider — but it manages no external declared-vs-live resource, so
 // LoadConfig/FetchLive/ComputePlan/ApplyPlan/BuildState are honest no-ops in
 // the same "stubMethods" idiom internal/providers/daemon/daemon.go already
-// uses for agent/discord/eval/identity/mcp-tools/etc.: Health() is the only
+// uses for agent/discord/eval/identity/etc.: Health() is the only
 // meaningful axis for a provider whose job is "keep recording," not
 // "reconcile declared state."
 package vitalsretention
@@ -406,7 +406,7 @@ func (r *Recorder) currentExcludeDay() time.Time {
 // (it is a recorder, not a reconciler of drift), so there is nothing for
 // LoadConfig/FetchLive/ComputePlan/ApplyPlan/BuildState to meaningfully do.
 // This mirrors internal/providers/daemon/daemon.go's stubMethods idiom,
-// already used for agent/discord/eval/identity/mcp-tools/openclaw-*/pin/
+// already used for agent/discord/eval/identity/pin/
 // self-update/service — an accepted, documented pattern in this codebase for
 // providers whose sole health signal is "is the background job running,"
 // not "does declared config match live state."
