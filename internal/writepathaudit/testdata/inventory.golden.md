@@ -75,9 +75,9 @@ Total sites: 242  (cog: 100, home: 2, elsewhere: 14, unanchored: 85, dynamic: 41
 | `<WorkspaceRoot>/.cog/run/proprioceptive.jsonl` | (*ProprioceptiveLogger).Log (`os.OpenFile`) | internal/engine/proprioceptive.go:72 | internal:engine |
 | `<WorkspaceRoot>/.cog/run` | newAttentionLog (`os.MkdirAll`) | internal/engine/serve_attention.go:46 | internal:engine |
 | `<WorkspaceRoot>/.cog/run/attention.jsonl` | (*attentionLog).append (`os.OpenFile`) | internal/engine/serve_attention.go:53 | internal:engine |
-| `<WorkspaceRoot>/.cog/ledger/identity-grants/events.jsonl` | (*IdentityGrantRegistry).appendExtendEventLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_identity_grants.go:725 | internal:engine |
-| `<WorkspaceRoot>/.cog/ledger/identity-grants/events.jsonl` | (*IdentityGrantRegistry).appendGrantEventLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_identity_grants.go:782 | internal:engine |
-| `<WorkspaceRoot>/.cog/ledger/identity-grants/events.jsonl` | (*IdentityGrantRegistry).appendSupersessionEventLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_identity_grants.go:825 | internal:engine |
+| `<WorkspaceRoot>/.cog/ledger/identity-grants/events.jsonl` | (*IdentityGrantRegistry).appendExtendEventLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_identity_grants.go:744 | internal:engine |
+| `<WorkspaceRoot>/.cog/ledger/identity-grants/events.jsonl` | (*IdentityGrantRegistry).appendGrantEventLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_identity_grants.go:802 | internal:engine |
+| `<WorkspaceRoot>/.cog/ledger/identity-grants/events.jsonl` | (*IdentityGrantRegistry).appendSupersessionEventLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_identity_grants.go:846 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/worktree-reconciler/events.jsonl` | (*FilesystemLedgerWriter).EmitWorktreeEvent (`engine.AppendEvent(bucket)`) | internal/engine/worktree_spawn.go:273 | internal:engine |
 | `{p.root}/.cog/state` | writeDispatchTrigger (`os.MkdirAll`) | internal/eval/mcp_tools.go:375 | internal:eval |
 | `{p.root}/.cog/state` | writePinBaseline (`os.MkdirAll`) | internal/eval/mcp_tools.go:482 | internal:eval |
@@ -327,7 +327,7 @@ Total subprocess sites: 85
 | _(not set — inherits the process's own working directory)_ | `exec.Command("taskkill", "/PID", strconv.Itoa(pid))` | internal/engine/daemon_stop_windows.go:37 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))` | internal/engine/daemon_stop_windows.go:56 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH")` | internal/engine/daemon_stop_windows.go:77 | internal:engine |
-| `{cwd}` | `exec.Command(argv[0], argv[1:]...)` | internal/engine/managed_session_hermes.go:176 | internal:engine |
+| `{cwd}` | `exec.Command(argv[0], argv[1:]...)` | internal/engine/managed_session_hermes.go:191 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "python3", cmdArgs...)` | internal/engine/mcp_architecture.go:156 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command(player, args...)` | internal/engine/mcp_modality_proxy.go:879 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, rgPath, args...)` | internal/engine/mcp_server.go:3268 | internal:engine |
