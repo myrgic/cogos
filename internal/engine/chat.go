@@ -219,7 +219,7 @@ func sendChatRequest(baseURL string, messages []oaiMessage, model string) (strin
 	}
 
 	var sb strings.Builder
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := newStreamScanner(resp.Body)
 
 	for scanner.Scan() {
 		line := scanner.Text()

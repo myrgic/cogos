@@ -55,7 +55,15 @@ type Subprocess struct {
 
 	events chan Event
 	waitCh chan error // single-shot exit
+
+	readErr error // why readLoop stopped before EOF (e.g. a line over maxLineBytes); read after Events closes
 }
+
+// maxLineBytes bounds one stream-json line from the claude CLI. One frame can
+// carry a whole tool input (a write_file of a large file) on a single line;
+// it was 1 MiB, and a longer line ended the session's event stream silently.
+// Same limit as the engine's newStreamScanner and acprpc.MaxLineBytes.
+const maxLineBytes = 16 << 20
 
 // Spawn launches the claude subprocess and returns once it has started; it
 // does NOT wait for the first stream-json frame to arrive. Events() begins
@@ -149,11 +157,9 @@ func Spawn(ctx context.Context, opts SpawnOpts) (*Subprocess, error) {
 func (s *Subprocess) readLoop() {
 	defer close(s.events)
 	// Claude's per-line frames can be long when an assistant message
-	// arrives in one frame with embedded tool inputs; the default scanner
-	// buffer (64KB) overflows. Bump to 1MB.
+	// arrives in one frame with embedded tool inputs; see maxLineBytes.
 	scanner := bufio.NewScanner(s.out)
-	const maxLine = 1 << 20
-	scanner.Buffer(make([]byte, 0, 64<<10), maxLine)
+	scanner.Buffer(make([]byte, 0, 64<<10), maxLineBytes)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -166,7 +172,19 @@ func (s *Subprocess) readLoop() {
 		}
 		s.events <- ev
 	}
+	// A scanner error (bufio.ErrTooLong, a read error) ended the stream early:
+	// keep it so the caller can tell a truncated session from a clean EOF.
+	s.readErr = scanner.Err()
+	if s.readErr != nil {
+		// Keep draining so claude never blocks writing to a pipe nobody
+		// reads (Wait would then hang); the session is already over.
+		_, _ = io.Copy(io.Discard, s.out)
+	}
 }
+
+// ReadErr reports why the event stream ended before stdout's EOF, or nil for a
+// clean end. Valid once Events() has closed.
+func (s *Subprocess) ReadErr() error { return s.readErr }
 
 // Send writes one PromptInput to claude's stdin. Safe to call concurrently;
 // the first writer wins ordering on the line boundary, subsequent writers

@@ -215,6 +215,11 @@ func (ms *ManagedSession) startEventPump() {
 		// as Crashed with its exit error, not be reclassified as a clean
 		// detach. A requested stdin-close exits 0 (L1 finding,
 		// 2026-08-28), so a genuine graceful detach stays Detached.
+		if err == nil && ms.proc.ReadErr() != nil {
+			// The event stream ended early (a frame over the line limit, a
+			// read error): the turn was cut off even if claude exited 0.
+			err = fmt.Errorf("event stream truncated: %w", ms.proc.ReadErr())
+		}
 		ms.exitErr = err
 		if err != nil {
 			ms.state = StateCrashed

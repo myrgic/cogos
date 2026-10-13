@@ -16,7 +16,6 @@
 package engine
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -587,10 +586,8 @@ func (p *OllamaProvider) Stream(ctx context.Context, req *CompletionRequest) (<-
 		// set the correct OpenAI-compatible finish_reason on the final chunk.
 		sawToolCalls := false
 
-		// bufio.Scanner has a 64KB default token limit; some Ollama chunks
-		// (long tool-call arguments) can exceed it. Allow up to 1 MiB.
-		scanner := bufio.NewScanner(resp.Body)
-		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		// One NDJSON chunk can carry a long tool-call argument; see maxStreamLineBytes.
+		scanner := newStreamScanner(resp.Body)
 		for scanner.Scan() {
 			line := scanner.Text()
 			if line == "" {

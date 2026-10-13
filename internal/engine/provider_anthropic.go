@@ -14,7 +14,6 @@
 package engine
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -679,7 +678,7 @@ func parseAnthropicSSE(ctx context.Context, r io.Reader, ch chan<- StreamChunk, 
 		}
 	}
 
-	scanner := bufio.NewScanner(r)
+	scanner := newStreamScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
 
