@@ -545,18 +545,6 @@ func (p *Process) registerConfiguredTailers(manager *TailerManager) {
 			}
 			slog.Info("process: digest tailer registered", "adapter", adapterName, "path", path)
 
-		case "openclaw":
-			if path == "" {
-				slog.Warn("process: digest tailer path empty", "adapter", adapterName)
-				continue
-			}
-			path = expandDigestPath(path)
-			if err := manager.Register(&OpenClawTailer{}, path); err != nil {
-				slog.Warn("process: digest tailer register failed", "adapter", adapterName, "path", path, "err", err)
-				continue
-			}
-			slog.Info("process: digest tailer registered", "adapter", adapterName, "path", path)
-
 		default:
 			slog.Warn("process: unknown digest adapter", "adapter", adapterName)
 		}
@@ -592,7 +580,7 @@ func (p *Process) handleTailerBlock(block CogBlock) {
 	// conversation UUID carried on every JSONL line (see
 	// normalizeClaudeCodeLine — CogBlock.SessionID and
 	// BlockProvenance.OriginSession are both populated from entry.sessionId).
-	// OpenClaw and other tailers that don't stamp a session id fall through
+	// Tailers that don't stamp a session id fall through
 	// to the graceful-skip branch below.
 	sid := strings.TrimSpace(b.SessionID)
 	if sid == "" {
@@ -614,8 +602,8 @@ func (p *Process) handleTailerBlock(block CogBlock) {
 // channel is only for downstream query-driven notifications.
 //
 // Skips with a debug log when the originating session id is missing
-// (e.g. OpenClaw blocks, or Claude Code lines lacking the sessionId
-// field) or when no publisher has been wired — tailer ingestion never
+// (e.g. tailers that never stamp one, or Claude Code lines lacking the
+// sessionId field) or when no publisher has been wired — tailer ingestion never
 // fails on a missing side-channel.
 func (p *Process) publishSessionActivity(sid string, b *CogBlock, ref string) {
 	if b == nil {

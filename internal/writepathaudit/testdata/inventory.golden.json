@@ -26,20 +26,8 @@
       "raw": "path"
     },
     {
-      "file": "harness/claude.go",
-      "line": 205,
-      "column": 18,
-      "primitive": "os.CreateTemp",
-      "func": "GenerateMCPConfig",
-      "pattern": "\u003cTempDir\u003e",
-      "category": "elsewhere",
-      "resolved": true,
-      "subsystem": "harness",
-      "raw": "\"\""
-    },
-    {
       "file": "harness/codex.go",
-      "line": 265,
+      "line": 189,
       "column": 18,
       "primitive": "os.CreateTemp",
       "func": "writeCodexSchemaFile",
@@ -51,7 +39,7 @@
     },
     {
       "file": "harness/harness.go",
-      "line": 468,
+      "line": 455,
       "column": 16,
       "primitive": "os.OpenFile",
       "func": "(*Harness).RunInference",
@@ -1323,7 +1311,7 @@
     },
     {
       "file": "internal/engine/process.go",
-      "line": 1093,
+      "line": 1081,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "ensureBEPDeviceIdentity",
@@ -1335,7 +1323,7 @@
     },
     {
       "file": "internal/engine/process.go",
-      "line": 1132,
+      "line": 1120,
       "column": 14,
       "primitive": "os.Rename",
       "func": "ensureBEPDeviceIdentity",
@@ -2907,17 +2895,17 @@
     }
   ],
   "summary": {
-    "total": 242,
+    "total": 241,
     "cog": 100,
     "home": 2,
-    "elsewhere": 14,
+    "elsewhere": 13,
     "unanchored": 85,
     "dynamic": 41,
     "by_primitive": {
       "engine.AppendEvent(bucket)": 5,
       "io.Copy": 7,
       "os.Create": 6,
-      "os.CreateTemp": 9,
+      "os.CreateTemp": 8,
       "os.MkdirAll": 77,
       "os.MkdirTemp": 2,
       "os.OpenFile": 27,
@@ -2970,7 +2958,7 @@
     },
     {
       "file": "harness/codex.go",
-      "line": 400,
+      "line": 324,
       "column": 9,
       "func": "(*Harness).runCodexInference",
       "subsystem": "harness",
@@ -2980,7 +2968,7 @@
     },
     {
       "file": "harness/codex.go",
-      "line": 547,
+      "line": 471,
       "column": 9,
       "func": "(*Harness).runCodexInferenceStream",
       "subsystem": "harness",
@@ -2990,7 +2978,7 @@
     },
     {
       "file": "harness/harness.go",
-      "line": 435,
+      "line": 422,
       "column": 9,
       "func": "(*Harness).RunInference",
       "subsystem": "harness",
@@ -3000,7 +2988,7 @@
     },
     {
       "file": "harness/harness.go",
-      "line": 882,
+      "line": 856,
       "column": 9,
       "func": "(*Harness).RunInferenceStream",
       "subsystem": "harness",

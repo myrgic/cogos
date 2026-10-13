@@ -1,3 +1,0 @@
-{"type":"message","role":"user","content":"hello from openclaw","timestamp":"2026-04-01T10:00:00Z","session_id":"sess-123"}
-{"type":"tool_call","role":"assistant","content":"{\"name\":\"search\",\"arguments\":{\"q\":\"weather\"}}","timestamp":"2026-04-01T10:00:01Z","session_id":"sess-123"}
-{"type":"tool_result","role":"tool","content":"sunny","timestamp":"2026-04-01T10:00:02Z","session_id":"sess-123"}

@@ -88,11 +88,11 @@ func TestHandleTailerBlockPublishesToSessionChannel(t *testing.T) {
 			name: "block without session id writes ledger but skips publish",
 			block: CogBlock{
 				ID:            uuid.New().String(),
-				SourceChannel: "openclaw",
+				SourceChannel: "headless",
 				Kind:          BlockToolCall,
 				Provenance: BlockProvenance{
-					OriginChannel: "openclaw",
-					NormalizedBy:  "tailer-openclaw",
+					OriginChannel: "headless",
+					NormalizedBy:  "tailer-headless",
 				},
 			},
 			want: want{
@@ -200,7 +200,7 @@ func TestHandleTailerBlockPublishesToSessionChannel(t *testing.T) {
 // TestHandleTailerBlockNoPublisherWiredIsNoop confirms that a process
 // constructed without a session-activity publisher still ingests tailer
 // blocks (the ledger write is preserved; only the channel publish is
-// skipped). This is the OpenClaw / headless-benchmark path.
+// skipped). This is the headless-benchmark path.
 func TestHandleTailerBlockNoPublisherWiredIsNoop(t *testing.T) {
 	t.Parallel()
 

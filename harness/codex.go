@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -148,71 +147,6 @@ func tomlString(value string) string {
 	return strconv.Quote(value)
 }
 
-func tomlStringArray(values []string) string {
-	quoted := make([]string, 0, len(values))
-	for _, value := range values {
-		quoted = append(quoted, tomlString(value))
-	}
-	return "[" + strings.Join(quoted, ",") + "]"
-}
-
-func tomlInlineTable(values map[string]string) string {
-	if len(values) == 0 {
-		return "{}"
-	}
-
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	parts := make([]string, 0, len(keys))
-	for _, key := range keys {
-		parts = append(parts, fmt.Sprintf("%s=%s", key, tomlString(values[key])))
-	}
-	return "{" + strings.Join(parts, ", ") + "}"
-}
-
-func buildCodexMCPOverrides(req *InferenceRequest, kernel KernelServices) ([]string, error) {
-	if req.OpenClawURL == "" {
-		return nil, nil
-	}
-
-	cogBin, err := os.Executable()
-	if err != nil {
-		cogBin = "cog"
-	}
-
-	env := map[string]string{
-		"COG_ROOT":       kernel.WorkspaceRoot(),
-		"OPENCLAW_URL":   req.OpenClawURL,
-		"OPENCLAW_TOKEN": req.OpenClawToken,
-		"SESSION_ID":     req.SessionID,
-	}
-
-	if otelEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); otelEndpoint != "" {
-		env["OTEL_EXPORTER_OTLP_ENDPOINT"] = otelEndpoint
-	}
-
-	if len(req.Tools) > 0 {
-		mcpTools := kernel.ConvertOpenAIToolsToMCP(req.Tools)
-		if len(mcpTools) > 0 {
-			toolsJSON, err := json.Marshal(mcpTools)
-			if err != nil {
-				return nil, fmt.Errorf("serialize MCP tool registry: %w", err)
-			}
-			env["TOOL_REGISTRY"] = string(toolsJSON)
-		}
-	}
-
-	return []string{
-		`mcp_servers.cogos_bridge.command=` + tomlString(cogBin),
-		`mcp_servers.cogos_bridge.args=` + tomlStringArray([]string{"mcp", "serve", "--bridge"}),
-		`mcp_servers.cogos_bridge.env=` + tomlInlineTable(env),
-	}, nil
-}
-
 func BuildCodexArgs(req *InferenceRequest, schemaPath string, kernel KernelServices) ([]string, error) {
 	// All flags must go on `exec` before any subcommand like `resume`.
 	// `codex exec --json --sandbox workspace-write resume <id> <prompt>`
@@ -236,16 +170,6 @@ func BuildCodexArgs(req *InferenceRequest, schemaPath string, kernel KernelServi
 
 	if schemaPath != "" {
 		args = append(args, "--output-schema", schemaPath)
-	}
-
-	if kernel != nil {
-		overrides, err := buildCodexMCPOverrides(req, kernel)
-		if err != nil {
-			return nil, err
-		}
-		for _, override := range overrides {
-			args = append(args, "-c", override)
-		}
 	}
 
 	// Subcommand and positional args come after all flags
