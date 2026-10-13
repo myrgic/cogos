@@ -195,6 +195,11 @@ func normalizeAnthropicMessages(msgs []anthropicMessage) ([]anthropicMessage, Re
 	// Pass 1: I6 thinking-strip + I5 empty-drop (single walk).
 	msgs, rpt = passThinkingAndEmpty(msgs, rpt)
 
+	// Merge consecutive same-role messages BEFORE tool pairing. buildAnthropicRequest emits one user message per
+	// role:"tool" result, so a step with N parallel tool calls arrives as assistant{tu1..tuN} followed by N separate
+	// user messages. passToolPairing closes the tool_use scope at the first user message, so results 2..N were
+	// dropped as orphans and then tool_use 2..N as unanswered: the model never saw its own later calls.
+	msgs, rpt = passAlternation(msgs, rpt)
 	// Settle loop: passes 2-5 may feed each other.
 	// Converges because message count is monotonically non-increasing (every drop
 	// or merge strictly shrinks the count; block reorders preserve count but are
