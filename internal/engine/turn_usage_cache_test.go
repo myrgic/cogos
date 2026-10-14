@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -55,5 +57,42 @@ func TestTurnRecordCarriesCacheUsage(t *testing.T) {
 				t.Fatalf("total = %d; want %d", u.TotalTokens, 22+1+10000+500)
 			}
 		})
+	}
+}
+
+// errProvider fails every completion, simulating a provider-error turn.
+type errProvider struct{ StubProvider }
+
+func (p *errProvider) Complete(context.Context, *CompletionRequest) (*CompletionResponse, error) {
+	return nil, errors.New("boom")
+}
+
+// An errored turn has no provider usage, so its turn.completed event must keep
+// omitting the "usage" key (request_id/wall_ms are stamped only with usage).
+func TestErroredTurnOmitsUsageKey(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+	router := NewSimpleRouter(RoutingConfig{Default: "stub"})
+	router.RegisterProvider(&errProvider{StubProvider: *NewStubProvider("stub", "ok")})
+	srv.SetRouter(router)
+
+	body := `{"model":"claude","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":false}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleAnthropicMessages(httptest.NewRecorder(), req)
+
+	evs, err := readTurnCompletedEvents(srv.cfg.WorkspaceRoot, srv.process.SessionID())
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("turn.completed events = %d; want 1", len(evs))
+	}
+	d := evs[0].HashedPayload.Data
+	if d["status"] != "error" {
+		t.Fatalf("status = %v; want error", d["status"])
+	}
+	if _, ok := d["usage"]; ok {
+		t.Fatalf("errored turn emitted usage key: %v", d["usage"])
 	}
 }

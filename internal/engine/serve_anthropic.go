@@ -600,8 +600,12 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	}
 
 	turn.DurationMs = time.Since(turnStart).Milliseconds()
-	turn.Usage.RequestID = creq.Metadata.RequestID
-	turn.Usage.WallMS = turn.DurationMs
+	// Stamp only when the provider produced usage: an errored turn keeps a
+	// zero Usage so RecordTurn omits the "usage" key as before.
+	if turn.Usage != (TurnUsage{}) {
+		turn.Usage.RequestID = creq.Metadata.RequestID
+		turn.Usage.WallMS = turn.DurationMs
+	}
 	if err := s.process.RecordTurn(turn); err != nil {
 		slog.Warn("anthropic: RecordTurn failed", "err", err, "session", turn.SessionID)
 	}

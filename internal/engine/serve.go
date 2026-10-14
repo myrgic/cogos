@@ -1643,8 +1643,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// Persist the turn (ledger event + sidecar). Closes cogos#20 by
 	// capturing the full prompt/response pair, which RecordBlock drops.
 	turn.DurationMs = time.Since(inferStart).Milliseconds()
-	turn.Usage.RequestID = creq.Metadata.RequestID
-	turn.Usage.WallMS = turn.DurationMs
+	// Stamp only when the provider produced usage: an errored turn keeps a
+	// zero Usage so RecordTurn omits the "usage" key as before.
+	if turn.Usage != (TurnUsage{}) {
+		turn.Usage.RequestID = creq.Metadata.RequestID
+		turn.Usage.WallMS = turn.DurationMs
+	}
 	if err := s.process.RecordTurn(turn); err != nil {
 		slog.Warn("chat: RecordTurn failed", "err", err, "session", turn.SessionID)
 	}
