@@ -600,6 +600,8 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	}
 
 	turn.DurationMs = time.Since(turnStart).Milliseconds()
+	turn.Usage.RequestID = creq.Metadata.RequestID
+	turn.Usage.WallMS = turn.DurationMs
 	if err := s.process.RecordTurn(turn); err != nil {
 		slog.Warn("anthropic: RecordTurn failed", "err", err, "session", turn.SessionID)
 	}
@@ -711,11 +713,8 @@ func (s *Server) completeAnthropicMessages(w http.ResponseWriter, ctx context.Co
 
 	if turn != nil {
 		turn.Response = resp.Content
-		turn.Usage = TurnUsage{
-			InputTokens:  resp.Usage.InputTokens,
-			OutputTokens: resp.Usage.OutputTokens,
-			TotalTokens:  resp.Usage.InputTokens + resp.Usage.OutputTokens,
-		}
+		turn.Usage = newTurnUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens,
+			resp.Usage.CacheReadTokens, resp.Usage.CacheWriteTokens)
 		if len(resp.ToolCalls) > 0 {
 			for _, tc := range resp.ToolCalls {
 				turn.ToolCalls = append(turn.ToolCalls, ToolCallRecord{
@@ -928,11 +927,8 @@ func (s *Server) streamAnthropicMessages(w http.ResponseWriter, ctx context.Cont
 			}
 			if turn != nil {
 				turn.Response = respBuf.String()
-				turn.Usage = TurnUsage{
-					InputTokens:  usage.InputTokens,
-					OutputTokens: usage.OutputTokens,
-					TotalTokens:  usage.InputTokens + usage.OutputTokens,
-				}
+				turn.Usage = newTurnUsage(usage.InputTokens, usage.OutputTokens,
+					usage.CacheReadInputTokens, usage.CacheCreationInputTokens)
 			}
 			writeEvent("message_delta", map[string]any{
 				"type": "message_delta",

@@ -70,10 +70,31 @@ type TurnRecord struct {
 }
 
 // TurnUsage is a minimal (provider-neutral) token tally for a turn.
+//
+// InputTokens is the UNCACHED input tail (Anthropic semantics). CacheReadTokens
+// and CacheWriteTokens are reported separately. TotalTokens includes all four.
+// RequestID is the kernel request id for the turn; WallMS is the wall time from
+// request start to turn persistence.
 type TurnUsage struct {
-	InputTokens  int `json:"input_tokens,omitempty"`
-	OutputTokens int `json:"output_tokens,omitempty"`
-	TotalTokens  int `json:"total_tokens,omitempty"`
+	InputTokens      int    `json:"input_tokens,omitempty"`
+	OutputTokens     int    `json:"output_tokens,omitempty"`
+	TotalTokens      int    `json:"total_tokens,omitempty"`
+	CacheReadTokens  int    `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int    `json:"cache_write_tokens,omitempty"`
+	RequestID        string `json:"request_id,omitempty"`
+	WallMS           int64  `json:"wall_ms,omitempty"`
+}
+
+// newTurnUsage builds a TurnUsage from provider token counts. in is the
+// uncached input tail; cacheRead and cacheWrite are kept separate.
+func newTurnUsage(in, out, cacheRead, cacheWrite int) TurnUsage {
+	return TurnUsage{
+		InputTokens:      in,
+		OutputTokens:     out,
+		TotalTokens:      in + cacheRead + cacheWrite + out,
+		CacheReadTokens:  cacheRead,
+		CacheWriteTokens: cacheWrite,
+	}
 }
 
 // ToolCallRecord is one kernel-owned tool invocation within a turn.
@@ -422,9 +443,13 @@ func (p *Process) RecordTurn(turn *TurnRecord) error {
 	}
 	if turn.Usage != (TurnUsage{}) {
 		data["usage"] = map[string]interface{}{
-			"input_tokens":  turn.Usage.InputTokens,
-			"output_tokens": turn.Usage.OutputTokens,
-			"total_tokens":  turn.Usage.TotalTokens,
+			"input_tokens":       turn.Usage.InputTokens,
+			"output_tokens":      turn.Usage.OutputTokens,
+			"total_tokens":       turn.Usage.TotalTokens,
+			"cache_read_tokens":  turn.Usage.CacheReadTokens,
+			"cache_write_tokens": turn.Usage.CacheWriteTokens,
+			"request_id":         turn.Usage.RequestID,
+			"wall_ms":            turn.Usage.WallMS,
 		}
 	}
 	if turn.Error != "" {

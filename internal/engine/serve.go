@@ -1643,6 +1643,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// Persist the turn (ledger event + sidecar). Closes cogos#20 by
 	// capturing the full prompt/response pair, which RecordBlock drops.
 	turn.DurationMs = time.Since(inferStart).Milliseconds()
+	turn.Usage.RequestID = creq.Metadata.RequestID
+	turn.Usage.WallMS = turn.DurationMs
 	if err := s.process.RecordTurn(turn); err != nil {
 		slog.Warn("chat: RecordTurn failed", "err", err, "session", turn.SessionID)
 	}
@@ -1857,11 +1859,8 @@ func (s *Server) completeChat(w http.ResponseWriter, ctx context.Context, req *C
 	}
 	if turn != nil {
 		turn.Response = resp.Content
-		turn.Usage = TurnUsage{
-			InputTokens:  resp.Usage.InputTokens,
-			OutputTokens: resp.Usage.OutputTokens,
-			TotalTokens:  resp.Usage.InputTokens + resp.Usage.OutputTokens,
-		}
+		turn.Usage = newTurnUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens,
+			resp.Usage.CacheReadTokens, resp.Usage.CacheWriteTokens)
 		// Non-kernel tool calls returned to the client become transcript
 		// entries with empty result (the client will execute them).
 		if len(resp.ToolCalls) > 0 {
@@ -2372,11 +2371,8 @@ func (s *Server) flushStreamHop(buf *streamHopBuffer, externalCalls []ToolCall,
 	if turn != nil {
 		turn.Response = buf.content.String()
 		if buf.usage != nil {
-			turn.Usage = TurnUsage{
-				InputTokens:  buf.usage.InputTokens,
-				OutputTokens: buf.usage.OutputTokens,
-				TotalTokens:  buf.usage.InputTokens + buf.usage.OutputTokens,
-			}
+			turn.Usage = newTurnUsage(buf.usage.InputTokens, buf.usage.OutputTokens,
+				buf.usage.CacheReadTokens, buf.usage.CacheWriteTokens)
 		}
 		// Audit-fidelity fix: when the model replies via speak/send_text/output
 		// tool calls, the streaming buffer text content is empty. Extract the
