@@ -483,6 +483,28 @@ type openaiUsageResponse struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// OpenAI (and cache-reporting compatible backends) fold cached prompt tokens
+	// into prompt_tokens and report the cached share here.
+	PromptTokensDetails *openaiPromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+type openaiPromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+// tokenUsage maps OpenAI-shaped usage onto TokenUsage. prompt_tokens includes
+// cached tokens; TokenUsage.InputTokens is the uncached tail, so the cached
+// share moves to CacheReadTokens (same convention as the codex provider).
+func (u *openaiUsageResponse) tokenUsage() TokenUsage {
+	cached := 0
+	if u.PromptTokensDetails != nil {
+		cached = u.PromptTokensDetails.CachedTokens
+	}
+	return TokenUsage{
+		InputTokens:     max(u.PromptTokens-cached, 0),
+		OutputTokens:    u.CompletionTokens,
+		CacheReadTokens: cached,
+	}
 }
 
 // SSE streaming chunk.
@@ -818,10 +840,7 @@ func parseOpenAIResponse(or *openaiChatResponse, model, providerName string, lat
 	}
 
 	if or.Usage != nil {
-		cr.Usage = TokenUsage{
-			InputTokens:  or.Usage.PromptTokens,
-			OutputTokens: or.Usage.CompletionTokens,
-		}
+		cr.Usage = or.Usage.tokenUsage()
 	}
 
 	return cr
@@ -989,10 +1008,8 @@ func parseOpenAISSE(ctx context.Context, r io.Reader, ch chan<- StreamChunk, mod
 		},
 	}
 	if usage != nil {
-		final.Usage = &TokenUsage{
-			InputTokens:  usage.PromptTokens,
-			OutputTokens: usage.CompletionTokens,
-		}
+		u := usage.tokenUsage()
+		final.Usage = &u
 	}
 	send(final)
 }
