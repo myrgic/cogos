@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -266,5 +267,44 @@ func TestProjectionWatcher_GrowingNodesDirSwitchesToPolling(t *testing.T) {
 			t.Fatal("polling never triggered after the switch")
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// Stop racing a cap-recheck tick must not panic, must not double-close the
+// fsnotify watcher, and must never hand over to polling after Stop returned.
+func TestProjectionWatcher_StopRacesCrossingTick(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		nodes := t.TempDir()
+		var stopped atomic.Bool
+		var lateSwitch atomic.Bool
+		w := NewProjectionWatcher(nodes, func(ctx context.Context) error { return nil }, 50*time.Millisecond)
+		w.recheckInterval = time.Millisecond
+		w.onSwitchToPolling = func() {
+			if stopped.Load() {
+				lateSwitch.Store(true)
+			}
+		}
+		if err := w.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		w.mu.Lock()
+		hasWatcher := w.watcher != nil
+		w.mu.Unlock()
+		if !hasWatcher {
+			w.Stop()
+			t.Skip("fsnotify unavailable; nothing to race")
+		}
+		for j := 0; j <= memWatcherDirEntryCap; j++ {
+			if err := os.WriteFile(filepath.Join(nodes, fmt.Sprintf("n%d.md", j)), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		time.Sleep(time.Duration(i%5) * time.Millisecond)
+		w.Stop()
+		stopped.Store(true)
+		time.Sleep(10 * time.Millisecond)
+		if lateSwitch.Load() {
+			t.Fatalf("iteration %d: switched to polling after Stop returned", i)
+		}
 	}
 }

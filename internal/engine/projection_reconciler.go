@@ -538,6 +538,10 @@ type ProjectionWatcher struct {
 	// entry cap; 0 uses memWatcherPollInterval.
 	recheckInterval time.Duration
 
+	// onSwitchToPolling, when set, is called under mu at the moment
+	// runFsnotify hands over to runPolling.  Test hook.
+	onSwitchToPolling func()
+
 	mu      sync.Mutex
 	running bool
 	stopCh  chan struct{}
@@ -646,12 +650,25 @@ func (w *ProjectionWatcher) runFsnotify(ctx context.Context, fsWatcher *fsnotify
 			if !dirOverCap(w.NodesDir, memWatcherDirEntryCap) {
 				continue
 			}
-			log.Printf("[projection-watcher] %s grew past %d entries, switching to polling", w.NodesDir, memWatcherDirEntryCap)
+			// Stop may have won the race with this tick: it closes stopCh and
+			// the watcher under w.mu.  Only the caller that still owns the
+			// watcher closes it, and polling is never entered after Stop.
+			select {
+			case <-w.stopCh:
+				return
+			default:
+			}
 			w.mu.Lock()
-			if w.watcher == fsWatcher {
-				w.watcher = nil
+			if !w.running || w.watcher != fsWatcher {
+				w.mu.Unlock()
+				return
+			}
+			w.watcher = nil
+			if w.onSwitchToPolling != nil {
+				w.onSwitchToPolling()
 			}
 			w.mu.Unlock()
+			log.Printf("[projection-watcher] %s grew past %d entries, switching to polling", w.NodesDir, memWatcherDirEntryCap)
 			fsWatcher.Close()
 			w.runPolling(ctx)
 			return
