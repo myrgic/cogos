@@ -15,6 +15,9 @@
 //  3. On a Create or Write event whose target is a *.cog.md file, calling
 //     indexer.IndexFile after a 500ms debounce window (coalesces rapid saves).
 //
+// Directories with more than memWatcherDirEntryCap entries are not handed to
+// fsnotify (kqueue holds one fd per file in a watched dir); they are polled.
+//
 // The watcher is started from Boot() after WireConstellationIndexer runs.
 // When pkgFTSRepairIndexer is nil (tests, CLI) the watcher is not started.
 package engine
@@ -30,7 +33,27 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-const memWatcherDebounce = 500 * time.Millisecond
+const (
+	memWatcherDebounce = 500 * time.Millisecond
+
+	// memWatcherDirEntryCap is the largest directory (by entry count) that is
+	// handed to fsnotify.  fsnotify's kqueue backend (macOS/BSD) opens one fd
+	// per file in every watched directory, so bulk corpus directories would
+	// hold fds proportional to corpus size and starve the HTTP listener.
+	// Directories over the cap are covered by a cheap periodic poll instead.
+	memWatcherDirEntryCap = 256
+
+	// memWatcherPollInterval is how often skipped (oversized) directories are
+	// re-listed and diffed.
+	memWatcherPollInterval = 30 * time.Second
+)
+
+// polledFile is the (mtime, size) fingerprint used to diff a polled directory.
+type polledFile struct {
+	mtime time.Time
+	size  int64
+	dir   bool
+}
 
 // MemWatcher watches .cog/mem/ for new subdirectories and .cog.md writes,
 // forwarding index updates to the wired ConstellationIndexer.
@@ -38,6 +61,12 @@ type MemWatcher struct {
 	memDir  string
 	indexer ConstellationIndexer
 	stopCh  chan struct{}
+
+	// pollInterval is the re-scan period for oversized directories.
+	pollInterval time.Duration
+	// polled maps each oversized directory to its last-seen listing.  Owned by
+	// the event-loop goroutine once Start has returned.
+	polled map[string]map[string]polledFile
 
 	mu      sync.Mutex
 	running bool
@@ -50,6 +79,9 @@ func NewMemWatcher(memDir string, indexer ConstellationIndexer) *MemWatcher {
 		memDir:  memDir,
 		indexer: indexer,
 		stopCh:  make(chan struct{}),
+
+		pollInterval: memWatcherPollInterval,
+		polled:       make(map[string]map[string]polledFile),
 	}
 }
 
@@ -74,7 +106,7 @@ func (w *MemWatcher) Start() error {
 		return err
 	}
 
-	// Add the root mem dir.
+	// Add the root mem dir.  The root is always watched, regardless of size.
 	if err := fsw.Add(w.memDir); err != nil {
 		fsw.Close()
 		return err
@@ -86,9 +118,7 @@ func (w *MemWatcher) Start() error {
 		if err != nil || !d.IsDir() || path == w.memDir {
 			return nil
 		}
-		if addErr := fsw.Add(path); addErr != nil {
-			slog.Debug("mem_watcher: could not add existing dir", "path", path, "err", addErr)
-		}
+		w.watchDir(fsw, path)
 		return nil
 	})
 
@@ -123,8 +153,15 @@ func (w *MemWatcher) loop(fsw *fsnotify.Watcher) {
 	debounce := make(map[string]*time.Timer)
 	var mu sync.Mutex // guards debounce map
 
+	// Poll tick for oversized directories; a no-op when none are registered.
+	ticker := time.NewTicker(w.pollInterval)
+	defer ticker.Stop()
+
 	for {
 		select {
+		case <-ticker.C:
+			w.pollOversized(fsw, debounce, &mu)
+
 		case <-w.stopCh:
 			mu.Lock()
 			for _, t := range debounce {
@@ -148,13 +185,7 @@ func (w *MemWatcher) loop(fsw *fsnotify.Watcher) {
 					break
 				}
 				if info.IsDir() {
-					if addErr := fsw.Add(path); addErr != nil {
-						slog.Debug("mem_watcher: failed to add new dir",
-							"path", path, "err", addErr)
-					} else {
-						slog.Debug("mem_watcher: added new sector dir", "path", path)
-					}
-					// Also index any .cog.md file if the Create event is for a file.
+					w.watchDir(fsw, path)
 					break
 				}
 				// File create — fall through to the *.cog.md check below.
@@ -176,6 +207,87 @@ func (w *MemWatcher) loop(fsw *fsnotify.Watcher) {
 				return
 			}
 			slog.Debug("mem_watcher: fsnotify error", "err", err)
+		}
+	}
+}
+
+// watchDir decides how a directory is covered.  Small directories get an
+// fsnotify watch; directories with more than memWatcherDirEntryCap entries are
+// registered for periodic polling instead, so fd use stays independent of
+// corpus size on kqueue platforms.  Linux behaves the same (inotify is cheap
+// per file, but the poll keeps the two platforms equivalent and bounded).
+func (w *MemWatcher) watchDir(fsw *fsnotify.Watcher, path string) {
+	if dirOverCap(path, memWatcherDirEntryCap) {
+		if _, ok := w.polled[path]; !ok {
+			w.polled[path] = w.listDir(path)
+			slog.Warn("mem_watcher: directory too large for fsnotify, polling instead",
+				"path", path, "cap", memWatcherDirEntryCap, "interval", w.pollInterval)
+		}
+		return
+	}
+	if err := fsw.Add(path); err != nil {
+		slog.Debug("mem_watcher: could not add dir", "path", path, "err", err)
+		return
+	}
+	slog.Debug("mem_watcher: watching dir", "path", path)
+}
+
+// dirOverCap reports whether dir holds more than limit entries.  It reads at
+// most limit+1 names so the cost is bounded even for huge directories.
+func dirOverCap(dir string, limit int) bool {
+	f, err := os.Open(dir)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	names, _ := f.Readdirnames(limit + 1)
+	return len(names) > limit
+}
+
+// listDir snapshots dir as name → fingerprint.
+func (w *MemWatcher) listDir(dir string) map[string]polledFile {
+	out := make(map[string]polledFile)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		out[e.Name()] = polledFile{mtime: info.ModTime(), size: info.Size(), dir: e.IsDir()}
+	}
+	return out
+}
+
+// pollOversized re-lists every polled directory and emits the same events the
+// fsnotify path would: new/changed *.cog.md files are scheduled for indexing
+// and new subdirectories are routed through watchDir.
+func (w *MemWatcher) pollOversized(fsw *fsnotify.Watcher, debounce map[string]*time.Timer, mu *sync.Mutex) {
+	for dir, prev := range w.polled {
+		cur := w.listDir(dir)
+		if len(cur) == 0 {
+			if _, err := os.Stat(dir); err != nil {
+				delete(w.polled, dir)
+				continue
+			}
+		}
+		w.polled[dir] = cur
+		for name, fp := range cur {
+			old, seen := prev[name]
+			if seen && old == fp {
+				continue
+			}
+			full := filepath.Join(dir, name)
+			switch {
+			case fp.dir:
+				if !seen {
+					w.watchDir(fsw, full)
+				}
+			case strings.HasSuffix(name, ".cog.md"):
+				w.scheduleIndex(full, debounce, mu)
+			}
 		}
 	}
 }
