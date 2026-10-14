@@ -618,7 +618,9 @@ func (p *CodexProvider) parseEventLine(line []byte) (string, *TokenUsage, bool) 
 	case "turn.completed":
 		if evt.Usage != nil {
 			usage := &TokenUsage{
-				InputTokens:     evt.Usage.InputTokens,
+				// codex input_tokens includes cached tokens; TokenUsage.InputTokens
+				// is uncached-only, so subtract to avoid double counting downstream.
+				InputTokens:     max(evt.Usage.InputTokens-evt.Usage.CachedInputTokens, 0),
 				OutputTokens:    evt.Usage.OutputTokens,
 				CacheReadTokens: evt.Usage.CachedInputTokens,
 			}
