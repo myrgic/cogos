@@ -1099,6 +1099,7 @@ func (p *ClaudeOAuthProvider) Complete(ctx context.Context, req *CompletionReque
 		rpt2.emit("claudeoauth.post_relocate")
 	}
 	applyAnthropicCacheBreakpoints(payload)
+	applyOAuthRelocatedCacheBreakpoint(payload, relocated)
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -1230,6 +1231,7 @@ func (p *ClaudeOAuthProvider) Stream(ctx context.Context, req *CompletionRequest
 		rpt2.emit("claudeoauth.stream.post_relocate")
 	}
 	applyAnthropicCacheBreakpoints(payload)
+	applyOAuthRelocatedCacheBreakpoint(payload, relocated)
 
 	body, err := json.Marshal(payload)
 	if err != nil {
