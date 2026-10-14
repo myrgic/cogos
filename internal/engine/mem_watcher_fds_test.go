@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -201,4 +202,69 @@ func watchedRoot(fsw *fsnotify.Watcher, root string) bool {
 		}
 	}
 	return false
+}
+
+func TestProjectionWatcher_GrowingNodesDirSwitchesToPolling(t *testing.T) {
+	nodes := t.TempDir()
+	var mu sync.Mutex
+	triggers := 0
+	w := NewProjectionWatcher(nodes, func(ctx context.Context) error {
+		mu.Lock()
+		triggers++
+		mu.Unlock()
+		return nil
+	}, 100*time.Millisecond)
+	w.recheckInterval = 100 * time.Millisecond
+	if err := w.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+	w.mu.Lock()
+	if w.watcher == nil {
+		w.mu.Unlock()
+		t.Skip("fsnotify unavailable; nothing to switch from")
+	}
+	w.mu.Unlock()
+
+	for i := 0; i <= memWatcherDirEntryCap; i++ {
+		if err := os.WriteFile(filepath.Join(nodes, fmt.Sprintf("n%d.md", i)), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		w.mu.Lock()
+		switched := w.watcher == nil
+		w.mu.Unlock()
+		if switched {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("watcher never switched to polling after nodes dir crossed the cap")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Polling must still fire the trigger for a later change.
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	before := triggers
+	mu.Unlock()
+	time.Sleep(1100 * time.Millisecond) // mtime granularity
+	if err := os.WriteFile(filepath.Join(nodes, "late.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := triggers
+		mu.Unlock()
+		if n > before {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("polling never triggered after the switch")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }

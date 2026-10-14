@@ -534,6 +534,9 @@ type ProjectionWatcher struct {
 	NodesDir     string
 	Trigger      func(ctx context.Context) error
 	PollInterval time.Duration
+	// recheckInterval is how often runFsnotify re-checks NodesDir against the
+	// entry cap; 0 uses memWatcherPollInterval.
+	recheckInterval time.Duration
 
 	mu      sync.Mutex
 	running bool
@@ -624,11 +627,33 @@ func (w *ProjectionWatcher) runFsnotify(ctx context.Context, fsWatcher *fsnotify
 	var debounceTimer *time.Timer
 	var timerMu sync.Mutex
 
+	// A nodes/ dir can grow past the entry cap after Start; re-check on a tick
+	// and fall over to polling for the rest of the process life.
+	recheck := w.recheckInterval
+	if recheck == 0 {
+		recheck = memWatcherPollInterval
+	}
+	ticker := time.NewTicker(recheck)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-w.stopCh:
 			return
 		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !dirOverCap(w.NodesDir, memWatcherDirEntryCap) {
+				continue
+			}
+			log.Printf("[projection-watcher] %s grew past %d entries, switching to polling", w.NodesDir, memWatcherDirEntryCap)
+			w.mu.Lock()
+			if w.watcher == fsWatcher {
+				w.watcher = nil
+			}
+			w.mu.Unlock()
+			fsWatcher.Close()
+			w.runPolling(ctx)
 			return
 		case event, ok := <-fsWatcher.Events:
 			if !ok {
