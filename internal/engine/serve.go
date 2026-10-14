@@ -1004,10 +1004,44 @@ type oaiChoice struct {
 	FinishReason *string     `json:"finish_reason"`
 }
 
+// oaiUsage is the OpenAI-shaped usage object.
+//
+// Convention (matches OpenAI): prompt_tokens is the TOTAL prompt size, i.e.
+// uncached input + cache reads + cache writes, and
+// prompt_tokens_details.cached_tokens is a subset of it. total_tokens is
+// prompt_tokens + completion_tokens. Cache-creation tokens are reported in the
+// extension field prompt_tokens_details.cache_write_tokens (also a subset of
+// prompt_tokens); this is the name Hermes' extract_cache_stats reads.
+// prompt_tokens_details is omitted when both cache counts are zero.
 type oaiUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int                   `json:"prompt_tokens"`
+	CompletionTokens    int                   `json:"completion_tokens"`
+	TotalTokens         int                   `json:"total_tokens"`
+	PromptTokensDetails *oaiPromptTokenDetail `json:"prompt_tokens_details,omitempty"`
+}
+
+type oaiPromptTokenDetail struct {
+	CachedTokens     int `json:"cached_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
+}
+
+// oaiUsageFrom converts provider TokenUsage (whose InputTokens excludes cache
+// reads/writes) into the OpenAI usage shape. Shared by the non-streaming and
+// streaming-final-chunk paths so they cannot drift.
+func oaiUsageFrom(u TokenUsage) *oaiUsage {
+	prompt := u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens
+	out := &oaiUsage{
+		PromptTokens:     prompt,
+		CompletionTokens: u.OutputTokens,
+		TotalTokens:      prompt + u.OutputTokens,
+	}
+	if u.CacheReadTokens != 0 || u.CacheWriteTokens != 0 {
+		out.PromptTokensDetails = &oaiPromptTokenDetail{
+			CachedTokens:     u.CacheReadTokens,
+			CacheWriteTokens: u.CacheWriteTokens,
+		}
+	}
+	return out
 }
 
 type oaiChatResponse struct {
@@ -1932,11 +1966,7 @@ func (s *Server) completeChat(w http.ResponseWriter, ctx context.Context, req *C
 			Message:      msg,
 			FinishReason: &finishReason,
 		}},
-		Usage: &oaiUsage{
-			PromptTokens:     resp.Usage.InputTokens,
-			CompletionTokens: resp.Usage.OutputTokens,
-			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
-		},
+		Usage: oaiUsageFrom(resp.Usage),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(oai)
@@ -2365,11 +2395,7 @@ func (s *Server) flushStreamHop(buf *streamHopBuffer, externalCalls []ToolCall,
 		Choices: []oaiChoice{{Index: 0, FinishReason: &finishReason}},
 	}
 	if streamOpts != nil && streamOpts.IncludeUsage && buf.usage != nil {
-		data.Usage = &oaiUsage{
-			PromptTokens:     buf.usage.InputTokens,
-			CompletionTokens: buf.usage.OutputTokens,
-			TotalTokens:      buf.usage.InputTokens + buf.usage.OutputTokens,
-		}
+		data.Usage = oaiUsageFrom(*buf.usage)
 	}
 	b, _ := json.Marshal(data)
 	writeSSE(b)
