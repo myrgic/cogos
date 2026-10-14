@@ -573,9 +573,16 @@ func (w *ProjectionWatcher) Start(ctx context.Context) error {
 	w.stopCh = make(chan struct{})
 	w.running = true
 
-	// Try fsnotify; fall back to polling on failure.
+	// Try fsnotify; fall back to polling on failure.  An oversized nodes/
+	// directory is polled too: kqueue holds one fd per file in a watched dir.
 	fsWatcher, err := fsnotify.NewWatcher()
-	if err != nil {
+	if dirOverCap(w.NodesDir, memWatcherDirEntryCap) {
+		log.Printf("[projection-watcher] %s has more than %d entries, using polling fallback", w.NodesDir, memWatcherDirEntryCap)
+		if err == nil {
+			fsWatcher.Close()
+		}
+		fsWatcher = nil
+	} else if err != nil {
 		log.Printf("[projection-watcher] fsnotify unavailable (%v), using polling fallback", err)
 		fsWatcher = nil
 	} else if err := fsWatcher.Add(w.NodesDir); err != nil {
