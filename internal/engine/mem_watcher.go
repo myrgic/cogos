@@ -160,6 +160,7 @@ func (w *MemWatcher) loop(fsw *fsnotify.Watcher) {
 	for {
 		select {
 		case <-ticker.C:
+			w.demoteOversized(fsw)
 			w.pollOversized(fsw, debounce, &mu)
 
 		case <-w.stopCh:
@@ -230,6 +231,26 @@ func (w *MemWatcher) watchDir(fsw *fsnotify.Watcher, path string) {
 		return
 	}
 	slog.Debug("mem_watcher: watching dir", "path", path)
+}
+
+// demoteOversized re-checks every fsnotify-watched directory against the entry
+// cap.  A directory that grew past it one Create at a time would otherwise keep
+// its watch (and its per-file kqueue fds) forever; it is moved to the polled
+// set, seeded with the current listing so no spurious events fire.  One-way:
+// polled directories are never promoted back.  The root is always watched.
+func (w *MemWatcher) demoteOversized(fsw *fsnotify.Watcher) {
+	for _, dir := range fsw.WatchList() {
+		if dir == w.memDir || !dirOverCap(dir, memWatcherDirEntryCap) {
+			continue
+		}
+		if err := fsw.Remove(dir); err != nil {
+			slog.Debug("mem_watcher: could not remove watch", "path", dir, "err", err)
+			continue
+		}
+		w.polled[dir] = w.listDir(dir)
+		slog.Warn("mem_watcher: directory grew past fsnotify cap, polling instead",
+			"path", dir, "cap", memWatcherDirEntryCap, "interval", w.pollInterval)
+	}
 }
 
 // dirOverCap reports whether dir holds more than limit entries.  It reads at

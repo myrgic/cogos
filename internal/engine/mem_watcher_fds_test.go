@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 type fdTestIndexer struct {
@@ -109,4 +111,94 @@ func TestMemWatcher_BulkDirsDoNotHoldFDs(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+func TestMemWatcher_GrowingDirIsDemotedToPolling(t *testing.T) {
+	mem := t.TempDir()
+	grow := filepath.Join(mem, "growing")
+	if err := os.MkdirAll(grow, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	idx := &fdTestIndexer{}
+	w := NewMemWatcher(mem, idx)
+	w.pollInterval = 100 * time.Millisecond
+
+	// Unit step: drive demoteOversized synchronously against a real watcher.
+	fsw, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fsw.Close()
+	if err := fsw.Add(mem); err != nil {
+		t.Fatal(err)
+	}
+	w.watchDir(fsw, grow)
+	watched := func() bool {
+		for _, p := range fsw.WatchList() {
+			if p == grow {
+				return true
+			}
+		}
+		return false
+	}
+	if !watched() {
+		t.Fatal("small dir should start fsnotify-watched")
+	}
+	for i := 0; i <= memWatcherDirEntryCap; i++ {
+		if err := os.WriteFile(filepath.Join(grow, fmt.Sprintf("f%d.cog.md", i)), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.demoteOversized(fsw)
+	if watched() {
+		t.Fatal("dir past the cap is still fsnotify-watched")
+	}
+	if _, ok := w.polled[grow]; !ok {
+		t.Fatal("dir past the cap was not registered for polling")
+	}
+	if len(w.polled[grow]) != memWatcherDirEntryCap+1 {
+		t.Fatalf("polled seed has %d entries, want %d", len(w.polled[grow]), memWatcherDirEntryCap+1)
+	}
+	if !watchedRoot(fsw, mem) {
+		t.Fatal("root watch must survive demotion")
+	}
+
+	// End-to-end step: a live watcher demotes on its tick and the poll then
+	// indexes new files.
+	live := filepath.Join(mem, "live")
+	if err := os.MkdirAll(live, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w2 := NewMemWatcher(mem, idx)
+	w2.pollInterval = 100 * time.Millisecond
+	if err := w2.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer w2.Stop()
+	for i := 0; i <= memWatcherDirEntryCap; i++ {
+		if err := os.WriteFile(filepath.Join(live, fmt.Sprintf("g%d.txt", i)), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(400 * time.Millisecond) // let at least one tick demote it
+	fresh := filepath.Join(live, "fresh.cog.md")
+	if err := os.WriteFile(fresh, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	for !idx.saw(fresh) {
+		if time.Now().After(deadline) {
+			t.Fatal("file in demoted dir was never indexed")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func watchedRoot(fsw *fsnotify.Watcher, root string) bool {
+	for _, p := range fsw.WatchList() {
+		if p == root {
+			return true
+		}
+	}
+	return false
 }
