@@ -347,3 +347,31 @@ func TestQueryCrossSessionIgnored(t *testing.T) {
 		t.Errorf("Count with empty SessionID = %d; want 0", res.Count)
 	}
 }
+
+// Cache/spend fields written by RecordTurn must survive the read projection;
+// pre-change events (no such keys) project to zero values without error.
+func TestProjectTurnFromEventUsageFields(t *testing.T) {
+	mk := func(usage map[string]interface{}) EventEnvelope {
+		return EventEnvelope{HashedPayload: EventPayload{
+			Type: "turn.completed",
+			Data: map[string]interface{}{"turn_id": "t1", "usage": usage},
+		}}
+	}
+	got := projectTurnFromEvent(mk(map[string]interface{}{
+		"input_tokens": float64(22), "output_tokens": float64(1), "total_tokens": float64(54402),
+		"cache_read_tokens": float64(54367), "cache_write_tokens": float64(12),
+		"request_id": "r1", "wall_ms": float64(1500),
+	}), nil, false, false).Usage
+	want := TurnUsage{InputTokens: 22, OutputTokens: 1, TotalTokens: 54402,
+		CacheReadTokens: 54367, CacheWriteTokens: 12, RequestID: "r1", WallMS: 1500}
+	if got != want {
+		t.Fatalf("usage = %+v; want %+v", got, want)
+	}
+
+	old := projectTurnFromEvent(mk(map[string]interface{}{
+		"input_tokens": float64(5), "output_tokens": float64(2), "total_tokens": float64(7),
+	}), nil, false, false).Usage
+	if old != (TurnUsage{InputTokens: 5, OutputTokens: 2, TotalTokens: 7}) {
+		t.Fatalf("pre-change usage = %+v; want only in/out/total", old)
+	}
+}
