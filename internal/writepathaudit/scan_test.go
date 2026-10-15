@@ -296,12 +296,12 @@ func TestRound3GateFindings_Fixed(t *testing.T) {
 			name: "bep_provider.go p.watchDir — chased through NewBEPProvider's constructor AND its boot.go call site to <WorkspaceRoot>/.cog/bin/agents/definitions",
 			gate: `internal/engine/bep_provider.go:111,456 — ".cog/bin/agents/definitions/" (BEP-replicated, peer-writable) binned 'elsewhere' as {p.watchDir}`,
 			check: func(t *testing.T) {
-				s, ok := find("internal/engine/bep_provider.go", 111)
+				s, ok := find("internal/engine/bep_provider.go", 118)
 				if !ok {
-					t.Fatal("bep_provider.go:111 not found in inventory")
+					t.Fatal("bep_provider.go:118 not found in inventory")
 				}
 				if s.Category != "cog" || !strings.Contains(s.Pattern, ".cog/bin/agents/definitions") {
-					t.Errorf("bep_provider.go:111 = category %q pattern %q, want cog / .cog/bin/agents/definitions", s.Category, s.Pattern)
+					t.Errorf("bep_provider.go:118 = category %q pattern %q, want cog / .cog/bin/agents/definitions", s.Category, s.Pattern)
 				}
 			},
 		},

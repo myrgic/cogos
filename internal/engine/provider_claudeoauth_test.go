@@ -1094,7 +1094,7 @@ func TestClaudeOAuthComplete_CacheBreakpointsOnWire(t *testing.T) {
 	}
 	// exactly 3 markers on the whole body.
 	raw, _ := json.Marshal(wire)
-	if n := strings.Count(string(raw), `"cache_control":{"type":"ephemeral"}`); n != 3 {
+	if n := strings.Count(string(raw), `"cache_control"`); n != 3 {
 		t.Fatalf("breakpoints on wire = %d; want exactly 3", n)
 	}
 }

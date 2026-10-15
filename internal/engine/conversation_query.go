@@ -254,6 +254,8 @@ func projectTurnFromEvent(ev EventEnvelope, sidecar map[string]TurnRecord, inclu
 		usage.TotalTokens, _ = intFieldFromMap(usageMap, "total_tokens")
 		usage.CacheReadTokens, _ = intFieldFromMap(usageMap, "cache_read_tokens")
 		usage.CacheWriteTokens, _ = intFieldFromMap(usageMap, "cache_write_tokens")
+		usage.CacheWrite5mTokens, _ = intFieldFromMap(usageMap, "cache_write_5m_tokens")
+		usage.CacheWrite1hTokens, _ = intFieldFromMap(usageMap, "cache_write_1h_tokens")
 		usage.RequestID, _ = stringField(usageMap, "request_id")
 		wallMS, _ := intFieldFromMap(usageMap, "wall_ms")
 		usage.WallMS = int64(wallMS)

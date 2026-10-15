@@ -13,6 +13,18 @@
 # To opt out, add:
 #   claude_oauth:
 #     auto: false
+#
+# Prompt-cache lifetime (claude-oauth): the stable prefix (system, tools) is
+# cached for one hour by default; every client of this provider is human-paced.
+# A 1h cache write costs 2x the base input price, paid once per hour of
+# silence. A 5m write costs 1.25x, paid after EVERY pause longer than five
+# minutes, which is every human turn. Reads cost 0.1x either way. To change it:
+#   claude_oauth:
+#     cache_ttl: "5m"        # or "1h" (default); an explicit claude-oauth entry
+#                            # takes the same cache_ttl key
+# A per-request header X-Cogos-Cache-Ttl: 5m|1h overrides this for one call.
+# Other Anthropic-wire providers (type: anthropic) default to "5m" and take the
+# same cache_ttl key.
 # An explicit "claude-oauth:" entry under `providers:` (any config, any model)
 # always overrides auto-registration — declaration wins over discovery.
 #

@@ -632,6 +632,10 @@ type ClaudeOAuthProvider struct {
 	timeout   time.Duration
 	client    *http.Client
 	lc        *CredentialLifecycle
+	// cacheTTL is the configured stable-prefix cache lifetime ("5m", "1h" or ""
+	// for the type default, which is 1h: every client of this provider is
+	// human-paced, so a 5m write would be repaid after every pause).
+	cacheTTL string
 
 	// availMu guards the Available() TTL cache (#441): the router's 10s
 	// availability ticker probes this provider with a live GET /v1/models against
@@ -683,8 +687,15 @@ func NewClaudeOAuthProvider(name string, cfg ProviderConfig, fallback Provider) 
 		timeout:   timeout,
 		client:    &http.Client{Timeout: timeout},
 		lc:        lc,
+		cacheTTL:  normalizeCacheTTL(cfg.CacheTTL),
 		fallback:  fallback,
 	}
+}
+
+// effectiveCacheTTL resolves the stable-prefix lifetime for req: the
+// X-Cogos-Cache-Ttl hint, then cache_ttl from config, then "1h".
+func (p *ClaudeOAuthProvider) effectiveCacheTTL(req *CompletionRequest) string {
+	return resolveCacheTTL(req.Metadata.CacheTTL, p.cacheTTL, cacheTTL1h)
 }
 
 // ── Provider interface ────────────────────────────────────────────────────────
@@ -1098,8 +1109,9 @@ func (p *ClaudeOAuthProvider) Complete(ctx context.Context, req *CompletionReque
 		payload.Messages = repaired
 		rpt2.emit("claudeoauth.post_relocate")
 	}
-	applyAnthropicCacheBreakpoints(payload)
-	applyOAuthRelocatedCacheBreakpoint(payload, relocated)
+	cacheTTL := p.effectiveCacheTTL(req)
+	applyAnthropicCacheBreakpoints(payload, cacheTTL)
+	applyOAuthRelocatedCacheBreakpoint(payload, relocated, cacheTTL)
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -1230,8 +1242,9 @@ func (p *ClaudeOAuthProvider) Stream(ctx context.Context, req *CompletionRequest
 		payload.Messages = repaired
 		rpt2.emit("claudeoauth.stream.post_relocate")
 	}
-	applyAnthropicCacheBreakpoints(payload)
-	applyOAuthRelocatedCacheBreakpoint(payload, relocated)
+	cacheTTL := p.effectiveCacheTTL(req)
+	applyAnthropicCacheBreakpoints(payload, cacheTTL)
+	applyOAuthRelocatedCacheBreakpoint(payload, relocated, cacheTTL)
 
 	body, err := json.Marshal(payload)
 	if err != nil {

@@ -1023,6 +1023,10 @@ type oaiUsage struct {
 type oaiPromptTokenDetail struct {
 	CachedTokens     int `json:"cached_tokens"`
 	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
+	// Split of CacheWriteTokens by cache lifetime (5m writes cost 1.25x base,
+	// 1h writes 2x). Omitted when the upstream gave no split.
+	CacheWrite5mTokens int `json:"cache_write_5m_tokens,omitempty"`
+	CacheWrite1hTokens int `json:"cache_write_1h_tokens,omitempty"`
 }
 
 // oaiUsageFrom converts provider TokenUsage (whose InputTokens excludes cache
@@ -1037,8 +1041,10 @@ func oaiUsageFrom(u TokenUsage) *oaiUsage {
 	}
 	if u.CacheReadTokens != 0 || u.CacheWriteTokens != 0 {
 		out.PromptTokensDetails = &oaiPromptTokenDetail{
-			CachedTokens:     u.CacheReadTokens,
-			CacheWriteTokens: u.CacheWriteTokens,
+			CachedTokens:       u.CacheReadTokens,
+			CacheWriteTokens:   u.CacheWriteTokens,
+			CacheWrite5mTokens: u.CacheWrite5mTokens,
+			CacheWrite1hTokens: u.CacheWrite1hTokens,
 		}
 	}
 	return out
@@ -1160,6 +1166,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			Source:       "http",
 		},
 	}
+	// Per-request prompt-cache lifetime hint for the stable prefix; invalid
+	// values are ignored so the provider default decides.
+	creq.Metadata.CacheTTL = normalizeCacheTTL(r.Header.Get(CacheTTLHeader))
 
 	// Convert OpenAI-format tool definitions to internal ToolDefinition and
 	// partition by ownership. Three ownership pools:
@@ -1864,7 +1873,8 @@ func (s *Server) completeChat(w http.ResponseWriter, ctx context.Context, req *C
 	if turn != nil {
 		turn.Response = resp.Content
 		turn.Usage = newTurnUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens,
-			resp.Usage.CacheReadTokens, resp.Usage.CacheWriteTokens)
+			resp.Usage.CacheReadTokens, resp.Usage.CacheWriteTokens).
+			withCacheSplit(resp.Usage.CacheWrite5mTokens, resp.Usage.CacheWrite1hTokens)
 		// Non-kernel tool calls returned to the client become transcript
 		// entries with empty result (the client will execute them).
 		if len(resp.ToolCalls) > 0 {
@@ -2376,7 +2386,8 @@ func (s *Server) flushStreamHop(buf *streamHopBuffer, externalCalls []ToolCall,
 		turn.Response = buf.content.String()
 		if buf.usage != nil {
 			turn.Usage = newTurnUsage(buf.usage.InputTokens, buf.usage.OutputTokens,
-				buf.usage.CacheReadTokens, buf.usage.CacheWriteTokens)
+				buf.usage.CacheReadTokens, buf.usage.CacheWriteTokens).
+				withCacheSplit(buf.usage.CacheWrite5mTokens, buf.usage.CacheWrite1hTokens)
 		}
 		// Audit-fidelity fix: when the model replies via speak/send_text/output
 		// tool calls, the streaming buffer text content is empty. Extract the
