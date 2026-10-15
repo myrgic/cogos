@@ -65,6 +65,31 @@ type anthropicMessagesUsage struct {
 	// external client can see prompt-cache hits instead of inferring 0%.
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	// CacheCreation is the per-lifetime split of the cache write, in the same
+	// shape Anthropic sends. Omitted when both lifetimes are zero.
+	CacheCreation *anthropicCacheCreation `json:"cache_creation,omitempty"`
+}
+
+// cacheCreationFrom builds the wire split, or nil when there is nothing to report.
+func cacheCreationFrom(write5m, write1h int) *anthropicCacheCreation {
+	if write5m == 0 && write1h == 0 {
+		return nil
+	}
+	return &anthropicCacheCreation{Ephemeral5mInputTokens: write5m, Ephemeral1hInputTokens: write1h}
+}
+
+func (u anthropicMessagesUsage) cacheWrite5m() int {
+	if u.CacheCreation == nil {
+		return 0
+	}
+	return u.CacheCreation.Ephemeral5mInputTokens
+}
+
+func (u anthropicMessagesUsage) cacheWrite1h() int {
+	if u.CacheCreation == nil {
+		return 0
+	}
+	return u.CacheCreation.Ephemeral1hInputTokens
 }
 
 // anthropicInputContentBlock is a lenient decode target for inbound content
@@ -353,6 +378,9 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 			Source:       "http-anthropic",
 		},
 	}
+	// Per-request prompt-cache lifetime hint for the stable prefix; invalid
+	// values are ignored so the provider default decides.
+	creq.Metadata.CacheTTL = normalizeCacheTTL(r.Header.Get(CacheTTLHeader))
 
 	// Convert Anthropic tool definitions to internal ToolDefinition and
 	// partition by ownership — same three pools as handleChat (serve.go):
@@ -718,7 +746,8 @@ func (s *Server) completeAnthropicMessages(w http.ResponseWriter, ctx context.Co
 	if turn != nil {
 		turn.Response = resp.Content
 		turn.Usage = newTurnUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens,
-			resp.Usage.CacheReadTokens, resp.Usage.CacheWriteTokens)
+			resp.Usage.CacheReadTokens, resp.Usage.CacheWriteTokens).
+			withCacheSplit(resp.Usage.CacheWrite5mTokens, resp.Usage.CacheWrite1hTokens)
 		if len(resp.ToolCalls) > 0 {
 			for _, tc := range resp.ToolCalls {
 				turn.ToolCalls = append(turn.ToolCalls, ToolCallRecord{
@@ -770,6 +799,7 @@ func (s *Server) completeAnthropicMessages(w http.ResponseWriter, ctx context.Co
 			OutputTokens:             resp.Usage.OutputTokens,
 			CacheReadInputTokens:     resp.Usage.CacheReadTokens,
 			CacheCreationInputTokens: resp.Usage.CacheWriteTokens,
+			CacheCreation:            cacheCreationFrom(resp.Usage.CacheWrite5mTokens, resp.Usage.CacheWrite1hTokens),
 		},
 	}
 
@@ -873,6 +903,7 @@ func (s *Server) streamAnthropicMessages(w http.ResponseWriter, ctx context.Cont
 			usage.OutputTokens = hopBuf.usage.OutputTokens
 			usage.CacheReadInputTokens = hopBuf.usage.CacheReadTokens
 			usage.CacheCreationInputTokens = hopBuf.usage.CacheWriteTokens
+			usage.CacheCreation = cacheCreationFrom(hopBuf.usage.CacheWrite5mTokens, hopBuf.usage.CacheWrite1hTokens)
 		}
 
 		toolCalls := hopBuf.assembledToolCalls()
@@ -932,7 +963,8 @@ func (s *Server) streamAnthropicMessages(w http.ResponseWriter, ctx context.Cont
 			if turn != nil {
 				turn.Response = respBuf.String()
 				turn.Usage = newTurnUsage(usage.InputTokens, usage.OutputTokens,
-					usage.CacheReadInputTokens, usage.CacheCreationInputTokens)
+					usage.CacheReadInputTokens, usage.CacheCreationInputTokens).
+					withCacheSplit(usage.cacheWrite5m(), usage.cacheWrite1h())
 			}
 			writeEvent("message_delta", map[string]any{
 				"type": "message_delta",

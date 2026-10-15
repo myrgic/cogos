@@ -76,13 +76,17 @@ type TurnRecord struct {
 // RequestID is the kernel request id for the turn; WallMS is the wall time from
 // request start to turn persistence.
 type TurnUsage struct {
-	InputTokens      int    `json:"input_tokens,omitempty"`
-	OutputTokens     int    `json:"output_tokens,omitempty"`
-	TotalTokens      int    `json:"total_tokens,omitempty"`
-	CacheReadTokens  int    `json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens int    `json:"cache_write_tokens,omitempty"`
-	RequestID        string `json:"request_id,omitempty"`
-	WallMS           int64  `json:"wall_ms,omitempty"`
+	InputTokens      int `json:"input_tokens,omitempty"`
+	OutputTokens     int `json:"output_tokens,omitempty"`
+	TotalTokens      int `json:"total_tokens,omitempty"`
+	CacheReadTokens  int `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
+	// CacheWrite5mTokens and CacheWrite1hTokens split CacheWriteTokens by cache
+	// lifetime so cost attribution can price them differently (1.25x vs 2x).
+	CacheWrite5mTokens int    `json:"cache_write_5m_tokens,omitempty"`
+	CacheWrite1hTokens int    `json:"cache_write_1h_tokens,omitempty"`
+	RequestID          string `json:"request_id,omitempty"`
+	WallMS             int64  `json:"wall_ms,omitempty"`
 }
 
 // newTurnUsage builds a TurnUsage from provider token counts. in is the
@@ -95,6 +99,30 @@ func newTurnUsage(in, out, cacheRead, cacheWrite int) TurnUsage {
 		CacheReadTokens:  cacheRead,
 		CacheWriteTokens: cacheWrite,
 	}
+}
+
+// turnUsageLedgerMap is the usage sub-map of the turn.completed ledger event.
+// projectTurnFromEvent reads it back; keep the two in step.
+func turnUsageLedgerMap(u TurnUsage) map[string]interface{} {
+	return map[string]interface{}{
+		"input_tokens":          u.InputTokens,
+		"output_tokens":         u.OutputTokens,
+		"total_tokens":          u.TotalTokens,
+		"cache_read_tokens":     u.CacheReadTokens,
+		"cache_write_tokens":    u.CacheWriteTokens,
+		"cache_write_5m_tokens": u.CacheWrite5mTokens,
+		"cache_write_1h_tokens": u.CacheWrite1hTokens,
+		"request_id":            u.RequestID,
+		"wall_ms":               u.WallMS,
+	}
+}
+
+// withCacheSplit records the per-lifetime split of the cache write (5m and 1h
+// writes are priced differently). CacheWriteTokens stays the total.
+func (u TurnUsage) withCacheSplit(write5m, write1h int) TurnUsage {
+	u.CacheWrite5mTokens = write5m
+	u.CacheWrite1hTokens = write1h
+	return u
 }
 
 // ToolCallRecord is one kernel-owned tool invocation within a turn.
@@ -442,15 +470,7 @@ func (p *Process) RecordTurn(turn *TurnRecord) error {
 		"status":              turn.Status,
 	}
 	if turn.Usage != (TurnUsage{}) {
-		data["usage"] = map[string]interface{}{
-			"input_tokens":       turn.Usage.InputTokens,
-			"output_tokens":      turn.Usage.OutputTokens,
-			"total_tokens":       turn.Usage.TotalTokens,
-			"cache_read_tokens":  turn.Usage.CacheReadTokens,
-			"cache_write_tokens": turn.Usage.CacheWriteTokens,
-			"request_id":         turn.Usage.RequestID,
-			"wall_ms":            turn.Usage.WallMS,
-		}
+		data["usage"] = turnUsageLedgerMap(turn.Usage)
 	}
 	if turn.Error != "" {
 		data["error"] = turn.Error

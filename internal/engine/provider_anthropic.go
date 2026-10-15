@@ -48,6 +48,9 @@ type AnthropicProvider struct {
 	maxTokens int
 	timeout   time.Duration
 	client    *http.Client
+	// cacheTTL is the provider's configured stable-prefix cache lifetime
+	// ("5m", "1h" or "" for the type default, which is 5m for API-key use).
+	cacheTTL string
 }
 
 // NewAnthropicProvider creates an AnthropicProvider from a ProviderConfig.
@@ -76,6 +79,7 @@ func NewAnthropicProvider(name string, cfg ProviderConfig) *AnthropicProvider {
 		maxTokens: maxTokens,
 		timeout:   timeout,
 		client:    &http.Client{Timeout: timeout},
+		cacheTTL:  normalizeCacheTTL(cfg.CacheTTL),
 	}
 }
 
@@ -227,6 +231,28 @@ type anthropicUsage struct {
 	OutputTokens             int `json:"output_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	// CacheCreation is the per-lifetime split of the cache write; absent on
+	// older responses, in which case both lifetimes read as zero.
+	CacheCreation *anthropicCacheCreation `json:"cache_creation,omitempty"`
+}
+
+type anthropicCacheCreation struct {
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+}
+
+// cacheWrite returns (total, 5m, 1h) cache-write tokens. total is the upstream
+// cache_creation_input_tokens, or the lifetime sum when only the split is sent.
+func (u anthropicUsage) cacheWrite() (total, w5m, w1h int) {
+	total = u.CacheCreationInputTokens
+	if u.CacheCreation != nil {
+		w5m = u.CacheCreation.Ephemeral5mInputTokens
+		w1h = u.CacheCreation.Ephemeral1hInputTokens
+	}
+	if sum := w5m + w1h; sum > total {
+		total = sum
+	}
+	return total, w5m, w1h
 }
 
 // SSE event envelope — all streaming event types share this shape.
@@ -418,7 +444,9 @@ func buildAnthropicRequest(model string, req *CompletionRequest, stream bool, ma
 	// and ClaudeOAuthProvider), so neither can ship without them. The OAuth
 	// path re-applies after its late mutators (system relocation, tool-name
 	// rewrite, second normalize); the call is idempotent.
-	applyAnthropicCacheBreakpoints(ar)
+	// Default lifetime here; providers re-stamp the stable prefix with their
+	// resolved lifetime (resolveCacheTTL) right after this returns.
+	applyAnthropicCacheBreakpoints(ar, resolveCacheTTL(req.Metadata.CacheTTL, "", cacheTTL5m))
 
 	return ar
 }
@@ -528,6 +556,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 	model := p.effectiveModel(req)
 
 	payload := buildAnthropicRequest(model, req, false, p.maxTokens)
+	applyAnthropicCacheBreakpoints(payload, resolveCacheTTL(req.Metadata.CacheTTL, p.cacheTTL, cacheTTL5m))
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: marshal request: %w", err)
@@ -587,15 +616,18 @@ func parseAnthropicResponse(ar *anthropicResponse, model, providerName string, l
 		stopReason = "end_turn"
 	}
 
+	cacheWrite, cacheWrite5m, cacheWrite1h := ar.Usage.cacheWrite()
 	return &CompletionResponse{
 		Content:    text.String(),
 		ToolCalls:  toolCalls,
 		StopReason: stopReason,
 		Usage: TokenUsage{
-			InputTokens:      ar.Usage.InputTokens,
-			OutputTokens:     ar.Usage.OutputTokens,
-			CacheReadTokens:  ar.Usage.CacheReadInputTokens,
-			CacheWriteTokens: ar.Usage.CacheCreationInputTokens,
+			InputTokens:        ar.Usage.InputTokens,
+			OutputTokens:       ar.Usage.OutputTokens,
+			CacheReadTokens:    ar.Usage.CacheReadInputTokens,
+			CacheWriteTokens:   cacheWrite,
+			CacheWrite5mTokens: cacheWrite5m,
+			CacheWrite1hTokens: cacheWrite1h,
 		},
 		ProviderMeta: ProviderMeta{
 			Provider: providerName,
@@ -613,6 +645,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req *CompletionRequest) 
 	model := p.effectiveModel(req)
 
 	payload := buildAnthropicRequest(model, req, true, p.maxTokens)
+	applyAnthropicCacheBreakpoints(payload, resolveCacheTTL(req.Metadata.CacheTTL, p.cacheTTL, cacheTTL5m))
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: marshal stream request: %w", err)
@@ -666,7 +699,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req *CompletionRequest) 
 // Tool calls are emitted as ToolCallDelta chunks as they arrive, so the kernel
 // can reconstruct complete ToolCall objects from the delta stream.
 func parseAnthropicSSE(ctx context.Context, r io.Reader, ch chan<- StreamChunk, model, providerName string) {
-	var inputTokens, outputTokens, cacheRead, cacheWrite int
+	var inputTokens, outputTokens, cacheRead, cacheWrite, cacheWrite5m, cacheWrite1h int
 	var stopReason string
 
 	send := func(sc StreamChunk) bool {
@@ -703,7 +736,7 @@ func parseAnthropicSSE(ctx context.Context, r io.Reader, ch chan<- StreamChunk, 
 			if event.Message != nil {
 				inputTokens = event.Message.Usage.InputTokens
 				cacheRead = event.Message.Usage.CacheReadInputTokens
-				cacheWrite = event.Message.Usage.CacheCreationInputTokens
+				cacheWrite, cacheWrite5m, cacheWrite1h = event.Message.Usage.cacheWrite()
 			}
 
 		case "content_block_start":
@@ -762,10 +795,12 @@ func parseAnthropicSSE(ctx context.Context, r io.Reader, ch chan<- StreamChunk, 
 				Done:       true,
 				StopReason: stopReason,
 				Usage: &TokenUsage{
-					InputTokens:      inputTokens,
-					OutputTokens:     outputTokens,
-					CacheReadTokens:  cacheRead,
-					CacheWriteTokens: cacheWrite,
+					InputTokens:        inputTokens,
+					OutputTokens:       outputTokens,
+					CacheReadTokens:    cacheRead,
+					CacheWriteTokens:   cacheWrite,
+					CacheWrite5mTokens: cacheWrite5m,
+					CacheWrite1hTokens: cacheWrite1h,
 				},
 				ProviderMeta: &ProviderMeta{
 					Provider: providerName,

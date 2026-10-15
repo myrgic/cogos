@@ -34,7 +34,7 @@ func TestCacheBreakpoints_PlacedOnStableRegionEnds(t *testing.T) {
 		anthropicMessage{Role: "assistant", Content: []anthropicContentBlock{{Type: "tool_use", ID: "c1", Name: "a", Input: json.RawMessage(`{}`)}}},
 		anthropicMessage{Role: "user", Content: []anthropicContentBlock{{Type: "tool_result", ToolUseID: "c1", Content: "ok"}}},
 	)
-	applyAnthropicCacheBreakpoints(r)
+	applyAnthropicCacheBreakpoints(r, cacheTTL5m)
 	sys := r.System.([]anthropicSystemBlock)
 	if sys[0].CacheControl != nil || sys[1].CacheControl == nil {
 		t.Fatalf("system: only the LAST block must carry cache_control; got %+v", sys)
@@ -58,7 +58,7 @@ func TestCacheBreakpoints_PlacedOnStableRegionEnds(t *testing.T) {
 func TestCacheBreakpoints_StringContentConvertedToBlock(t *testing.T) {
 	t.Parallel()
 	r := cacheReq(anthropicMessage{Role: "user", Content: "hello"}, anthropicMessage{Role: "assistant", Content: "hi"})
-	applyAnthropicCacheBreakpoints(r)
+	applyAnthropicCacheBreakpoints(r, cacheTTL5m)
 	blocks, ok := r.Messages[0].Content.([]anthropicContentBlock)
 	if !ok || len(blocks) != 1 || blocks[0].Type != "text" || blocks[0].Text != "hello" || blocks[0].CacheControl == nil {
 		t.Fatalf("string content must become one marked text block; got %+v", r.Messages[0].Content)
@@ -71,7 +71,7 @@ func TestCacheBreakpoints_StringContentConvertedToBlock(t *testing.T) {
 func TestCacheBreakpoints_SingleMessageNoHistoryMark(t *testing.T) {
 	t.Parallel()
 	r := cacheReq(anthropicMessage{Role: "user", Content: "first turn"})
-	applyAnthropicCacheBreakpoints(r)
+	applyAnthropicCacheBreakpoints(r, cacheTTL5m)
 	if n := countBreakpoints(t, r); n != 2 {
 		t.Fatalf("with one message only system+tools are marked; breakpoints = %d", n)
 	}
@@ -80,8 +80,8 @@ func TestCacheBreakpoints_SingleMessageNoHistoryMark(t *testing.T) {
 func TestCacheBreakpoints_Idempotent(t *testing.T) {
 	t.Parallel()
 	r := cacheReq(anthropicMessage{Role: "user", Content: "a"}, anthropicMessage{Role: "assistant", Content: "b"}, anthropicMessage{Role: "user", Content: "c"})
-	applyAnthropicCacheBreakpoints(r)
-	applyAnthropicCacheBreakpoints(r)
+	applyAnthropicCacheBreakpoints(r, cacheTTL5m)
+	applyAnthropicCacheBreakpoints(r, cacheTTL5m)
 	if n := countBreakpoints(t, r); n != 3 {
 		t.Fatalf("double application must not add breakpoints; got %d", n)
 	}
@@ -115,8 +115,8 @@ func TestCacheBreakpoints_PrefixStableAcrossAgenticSteps(t *testing.T) {
 	}
 	stepN := cacheReq(cat(turn, hop1)...)
 	stepN1 := cacheReq(cat(turn, hop1, hop2)...)
-	applyAnthropicCacheBreakpoints(stepN)
-	applyAnthropicCacheBreakpoints(stepN1)
+	applyAnthropicCacheBreakpoints(stepN, cacheTTL5m)
+	applyAnthropicCacheBreakpoints(stepN1, cacheTTL5m)
 
 	// stable regions identical
 	if mustJSON(stepN.System) != mustJSON(stepN1.System) {
@@ -295,8 +295,8 @@ func oauthSingleTurnWire(t *testing.T, relocated, userText string) *anthropicReq
 	prependOAuthSystemToUserTurn(r, relocated)
 	repaired, _ := normalizeAnthropicMessages(r.Messages)
 	r.Messages = repaired
-	applyAnthropicCacheBreakpoints(r)
-	applyOAuthRelocatedCacheBreakpoint(r, relocated)
+	applyAnthropicCacheBreakpoints(r, cacheTTL5m)
+	applyOAuthRelocatedCacheBreakpoint(r, relocated, cacheTTL5m)
 	return r
 }
 
@@ -329,7 +329,7 @@ func TestOAuthRelocated_SingleTurnStringContentBecomesMarkedBlock(t *testing.T) 
 	// No user text at all: the relocated message stands alone with string content.
 	const relocated = "only relocated text"
 	r := cacheReq(anthropicMessage{Role: "user", Content: relocated})
-	applyOAuthRelocatedCacheBreakpoint(r, relocated)
+	applyOAuthRelocatedCacheBreakpoint(r, relocated, cacheTTL5m)
 	blocks, ok := r.Messages[0].Content.([]anthropicContentBlock)
 	if !ok || len(blocks) != 1 || blocks[0].Text != relocated || blocks[0].CacheControl == nil {
 		t.Fatalf("string relocated content must become one marked block; got %+v", r.Messages[0].Content)
@@ -347,10 +347,10 @@ func TestOAuthRelocated_MultiMessageUnchanged(t *testing.T) {
 		)
 	}
 	base := build()
-	applyAnthropicCacheBreakpoints(base)
+	applyAnthropicCacheBreakpoints(base, cacheTTL5m)
 	withNew := build()
-	applyAnthropicCacheBreakpoints(withNew)
-	applyOAuthRelocatedCacheBreakpoint(withNew, relocated)
+	applyAnthropicCacheBreakpoints(withNew, cacheTTL5m)
+	applyOAuthRelocatedCacheBreakpoint(withNew, relocated, cacheTTL5m)
 
 	a, _ := json.Marshal(base)
 	b, _ := json.Marshal(withNew)
@@ -362,7 +362,7 @@ func TestOAuthRelocated_MultiMessageUnchanged(t *testing.T) {
 func TestOAuthRelocated_NoRelocatedTextIsNoop(t *testing.T) {
 	t.Parallel()
 	r := cacheReq(anthropicMessage{Role: "user", Content: "hi"})
-	applyOAuthRelocatedCacheBreakpoint(r, "")
+	applyOAuthRelocatedCacheBreakpoint(r, "", cacheTTL5m)
 	if n := countBreakpoints(t, r); n != 0 {
 		t.Fatalf("empty relocated text must add no breakpoint; got %d", n)
 	}
@@ -371,7 +371,7 @@ func TestOAuthRelocated_NoRelocatedTextIsNoop(t *testing.T) {
 func TestOAuthRelocated_MismatchedFirstBlockIsNoop(t *testing.T) {
 	t.Parallel()
 	r := cacheReq(anthropicMessage{Role: "user", Content: "unrelated user text"})
-	applyOAuthRelocatedCacheBreakpoint(r, "some relocated text")
+	applyOAuthRelocatedCacheBreakpoint(r, "some relocated text", cacheTTL5m)
 	if blocks := r.Messages[0].Content.(string); blocks != "unrelated user text" {
 		t.Fatalf("non-matching single message must be untouched; got %q", blocks)
 	}
@@ -384,7 +384,7 @@ func TestOAuthRelocated_Idempotent(t *testing.T) {
 	t.Parallel()
 	const relocated = "relocated once"
 	r := oauthSingleTurnWire(t, relocated, "hi")
-	applyOAuthRelocatedCacheBreakpoint(r, relocated)
+	applyOAuthRelocatedCacheBreakpoint(r, relocated, cacheTTL5m)
 	if n := countBreakpoints(t, r); n != 3 {
 		t.Fatalf("double application must not add breakpoints; got %d", n)
 	}

@@ -32,8 +32,8 @@ Total sites: 241  (cog: 100, home: 2, elsewhere: 13, unanchored: 85, dynamic: 41
 | `{root}/.cog/observatory/quarantine/<call:sanitizeSourceName>/quarantine.jsonl` | (*QuarantineWriter).WriteRecord (`os.OpenFile`) | internal/conversations/quarantine.go:158 | internal:conversations |
 | `<WorkspaceRoot>/.cog/mem/episodic/experiments` | SaveResults (`os.MkdirAll`) | internal/engine/benchmark.go:201 | internal:engine |
 | `<WorkspaceRoot>/.cog/mem/episodic/experiments/<call:fmt.Sprintf>` | SaveResults (`os.WriteFile`) | internal/engine/benchmark.go:249 | internal:engine |
-| `{root}/.cog/bin/agents/definitions` | (*BEPProvider).Start (`os.MkdirAll`) | internal/engine/bep_provider.go:111 | internal:engine |
-| `{root}/.cog/bin/agents/definitions` | (*BEPProvider).InitPollingForTest (`os.MkdirAll`) | internal/engine/bep_provider.go:456 | internal:engine |
+| `{root}/.cog/bin/agents/definitions` | (*BEPProvider).Start (`os.MkdirAll`) | internal/engine/bep_provider.go:118 | internal:engine |
+| `{root}/.cog/bin/agents/definitions` | (*BEPProvider).InitPollingForTest (`os.MkdirAll`) | internal/engine/bep_provider.go:512 | internal:engine |
 | `{root}/.cog/bin/agents/definitions` | (*BEPProvider).ReceiveAgentCRD (`os.MkdirAll`) | internal/engine/bep_receiver.go:87 | internal:engine |
 | `{root}/.cog/bin/agents/definitions/{filename}.tmp` | (*BEPProvider).ReceiveAgentCRD (`os.WriteFile`) | internal/engine/bep_receiver.go:97 | internal:engine |
 | `{root}/.cog/bin/agents/definitions/{filename}` | (*BEPProvider).ReceiveAgentCRD (`os.Rename`) | internal/engine/bep_receiver.go:101 | internal:engine |
@@ -141,7 +141,7 @@ Total sites: 241  (cog: 100, home: 2, elsewhere: 13, unanchored: 85, dynamic: 41
 | `<TempDir>` | (*modalityProxy).playAudio (`os.CreateTemp`) | internal/engine/mcp_modality_proxy.go:853 | internal:engine |
 | `<TempDir>` | streamFetch (`os.CreateTemp`) | internal/engine/remote_hydrate_spike.go:195 | internal:engine |
 | `<TempDir>` | streamFetch (`io.Copy`) | internal/engine/remote_hydrate_spike.go:204 | internal:engine |
-| `<TempDir>` | (*Server).handleChat (`os.MkdirTemp`) | internal/engine/serve.go:1414 | internal:engine |
+| `<TempDir>` | (*Server).handleChat (`os.MkdirTemp`) | internal/engine/serve.go:1423 | internal:engine |
 | `<TempDir>` | (*Server).handleBlockPut (`os.CreateTemp`) | internal/engine/serve_blocks.go:184 | internal:engine |
 | `<TempDir>` | (*Server).handleBlockPut (`io.Copy`) | internal/engine/serve_blocks.go:195 | internal:engine |
 | `<TempDir>` | writeTempMCPConfig (`os.CreateTemp`) | internal/engine/serve_claude_code.go:460 | internal:engine |
@@ -199,10 +199,10 @@ These sites structurally resolved (the shape of the path is known) but the ROOT 
 | `{path}` | (*rotatingWriter).Write (`os.OpenFile`) | internal/engine/rotating_writer.go:89 | internal:engine |
 | `{path}.1` | (*rotatingWriter).rotateLocked (`os.Rename`) | internal/engine/rotating_writer.go:137 | internal:engine |
 | `{path}` | (*rotatingWriter).rotateLocked (`os.OpenFile`) | internal/engine/rotating_writer.go:141 | internal:engine |
-| `<call:turnSidecarPath>.tmp` | PatchTurnSpeculative (`os.Create`) | internal/engine/turn_storage.go:250 | internal:engine |
-| `<call:turnSidecarPath>` | PatchTurnSpeculative (`os.Rename`) | internal/engine/turn_storage.go:263 | internal:engine |
-| `dirname(<call:turnSidecarPath>)` | appendTurnSidecar (`os.MkdirAll`) | internal/engine/turn_storage.go:352 | internal:engine |
-| `<call:turnSidecarPath>` | appendTurnSidecar (`os.OpenFile`) | internal/engine/turn_storage.go:361 | internal:engine |
+| `<call:turnSidecarPath>.tmp` | PatchTurnSpeculative (`os.Create`) | internal/engine/turn_storage.go:278 | internal:engine |
+| `<call:turnSidecarPath>` | PatchTurnSpeculative (`os.Rename`) | internal/engine/turn_storage.go:291 | internal:engine |
+| `dirname(<call:turnSidecarPath>)` | appendTurnSidecar (`os.MkdirAll`) | internal/engine/turn_storage.go:380 | internal:engine |
+| `<call:turnSidecarPath>` | appendTurnSidecar (`os.OpenFile`) | internal/engine/turn_storage.go:389 | internal:engine |
 | `{path}.tmp` | writeFileAtomic (`os.WriteFile`) | internal/eval/mcp_tools.go:450 | internal:eval |
 | `{path}` | writeFileAtomic (`os.Rename`) | internal/eval/mcp_tools.go:453 | internal:eval |
 | `{path}` | bumpPinFile (`os.WriteFile`) | internal/providers/pin/pin.go:717 | provider:pin |

@@ -277,6 +277,11 @@ type RequestMetadata struct {
 	// cog_dispatch_to_harness. Providers must not forward this field to the
 	// upstream model API.
 	Attribution string `json:"attribution,omitempty"`
+	// CacheTTL is the per-request prompt-cache lifetime hint for the stable
+	// prefix ("5m" or "1h"), from the X-Cogos-Cache-Ttl header. Empty defers to
+	// the provider's configured cache_ttl, then its type default. Anthropic-wire
+	// providers only; never forwarded as-is upstream.
+	CacheTTL string `json:"cache_ttl,omitempty"`
 }
 
 // RequestPriority controls routing urgency.
@@ -342,10 +347,16 @@ type ToolCallDelta struct {
 // wire format folds cached tokens into input (e.g. codex) must subtract them
 // before filling this struct.
 type TokenUsage struct {
-	InputTokens      int `json:"input_tokens"`
-	OutputTokens     int `json:"output_tokens"`
-	CacheReadTokens  int `json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
+	InputTokens     int `json:"input_tokens"`
+	OutputTokens    int `json:"output_tokens"`
+	CacheReadTokens int `json:"cache_read_tokens,omitempty"`
+	// CacheWriteTokens is the total cache-write count; when the upstream reports
+	// the per-lifetime split it equals CacheWrite5mTokens + CacheWrite1hTokens.
+	// The split lets cost attribution price the 5m (1.25x) and 1h (2x) writes
+	// differently. Both are zero when the upstream omits cache_creation.
+	CacheWriteTokens   int `json:"cache_write_tokens,omitempty"`
+	CacheWrite5mTokens int `json:"cache_write_5m_tokens,omitempty"`
+	CacheWrite1hTokens int `json:"cache_write_1h_tokens,omitempty"`
 }
 
 // ProviderMeta carries provenance for the ledger.
@@ -536,6 +547,9 @@ type ClaudeOAuthAutoConfig struct {
 	// nil pointer (the field absent from providers.yaml, or providers.yaml
 	// absent entirely) means enabled. Set explicitly to false to opt out.
 	Auto *bool `yaml:"auto,omitempty" json:"auto,omitempty"`
+	// CacheTTL sets cache_ttl ("5m" or "1h") on the auto-registered provider;
+	// see ProviderConfig.CacheTTL for the cost model. Empty means "1h".
+	CacheTTL string `yaml:"cache_ttl,omitempty" json:"cache_ttl,omitempty"`
 }
 
 // IsAutoEnabled reports whether claude-oauth auto-registration is enabled.
@@ -559,6 +573,19 @@ type ProviderConfig struct {
 	Headers       map[string]string      `yaml:"headers,omitempty" json:"headers,omitempty"`
 	Options       map[string]interface{} `yaml:"options,omitempty" json:"options,omitempty"`
 	Enabled       *bool                  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// CacheTTL is the prompt-cache lifetime of the STABLE prefix (system,
+	// tools, relocated system prefix) on Anthropic-wire providers: "5m" or
+	// "1h". Unset means the provider type's default: "1h" for claude-oauth
+	// (every client of it is human-paced), "5m" for everything else. A
+	// per-request X-Cogos-Cache-Ttl header wins over this. The conversation-
+	// tail breakpoint always keeps the 5m default.
+	//
+	// Cost model (multiples of base input price): a 1h write costs 2x, paid
+	// once per hour of silence; a 5m write costs 1.25x, paid after EVERY pause
+	// longer than five minutes, which is every human turn. Reads cost 0.1x for
+	// both. Choose "5m" only for tight automated loops that re-hit the prefix
+	// within five minutes anyway.
+	CacheTTL string `yaml:"cache_ttl,omitempty" json:"cache_ttl,omitempty"`
 }
 
 // IsEnabled returns whether the provider is active (default: true).

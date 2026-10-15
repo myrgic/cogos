@@ -102,8 +102,9 @@ func maybeAutoRegisterClaudeOAuth(router *SimpleRouter, pcfg ProvidersConfig, pr
 	}
 
 	p, err := makeProvider(claudeOAuthAutoProviderName, ProviderConfig{
-		Type:  claudeOAuthAutoProviderName,
-		Model: claudeOAuthAutoDefaultModel,
+		Type:     claudeOAuthAutoProviderName,
+		Model:    claudeOAuthAutoDefaultModel,
+		CacheTTL: pcfg.ClaudeOAuth.CacheTTL,
 	}, procMgr)
 	if err != nil {
 		slog.Warn("router: claude-oauth auto-registration failed", "err", err)
