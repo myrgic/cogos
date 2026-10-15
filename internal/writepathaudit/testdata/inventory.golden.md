@@ -142,7 +142,7 @@ Total sites: 242  (cog: 100, home: 2, elsewhere: 14, unanchored: 85, dynamic: 41
 | `<TempDir>` | (*modalityProxy).playAudio (`os.CreateTemp`) | internal/engine/mcp_modality_proxy.go:853 | internal:engine |
 | `<TempDir>` | streamFetch (`os.CreateTemp`) | internal/engine/remote_hydrate_spike.go:195 | internal:engine |
 | `<TempDir>` | streamFetch (`io.Copy`) | internal/engine/remote_hydrate_spike.go:204 | internal:engine |
-| `<TempDir>` | (*Server).handleChat (`os.MkdirTemp`) | internal/engine/serve.go:1380 | internal:engine |
+| `<TempDir>` | (*Server).handleChat (`os.MkdirTemp`) | internal/engine/serve.go:1386 | internal:engine |
 | `<TempDir>` | (*Server).handleBlockPut (`os.CreateTemp`) | internal/engine/serve_blocks.go:184 | internal:engine |
 | `<TempDir>` | (*Server).handleBlockPut (`io.Copy`) | internal/engine/serve_blocks.go:195 | internal:engine |
 | `<TempDir>` | writeTempMCPConfig (`os.CreateTemp`) | internal/engine/serve_claude_code.go:460 | internal:engine |
@@ -327,7 +327,7 @@ Total subprocess sites: 85
 | _(not set — inherits the process's own working directory)_ | `exec.Command("taskkill", "/PID", strconv.Itoa(pid))` | internal/engine/daemon_stop_windows.go:37 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))` | internal/engine/daemon_stop_windows.go:56 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH")` | internal/engine/daemon_stop_windows.go:77 | internal:engine |
-| `{cwd}` | `exec.Command(argv[0], argv[1:]...)` | internal/engine/managed_session_hermes.go:191 | internal:engine |
+| `{cwd}` | `exec.Command(argv[0], argv[1:]...)` | internal/engine/managed_session_hermes.go:213 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "python3", cmdArgs...)` | internal/engine/mcp_architecture.go:156 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command(player, args...)` | internal/engine/mcp_modality_proxy.go:879 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, rgPath, args...)` | internal/engine/mcp_server.go:3268 | internal:engine |

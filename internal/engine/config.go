@@ -264,6 +264,9 @@ type Config struct {
 	// use the hardcoded default. Installed into the package-level deny table
 	// by NewServer via SetProviderModelDeny.
 	RoutingDeny []ProviderDenyRule
+
+	// ManagedSessions is the kernel.yaml managedSessions section (nil = none).
+	ManagedSessions *ManagedSessionsConfig
 }
 
 // kernelConfigSection holds settings that can appear at the top level or inside v3:.
@@ -313,6 +316,10 @@ type kernelConfigSection struct {
 	// Routing holds optional routing knobs from kernel.yaml. Currently only
 	// the per-provider model deny table.
 	Routing *routingConfig `yaml:"routing"`
+
+	// ManagedSessions declares runtime classes for kernel-managed sessions
+	// (rooms RFC §5.2; managed_session_classes.go).
+	ManagedSessions *ManagedSessionsConfig `yaml:"managedSessions,omitempty"`
 }
 
 // routingConfig holds the optional `routing:` section of kernel.yaml.
@@ -497,6 +504,9 @@ func applyKernelSection(cfg *Config, s kernelConfigSection) {
 	}
 	if s.MaxToolOutputBytes != 0 {
 		cfg.MaxToolOutputBytes = s.MaxToolOutputBytes
+	}
+	if s.ManagedSessions != nil {
+		cfg.ManagedSessions = s.ManagedSessions
 	}
 	if s.Routing != nil && len(s.Routing.Deny) > 0 {
 		cfg.RoutingDeny = s.Routing.Deny

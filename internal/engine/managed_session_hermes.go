@@ -64,6 +64,13 @@ type HermesACPOpts struct {
 	Load       string            `json:"load,omitempty"`        // existing on-disk session id to session/load
 	McpServers []json.RawMessage `json:"mcp_servers,omitempty"` // passed through verbatim
 	Room       string            `json:"room,omitempty"`        // declared room this session lives in (validated)
+	// Class names a kernel-declared runtime class (managed_session_classes.go).
+	// Empty = the built-in default class: today's behavior, request profile.
+	Class string `json:"class,omitempty"`
+	// AllowClass is the caller's class authority, set by the HTTP layer from
+	// the grant (json:"-": a body can never supply it). nil = unrestricted.
+	// It is asked about the EFFECTIVE class ("" for the default class).
+	AllowClass func(class string) bool `json:"-"`
 	// Actor is the person acting, taken from the authenticated grant by the
 	// HTTP layer. json:"-" so a request body can never supply it.
 	Actor string `json:"-"`
@@ -83,6 +90,9 @@ type HermesACPDriverConfig struct {
 	Command func(profile string) []string
 	// Env is the subprocess environment (default os.Environ()).
 	Env []string
+	// Classes is the runtime class registry (kernel.yaml managedSessions).
+	// nil = no named classes; every named class is refused as unknown.
+	Classes *RuntimeClassRegistry
 	// RingSize bounds each session's replay buffer.
 	RingSize int
 	// PermissionTimeout is how long a permission request waits in the kernel
@@ -165,6 +175,7 @@ type hermesProcess struct {
 	d       *HermesACPDriver
 	profile string
 	cwd     string
+	class   *ResolvedRuntimeClass // nil = the built-in default class
 
 	mu        sync.Mutex
 	cmd       *exec.Cmd
@@ -177,23 +188,31 @@ type hermesProcess struct {
 	agentInfo json.RawMessage
 }
 
-func (d *HermesACPDriver) newProcess(profile, cwd string) *hermesProcess {
-	return &hermesProcess{d: d, profile: profile, cwd: cwd, sessions: map[string]*HermesACPSession{}}
+func (d *HermesACPDriver) newProcess(profile, cwd string, class *ResolvedRuntimeClass) *hermesProcess {
+	return &hermesProcess{d: d, profile: profile, cwd: cwd, class: class, sessions: map[string]*HermesACPSession{}}
 }
 
 // start spawns the subprocess and runs initialize. The process is NOT tied
 // to any request context: the kernel owns its lifetime.
 func (p *hermesProcess) start(ctx context.Context) (*acprpc.Conn, error) {
-	argv := p.d.cfg.Command(p.profile)
+	var argv, env []string
+	if p.class != nil {
+		// A runtime class owns argv and env outright (allowlist, resolved at
+		// create from the driver's base env). A restart reuses it verbatim.
+		argv, env = p.class.Argv, p.class.Env
+	} else {
+		argv = p.d.cfg.Command(p.profile)
+		env = p.d.cfg.Env
+		if env == nil {
+			env = os.Environ()
+		}
+	}
 	if len(argv) == 0 {
 		return nil, errors.New("hermes-acp: empty command")
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = p.cwd
-	cmd.Env = p.d.cfg.Env
-	if cmd.Env == nil {
-		cmd.Env = os.Environ()
-	}
+	cmd.Env = env
 	cmd.Stderr = io.Discard
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -410,6 +429,8 @@ type HermesACPSession struct {
 	cwd       string
 	forkOf    string
 	room      string // declared room; immutable after create
+	class     string // runtime class name ("" = default); immutable after create
+	receipt   *RuntimeClassReceipt
 	actor     string // person from the creating grant; immutable after create
 	createdAt time.Time
 	proc      *hermesProcess
@@ -449,6 +470,8 @@ type ManagedSessionInfo struct {
 	Cwd                string               `json:"cwd,omitempty"`
 	ForkOf             string               `json:"fork_of,omitempty"`
 	Room               string               `json:"room,omitempty"`
+	Class              string               `json:"class,omitempty"`
+	Receipt            *RuntimeClassReceipt `json:"receipt,omitempty"`
 	Actor              string               `json:"actor,omitempty"`
 	State              string               `json:"state"`
 	Error              string               `json:"error,omitempty"`
@@ -501,7 +524,7 @@ func (s *HermesACPSession) Info() ManagedSessionInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	info := ManagedSessionInfo{
-		SessionID: s.id, Driver: DriverHermesACP, Profile: s.profile, Cwd: s.cwd, ForkOf: s.forkOf, Room: s.room, Actor: s.actor,
+		SessionID: s.id, Driver: DriverHermesACP, Profile: s.profile, Cwd: s.cwd, ForkOf: s.forkOf, Room: s.room, Class: s.class, Receipt: s.receipt, Actor: s.actor,
 		State: s.state.String(), Mode: s.mode, Model: s.model, CreatedAt: s.createdAt, LastSeq: s.ring.LastSeq(),
 		PendingPermissions: make([]*pendingPermission, 0, len(s.perms)),
 	}
@@ -740,6 +763,9 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 	if existing := d.sessions[opts.Load]; existing != nil {
 		if st := existing.State(); st == StateLive || st == StateStarting {
 			d.mu.Unlock()
+			if opts.AllowClass != nil && !opts.AllowClass(existing.class) {
+				return nil, fmt.Errorf("%w: caller may not attach a session of runtime class %q", ErrManagedSessionForbidden, existing.class)
+			}
 			return existing, nil
 		}
 	}
@@ -780,6 +806,7 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		mcp = []json.RawMessage{}
 	}
 	var proc *hermesProcess
+	var receipt *RuntimeClassReceipt
 	if parent != nil {
 		if err := parent.live(); err != nil {
 			return nil, err
@@ -800,8 +827,37 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		if parent.actor != "" {
 			opts.Actor = parent.actor
 		}
+		// A fork runs in its parent's process, so it has the parent's class.
+		if opts.Class != "" && opts.Class != parent.class {
+			return nil, fmt.Errorf("%w: fork_of %s runs class %q; a fork cannot change class", ErrManagedSessionForbidden, opts.ForkOf, parent.class)
+		}
+		opts.Class = parent.class
+		receipt = parent.receipt
+		if opts.AllowClass != nil && !opts.AllowClass(opts.Class) {
+			return nil, fmt.Errorf("%w: caller may not fork a session of runtime class %q", ErrManagedSessionForbidden, opts.Class)
+		}
 	} else {
-		proc = d.newProcess(opts.Profile, opts.Cwd)
+		var class *ResolvedRuntimeClass
+		if opts.AllowClass != nil && !opts.AllowClass(opts.Class) {
+			return nil, fmt.Errorf("%w: caller may not create runtime class %q", ErrManagedSessionForbidden, opts.Class)
+		}
+		if opts.Class != "" {
+			if opts.Profile != "" || len(opts.McpServers) > 0 {
+				return nil, fmt.Errorf("%w: profile and mcp_servers come from runtime class %q and may not be sent", ErrInvalidManagedSession, opts.Class)
+			}
+			base := d.cfg.Env
+			if base == nil {
+				base = os.Environ()
+			}
+			var err error
+			if class, err = d.cfg.Classes.Resolve(opts.Class, base, opts.Cwd); err != nil {
+				return nil, err
+			}
+			opts.Profile, opts.Cwd = class.Profile, class.Cwd
+			receipt = class.Receipt()
+			mcp = []json.RawMessage{}
+		}
+		proc = d.newProcess(opts.Profile, opts.Cwd, class)
 		if _, err := proc.start(ctx); err != nil {
 			return nil, err
 		}
@@ -814,7 +870,7 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 	// Register before session/load returns: load replays history as
 	// session/update notifications, which must land in the ring.
 	sess := &HermesACPSession{
-		profile: opts.Profile, cwd: opts.Cwd, forkOf: opts.ForkOf, room: opts.Room, actor: opts.Actor, createdAt: time.Now().UTC(),
+		profile: opts.Profile, cwd: opts.Cwd, forkOf: opts.ForkOf, room: opts.Room, class: opts.Class, receipt: receipt, actor: opts.Actor, createdAt: time.Now().UTC(),
 		proc: proc, permTO: d.cfg.PermissionTimeout, mcp: opts.McpServers, state: StateStarting,
 		perms: map[string]*pendingPermission{},
 	}

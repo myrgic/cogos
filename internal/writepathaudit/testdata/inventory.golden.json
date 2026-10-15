@@ -1587,7 +1587,7 @@
     },
     {
       "file": "internal/engine/serve.go",
-      "line": 1380,
+      "line": 1386,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",
@@ -3210,7 +3210,7 @@
     },
     {
       "file": "internal/engine/managed_session_hermes.go",
-      "line": 191,
+      "line": 213,
       "column": 9,
       "func": "(*hermesProcess).start",
       "subsystem": "internal:engine",

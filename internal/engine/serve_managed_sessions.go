@@ -2,7 +2,7 @@
 // kernel-managed agent sessions (today: the hermes-acp driver).
 //
 //	GET    /v1/managed-sessions[?room=<r>]         list (optionally one room)
-//	POST   /v1/managed-sessions                    create / fork / load  {driver, profile, cwd, room, fork_of, load, mcp_servers}
+//	POST   /v1/managed-sessions                    create / fork / load  {driver, class, profile, cwd, room, fork_of, load, mcp_servers}
 //	GET    /v1/managed-sessions/{id}               one session
 //	DELETE /v1/managed-sessions/{id}               detach (idempotent)
 //	POST   /v1/managed-sessions/{id}/resume        attach an on-disk session (session/load; idempotent)
@@ -75,6 +75,11 @@ func (s *Server) managedSession(w http.ResponseWriter, r *http.Request) *HermesA
 	sess := s.managedSessions.Get(id)
 	if sess == nil {
 		writeJSONError(w, http.StatusNotFound, "not_found", "no managed session "+id)
+		return nil
+	}
+	if allow := managedSessionClassAuthority(r); allow != nil && !allow(sess.class) {
+		writeJSONError(w, http.StatusForbidden, "forbidden", "grant does not permit sessions of this runtime class")
+		return nil
 	}
 	return sess
 }
@@ -120,6 +125,7 @@ func (s *Server) handleManagedSessionCreate(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	req.Actor = actorFromRequest(r)
+	req.AllowClass = managedSessionClassAuthority(r)
 	// The session outlives this request: only the handshake is bounded by it.
 	sess, err := s.managedSessions.Create(r.Context(), req.HermesACPOpts)
 	if err != nil {
@@ -146,6 +152,7 @@ func (s *Server) handleManagedSessionResume(w http.ResponseWriter, r *http.Reque
 	}
 	req.Load, req.ForkOf = r.PathValue("id"), ""
 	req.Actor = actorFromRequest(r)
+	req.AllowClass = managedSessionClassAuthority(r)
 	sess, err := s.managedSessions.Create(r.Context(), req)
 	if err != nil {
 		writeManagedSessionError(w, err)
@@ -161,6 +168,12 @@ func (s *Server) handleManagedSessionGet(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleManagedSessionDelete(w http.ResponseWriter, r *http.Request) {
+	if sess := s.managedSessions.Get(r.PathValue("id")); sess != nil {
+		if allow := managedSessionClassAuthority(r); allow != nil && !allow(sess.class) {
+			writeJSONError(w, http.StatusForbidden, "forbidden", "grant does not permit sessions of this runtime class")
+			return
+		}
+	}
 	_ = s.managedSessions.Delete(r.PathValue("id"))
 	w.WriteHeader(http.StatusNoContent)
 }

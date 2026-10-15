@@ -76,7 +76,9 @@ func (a *agent) newID(prefix string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.next++
-	return fmt.Sprintf("%s-%d", prefix, a.next)
+	// pid-qualified: each fake agent is its own process with its own counter, and
+	// the kernel registry is keyed by session id across processes.
+	return fmt.Sprintf("%s-%d-%d", prefix, os.Getpid(), a.next)
 }
 
 func (a *agent) update(sid string, update map[string]any) {
