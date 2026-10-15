@@ -264,6 +264,10 @@ type Config struct {
 	// use the hardcoded default. Installed into the package-level deny table
 	// by NewServer via SetProviderModelDeny.
 	RoutingDeny []ProviderDenyRule
+
+	// StageUI configures the opt-in Stage UI listener (serve_stage_ui.go).
+	// Zero value (empty Addr) means no listener.
+	StageUI StageUIConfig
 }
 
 // kernelConfigSection holds settings that can appear at the top level or inside v3:.
@@ -313,6 +317,9 @@ type kernelConfigSection struct {
 	// Routing holds optional routing knobs from kernel.yaml. Currently only
 	// the per-provider model deny table.
 	Routing *routingConfig `yaml:"routing"`
+
+	// StageUI is the optional `stage_ui:` block (serve_stage_ui.go).
+	StageUI *stageUISection `yaml:"stage_ui"`
 }
 
 // routingConfig holds the optional `routing:` section of kernel.yaml.
@@ -495,6 +502,7 @@ func applyKernelSection(cfg *Config, s kernelConfigSection) {
 	if s.Mod3URL != "" {
 		cfg.Mod3URL = s.Mod3URL
 	}
+	applyStageUISection(cfg, s.StageUI)
 	if s.MaxToolOutputBytes != 0 {
 		cfg.MaxToolOutputBytes = s.MaxToolOutputBytes
 	}
