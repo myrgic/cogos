@@ -83,7 +83,7 @@ var (
 var (
 	shareLinkHashRe    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	shareLinkRoomRe    = regexp.MustCompile(`^[A-Za-z0-9_-]{0,64}$`)
-	shareLinkSurfaceRe = regexp.MustCompile(`^stage/[A-Za-z0-9._/-]{1,200}$`)
+	shareLinkSurfaceRe = regexp.MustCompile(`^` + regexp.QuoteMeta(shareLinkSurfacePrefix) + `[A-Za-z0-9._/-]{1,200}$`)
 	shareLinkScopeRe   = regexp.MustCompile(`^stage:[A-Za-z0-9._:-]{1,100}$`)
 )
 
@@ -205,10 +205,10 @@ func (st *ShareLinkStore) Import(in ShareLinkImport, parent string) (*ShareLink,
 		return existing, nil
 	}
 
+	// The surface's current link is superseded whether or not it has expired:
+	// an expired predecessor must still be dropped and named in the ledger, or
+	// it stays indexed (and counted against maxShareLinks) here and on rebuild.
 	old := st.bySurface[in.Surface]
-	if old != nil && old.expired(now) {
-		old = nil
-	}
 	if old == nil {
 		if len(st.byID) >= maxShareLinks {
 			st.evictExpiredLocked(now)

@@ -398,3 +398,41 @@ func TestShareLink_RoutesNeedStageKeysScope(t *testing.T) {
 		t.Error("list leaks an integrity hash")
 	}
 }
+
+// An expired link is still superseded by a rekey of its surface: dropped from
+// every index and named in the ledger, so neither the live store nor a rebuild
+// keeps the stale record counting against capacity (cog-review on #688).
+func TestShareLink_RekeyAfterExpiryDropsPredecessor(t *testing.T) {
+	root := t.TempDir()
+	t.Cleanup(resetLedgerCacheForTest)
+	resetLedgerCacheForTest()
+	st := NewShareLinkStoreWithLedger(root)
+	in := shareImport("dev-old", "stage/device/d1")
+	in.TTLHours = 1
+	old, err := st.Import(in, "g1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.mu.Lock()
+	old.ExpiresAt = time.Now().UTC().Add(-time.Minute)
+	st.mu.Unlock()
+
+	if _, err := st.Import(shareImport("dev-new", "stage/device/d1"), "g1"); err != nil {
+		t.Fatal(err)
+	}
+	if st.Len() != 1 {
+		t.Fatalf("live store len = %d; want 1 (expired predecessor leaked)", st.Len())
+	}
+	if _, ok := st.Resolve("dev-new"); !ok {
+		t.Error("new token does not resolve")
+	}
+
+	resetLedgerCacheForTest()
+	re, err := RebuildShareLinkStoreFromLedger(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if re.Len() != 1 {
+		t.Errorf("rebuilt store len = %d; want 1 (expired predecessor resurrected)", re.Len())
+	}
+}
