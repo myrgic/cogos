@@ -120,6 +120,13 @@ type Server struct {
 	// serve_share_links.go.
 	shareLinks *ShareLinkStore
 
+	// pairing holds open pairing requests (serve_pairing.go): in-memory, with
+	// hash-only ledger events. pairingLimiter bounds unauthenticated creation;
+	// pairingPollWait overrides the long-poll length when non-zero (tests).
+	pairing         *pairingStore
+	pairingLimiter  *grantMintLimiter
+	pairingPollWait time.Duration
+
 	// grantMintLimiter bounds POST /v1/identity/grants throughput on the
 	// bootstrap-exempt path of the write-route grant-auth gate (see
 	// serve_grant_auth.go). Always non-nil after NewServer.
@@ -230,6 +237,8 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 		shareLinks = NewShareLinkStoreWithLedger(cfg.WorkspaceRoot)
 	}
 	s.shareLinks = shareLinks
+	s.pairing = newPairingStore(cfg.WorkspaceRoot)
+	s.pairingLimiter = newGrantMintLimiter(pairingCreateLimit, pairingCreateWindow)
 	s.grantMintLimiter = newGrantMintLimiter(defaultGrantMintRateLimit, defaultGrantMintRateWindow)
 	classes, err := NewRuntimeClassRegistry(cfg.ManagedSessions)
 	if err != nil {
@@ -318,6 +327,7 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 	// backed + revocable as of chunk 2; see serve_identity_grants.go.
 	s.registerIdentityGrantRoutes(mux)
 	s.registerShareLinkRoutes(mux)
+	s.registerPairingRoutes(mux)
 
 	// Phase 1B: peer-awareness packet endpoint (READ side of the 4E
 	// ambient-awareness loop; Phase 1A populates channel.<sid>.activity).

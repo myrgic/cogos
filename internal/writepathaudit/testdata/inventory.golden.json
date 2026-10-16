@@ -1575,7 +1575,7 @@
     },
     {
       "file": "internal/engine/serve.go",
-      "line": 1438,
+      "line": 1448,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",
@@ -1680,6 +1680,18 @@
       "resolved": true,
       "subsystem": "internal:engine",
       "raw": "identityGrantsLedgerSession"
+    },
+    {
+      "file": "internal/engine/serve_pairing.go",
+      "line": 147,
+      "column": 9,
+      "primitive": "engine.AppendEvent(bucket)",
+      "func": "(*pairingStore).append",
+      "pattern": "\u003cWorkspaceRoot\u003e/.cog/ledger/identity-pairing/events.jsonl",
+      "category": "cog",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "pairingLedgerSession"
     },
     {
       "file": "internal/engine/serve_share_links.go",
@@ -2907,14 +2919,14 @@
     }
   ],
   "summary": {
-    "total": 242,
-    "cog": 101,
+    "total": 243,
+    "cog": 102,
     "home": 2,
     "elsewhere": 13,
     "unanchored": 85,
     "dynamic": 41,
     "by_primitive": {
-      "engine.AppendEvent(bucket)": 6,
+      "engine.AppendEvent(bucket)": 7,
       "io.Copy": 7,
       "os.Create": 6,
       "os.CreateTemp": 8,

@@ -616,6 +616,13 @@ func isGrantExemptRequest(r *http.Request) bool {
 	if r.URL.Path == shareLinkRoutePrefix || strings.HasPrefix(r.URL.Path, shareLinkRoutePrefix+"/") {
 		return false
 	}
+	// The pairing flow authenticates inside its handlers: creation and the
+	// requester's poll are unauthenticated by design, approve/deny/list take a
+	// grant OR a share link carrying pairing:approve (serve_pairing.go). A
+	// share link must reach them, which this gate would refuse.
+	if r.URL.Path == pairingRoutePrefix || strings.HasPrefix(r.URL.Path, pairingRoutePrefix+"/") {
+		return true
+	}
 	// Every other GET (and HEAD, which ServeMux treats as GET for handler
 	// dispatch) is a read — exempt. Everything else (POST/PUT/PATCH/DELETE
 	// on any other path) falls through to the grant check.
