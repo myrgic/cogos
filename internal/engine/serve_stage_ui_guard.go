@@ -60,6 +60,8 @@ var (
 	stageGuardSchemeRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.\-]*:$`)
 	stageGuardSegRe    = regexp.MustCompile(`^[A-Za-z0-9_\-]+$`)
 	stageGuardKeyLogRe = regexp.MustCompile(`/(r|k|h)/[A-Za-z0-9_\-]{12,}`)
+	// Pairing codes are short (devices.py), so /pair/ scrubs any segment (cog-review #686).
+	stageGuardPairLogRe = regexp.MustCompile(`/pair/[^/?#]+`)
 )
 
 // stageGuard holds the front-door state: public host, lockout tables, clock.
@@ -231,6 +233,7 @@ func (g *stageGuard) unlock(ip string) []string {
 
 func stageGuardLogPath(p string) string {
 	p = stageGuardKeyLogRe.ReplaceAllString(p, "/$1/…")
+	p = stageGuardPairLogRe.ReplaceAllString(p, "/pair/…")
 	if len(p) > 80 {
 		p = p[:80]
 	}

@@ -466,6 +466,22 @@ func TestStageGuard_K22_LogPathScrub(t *testing.T) {
 	}
 }
 
+// Every keyed prefix is scrubbed in guard logs, including short pairing codes.
+func TestStageGuard_K22_LogPathScrubAllKeyedPrefixes(t *testing.T) {
+	for _, tc := range []struct{ in, secret string }{
+		{"/r/abcdefghijklmnopqrstuvwx/dashboard/orb.html", "abcdefghij"},
+		{"/k/abcdefghijklmnopqrstuvwx", "abcdefghij"},
+		{"/h/abcdefghijklmnopqrstuvwx/", "abcdefghij"},
+		{"/pair/BCDF", "BCDF"},
+		{"/pair/BCDFGH?x=1", "BCDFGH"},
+	} {
+		got := stageGuardLogPath(tc.in)
+		if strings.Contains(got, tc.secret) {
+			t.Errorf("K22: %q logged as %q (key not scrubbed)", tc.in, got)
+		}
+	}
+}
+
 func TestStageGuard_ConfigPublicHost(t *testing.T) {
 	cfg := &Config{}
 	applyStageUISection(cfg, &stageUISection{Addr: "127.0.0.1:7873", PublicHost: "stage.myrgic.com"})
