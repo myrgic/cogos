@@ -35,7 +35,10 @@ func (c *ctx) admit(x *cand) res {
 			}
 			return rej(CodeSpecLost)
 		}
-		if y := c.byID[e.Spec]; y != nil && (y.e.Kind == KindSpec || y.e.Kind == KindGenesis) {
+		// The cited id names a known entry that is not an admissible spec
+		// here (a spec outside the chain, or any non-spec entry, which can
+		// never become one): rejected, never held (cog-review on 824b74b).
+		if y := c.byID[e.Spec]; y != nil {
 			return rej(CodeSpecLost)
 		}
 		return held(CodeSpecMissing)

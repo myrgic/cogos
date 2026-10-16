@@ -173,6 +173,11 @@ func (s *Spec) Validate(prev *Spec, history ...*Spec) error {
 			if m.Role != RoleOwner && m.Role != RoleCollaborator && m.Role != RoleGuest {
 				return fmt.Errorf("member %q: bad role %q", id, m.Role)
 			}
+			// A room has exactly one owner: the one spec.owner names
+			// (cog-review on 824b74b).
+			if m.Role == RoleOwner && id != s.Owner {
+				return fmt.Errorf("member %q: only spec.owner %q may hold the owner role", id, s.Owner)
+			}
 			if len(m.Homes) == 0 || m.Node != "" {
 				return fmt.Errorf("member %q: a person has homes and no node", id)
 			}

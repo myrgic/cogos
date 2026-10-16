@@ -344,7 +344,15 @@ func Evaluate(p Params, entries []*Entry) *Outcome {
 	c.final = final
 	// ---- Equivocation (Layer 2.3), a function of the set. ---------------
 	equivFrom := map[string]uint64{}
-	for log, m := range c.byLogSeq {
+	// Logs in sorted order, so Outcome.Events is identical across runs on
+	// one input (cog-review on 824b74b).
+	eqLogs := make([]string, 0, len(c.byLogSeq))
+	for log := range c.byLogSeq {
+		eqLogs = append(eqLogs, log)
+	}
+	sort.Strings(eqLogs)
+	for _, log := range eqLogs {
+		m := c.byLogSeq[log]
 		var seqs []uint64
 		for s, cs := range m {
 			if len(cs) > 1 {
