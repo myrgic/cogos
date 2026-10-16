@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "purpose": "W0 run vectors (p5-plan.md section 4 and 6). Consumed by tests/test_run_vectors.py against workers.py and journal.py now; the same file is vendored into the cogos W1/W2/W4 Go tests later.",
+  "sources": {
+    "decide_outcome": "apps/stage/workers.py decide_outcome",
+    "item_state": "apps/stage/journal.py item_state",
+    "end_procedure": "apps/stage/workers.py end_procedure and try_wake",
+    "journal": "apps/stage/journal.py snapshot (layout at lines 47-61)"
+  },
+  "states": [
+    {"id": "S1-planned", "input": {"item": {}, "run": null, "resolves": true}, "expect": {"state": "planned", "reason": ""}},
+    {"id": "S2-unresolved-executor", "input": {"item": {}, "run": {"id": "r-v-1"}, "resolves": false}, "expect": {"state": "stalled", "reason": "unresolved-executor"}},
+    {"id": "S3-running", "input": {"item": {}, "run": {"id": "r-v-1"}, "resolves": true}, "expect": {"state": "running", "reason": ""}},
+    {"id": "S4-ended-wake-undelivered", "input": {"item": {}, "run": {"id": "r-v-1", "ended": 1000.0, "status": "ok"}, "resolves": true}, "expect": {"state": "stalled", "reason": "wake-undelivered"}},
+    {"id": "S5-reported", "input": {"item": {}, "run": {"id": "r-v-1", "ended": 1000.0, "status": "ok", "woke_at": 1001.0}, "resolves": true}, "expect": {"state": "reported", "reason": ""}},
+    {"id": "S6-processed", "input": {"item": {"processed": true}, "run": {"id": "r-v-1", "ended": 1000.0, "status": "ok", "woke_at": 1001.0}, "resolves": true}, "expect": {"state": "processed", "reason": ""}},
+    {"id": "S7-done", "input": {"item": {"state": "done"}, "run": {"id": "r-v-1", "ended": 1000.0, "status": "ok", "woke_at": 1001.0}, "resolves": true}, "expect": {"state": "done", "reason": ""}},
+    {"id": "S8-done-before-end-is-not-done", "input": {"item": {"state": "done"}, "run": {"id": "r-v-1"}, "resolves": true}, "expect": {"state": "running", "reason": ""}}
+  ],
+  "outcomes": [
+    {"id": "O1-stop-requested", "input": {"rec": {"stop_requested": 1700000000.0}, "snap": {"status": "running", "launched": true}, "meta": {}}, "expect": ["killed", "stopped on request"]},
+    {"id": "O2-completed-no-verdict", "input": {"rec": {}, "snap": {"status": "completed", "verify": null, "launched": true}, "meta": {"exit": "0"}}, "expect": ["ok", ""]},
+    {"id": "O3-completed-verify-fail", "input": {"rec": {}, "snap": {"status": "completed", "verify": "fail", "launched": true}, "meta": {"exit": "0"}}, "expect": ["fail", "verify-failed"]},
+    {"id": "O4-completed-verify-pass", "input": {"rec": {}, "snap": {"status": "completed", "verify": "pass", "launched": true}, "meta": {"exit": "0"}}, "expect": ["ok", ""]},
+    {"id": "O5-killed", "input": {"rec": {}, "snap": {"status": "killed", "launched": true}, "meta": {"exit": "143"}}, "expect": ["killed", "workflow killed"]},
+    {"id": "O6-failed", "input": {"rec": {}, "snap": {"status": "failed", "launched": true}, "meta": {"exit": "1"}}, "expect": ["fail", "workflow failed"]},
+    {"id": "O7-error", "input": {"rec": {}, "snap": {"status": "error", "launched": true}, "meta": {"exit": "1"}}, "expect": ["fail", "workflow error"]},
+    {"id": "O8-driver-gone-mid-workflow", "input": {"rec": {}, "snap": {"status": "running", "launched": true}, "meta": {"exit": "1"}}, "expect": ["crash", "driver exited (1) before the workflow finished; resumable via args.resume_from"]},
+    {"id": "O9-driver-gone-before-launch", "input": {"rec": {}, "snap": {"status": null, "launched": false}, "meta": {"exit": "2"}}, "expect": ["crash", "driver exited (2) before the workflow launched"]},
+    {"id": "O10-no-snapshot-no-exit", "input": {"rec": {}, "snap": null, "meta": {}}, "expect": ["crash", "driver exited (?) before the workflow launched"]},
+    {"id": "O11-journal-done-driver-lingering-then-killed", "input": {"rec": {}, "snap": {"status": "completed", "verify": "pass", "launched": true}, "meta": {"exit": "143"}}, "expect": ["ok", ""]}
+  ],
+  "invariants": [
+    {
+      "id": "I1",
+      "rule": "a run item has at most one run.end; a second end is refused",
+      "python_check": "end_procedure twice with different outcomes keeps the first status and calls deliver once",
+      "kernel_check": "second POST /v1/runs/{id}/end returns 409 (W1)"
+    },
+    {
+      "id": "I2",
+      "rule": "no item.archive or done before run.end",
+      "python_check": "S8-done-before-end-is-not-done",
+      "kernel_check": "archive before end returns 409 (W1)"
+    },
+    {
+      "id": "I3",
+      "rule": "a room-origin run.end with no run.delivered after 5 min shows stalled: wake-undelivered",
+      "python_check": "try_wake with an undelivered wake sets wake_surfaced at 300 s and item_state is stalled wake-undelivered (S4); a delivered wake gives reported (S5)",
+      "kernel_check": "run.delivered absent after 5 min -> stalled (W1 fold)"
+    },
+    {
+      "id": "I4",
+      "rule": "an owned executor whose run is not live and has no run.end gets run.end outcome lost, written by the kernel",
+      "python_check": "driver gone with no journal end: decide_outcome gives crash (O8). Python does not write lost; the divergence is intended and is closed by W2/W4",
+      "kernel_check": "kernel boot with no live turn or live driver -> run.end outcome lost (W2, W4)",
+      "python_expected_today": {"outcome": "crash", "reason_prefix": "driver exited"},
+      "kernel_expected": {"outcome": "lost"}
+    }
+  ]
+}

@@ -1574,8 +1574,20 @@
       "raw": "w.path"
     },
     {
+      "file": "internal/engine/run_board.go",
+      "line": 364,
+      "column": 13,
+      "primitive": "engine.AppendEvent(bucket)",
+      "func": "(*RunBoardStore).commitLocked",
+      "pattern": "\u003cWorkspaceRoot\u003e/.cog/ledger/runs/events.jsonl",
+      "category": "cog",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "RunsLedgerBucket"
+    },
+    {
       "file": "internal/engine/serve.go",
-      "line": 1449,
+      "line": 1461,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",
@@ -2919,14 +2931,14 @@
     }
   ],
   "summary": {
-    "total": 243,
-    "cog": 102,
+    "total": 244,
+    "cog": 103,
     "home": 2,
     "elsewhere": 13,
     "unanchored": 85,
     "dynamic": 41,
     "by_primitive": {
-      "engine.AppendEvent(bucket)": 7,
+      "engine.AppendEvent(bucket)": 8,
       "io.Copy": 7,
       "os.Create": 6,
       "os.CreateTemp": 8,

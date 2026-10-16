@@ -252,6 +252,11 @@ const (
 	// room-apply route). Reserved ahead of the route so the mapping exists
 	// before the first handler does.
 	ScopeRoomsWrite = "rooms:write"
+
+	// ScopeRunsWrite authorizes writing to the kernel run board
+	// (POST /v1/runs and its sub-routes). Reads need a live grant but no
+	// particular scope.
+	ScopeRunsWrite = "runs:write"
 )
 
 // ScopeStageKeys is declared in serve_share_links.go.
@@ -316,6 +321,12 @@ func requiredScopeForRequest(r *http.Request) string {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead &&
 		(path == roomsRoutePrefix || strings.HasPrefix(path, roomsRoutePrefix+"/")) {
 		return ScopeRoomsWrite
+	}
+
+	// Run board writes (serve_runs.go).
+	if r.Method != http.MethodGet && r.Method != http.MethodHead &&
+		(path == runsRoutePrefix || strings.HasPrefix(path, runsRoutePrefix+"/")) {
+		return ScopeRunsWrite
 	}
 
 	// Inference: the routes that spend provider tokens.
@@ -614,6 +625,11 @@ func isGrantExemptRequest(r *http.Request) bool {
 	}
 	// The share-link store is gated on every method too.
 	if r.URL.Path == shareLinkRoutePrefix || strings.HasPrefix(r.URL.Path, shareLinkRoutePrefix+"/") {
+		return false
+	}
+	// The run board is gated on every method too (like /v1/identity): GET is
+	// carved out of the blanket read exemption.
+	if r.URL.Path == runsRoutePrefix || strings.HasPrefix(r.URL.Path, runsRoutePrefix+"/") {
 		return false
 	}
 	// The pairing flow authenticates inside its handlers: creation and the

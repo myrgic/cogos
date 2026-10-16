@@ -121,6 +121,10 @@ type Server struct {
 	// serve_share_links.go.
 	shareLinks *ShareLinkStore
 
+	// runBoard is the ledger-backed kernel run board (run_board.go), served at
+	// /v1/runs. Non-nil after NewServer.
+	runBoard *RunBoardStore
+
 	// pairing holds open pairing requests (serve_pairing.go): in-memory, with
 	// hash-only ledger events. pairingLimiter bounds unauthenticated creation;
 	// pairingPollWait overrides the long-poll length when non-zero (tests).
@@ -238,6 +242,13 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 		shareLinks = NewShareLinkStoreWithLedger(cfg.WorkspaceRoot)
 	}
 	s.shareLinks = shareLinks
+	// The run board folds from the `runs` ledger bucket; a partial store from
+	// a failed replay is kept (dropping it would hide recorded runs).
+	runBoard, err := RebuildRunBoardStoreFromLedger(cfg.WorkspaceRoot)
+	if err != nil {
+		slog.Warn("serve: run-board ledger rebuild failed; serving the partial fold", "err", err)
+	}
+	s.runBoard = runBoard
 	s.pairing = newPairingStore(cfg.WorkspaceRoot)
 	s.pairingLimiter = newGrantMintLimiter(pairingCreateLimit, pairingCreateWindow)
 	s.grantMintLimiter = newGrantMintLimiter(defaultGrantMintRateLimit, defaultGrantMintRateWindow)
@@ -328,6 +339,7 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 	// backed + revocable as of chunk 2; see serve_identity_grants.go.
 	s.registerIdentityGrantRoutes(mux)
 	s.registerShareLinkRoutes(mux)
+	s.registerRunRoutes(mux)
 	s.registerPairingRoutes(mux)
 
 	// Phase 1B: peer-awareness packet endpoint (READ side of the 4E
