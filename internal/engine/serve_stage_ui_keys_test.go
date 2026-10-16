@@ -331,6 +331,9 @@ func TestStageUIKeys_ShadowNeverChangesAResponse(t *testing.T) {
 			rec := shadowDo(h, r.m, r.p, "203.0.113.7", r.ws)
 			var hk []string
 			for k, v := range rec.Header() {
+				if k == "Date" { // wall clock, differs across runs a second apart
+					continue
+				}
 				hk = append(hk, k+"="+strings.Join(v, ","))
 			}
 			out = append(out, fmt.Sprintf("%d|%d|%s|%v", rec.Code, len(hk), rec.Body.String(), sortedStrings(hk)))
