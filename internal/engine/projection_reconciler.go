@@ -534,6 +534,13 @@ type ProjectionWatcher struct {
 	NodesDir     string
 	Trigger      func(ctx context.Context) error
 	PollInterval time.Duration
+	// recheckInterval is how often runFsnotify re-checks NodesDir against the
+	// entry cap; 0 uses memWatcherPollInterval.
+	recheckInterval time.Duration
+
+	// onSwitchToPolling, when set, is called under mu at the moment
+	// runFsnotify hands over to runPolling.  Test hook.
+	onSwitchToPolling func()
 
 	mu      sync.Mutex
 	running bool
@@ -573,9 +580,16 @@ func (w *ProjectionWatcher) Start(ctx context.Context) error {
 	w.stopCh = make(chan struct{})
 	w.running = true
 
-	// Try fsnotify; fall back to polling on failure.
+	// Try fsnotify; fall back to polling on failure.  An oversized nodes/
+	// directory is polled too: kqueue holds one fd per file in a watched dir.
 	fsWatcher, err := fsnotify.NewWatcher()
-	if err != nil {
+	if dirOverCap(w.NodesDir, memWatcherDirEntryCap) {
+		log.Printf("[projection-watcher] %s has more than %d entries, using polling fallback", w.NodesDir, memWatcherDirEntryCap)
+		if err == nil {
+			fsWatcher.Close()
+		}
+		fsWatcher = nil
+	} else if err != nil {
 		log.Printf("[projection-watcher] fsnotify unavailable (%v), using polling fallback", err)
 		fsWatcher = nil
 	} else if err := fsWatcher.Add(w.NodesDir); err != nil {
@@ -617,11 +631,46 @@ func (w *ProjectionWatcher) runFsnotify(ctx context.Context, fsWatcher *fsnotify
 	var debounceTimer *time.Timer
 	var timerMu sync.Mutex
 
+	// A nodes/ dir can grow past the entry cap after Start; re-check on a tick
+	// and fall over to polling for the rest of the process life.
+	recheck := w.recheckInterval
+	if recheck == 0 {
+		recheck = memWatcherPollInterval
+	}
+	ticker := time.NewTicker(recheck)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-w.stopCh:
 			return
 		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !dirOverCap(w.NodesDir, memWatcherDirEntryCap) {
+				continue
+			}
+			// Stop may have won the race with this tick: it closes stopCh and
+			// the watcher under w.mu.  Only the caller that still owns the
+			// watcher closes it, and polling is never entered after Stop.
+			select {
+			case <-w.stopCh:
+				return
+			default:
+			}
+			w.mu.Lock()
+			if !w.running || w.watcher != fsWatcher {
+				w.mu.Unlock()
+				return
+			}
+			w.watcher = nil
+			if w.onSwitchToPolling != nil {
+				w.onSwitchToPolling()
+			}
+			w.mu.Unlock()
+			log.Printf("[projection-watcher] %s grew past %d entries, switching to polling", w.NodesDir, memWatcherDirEntryCap)
+			fsWatcher.Close()
+			w.runPolling(ctx)
 			return
 		case event, ok := <-fsWatcher.Events:
 			if !ok {

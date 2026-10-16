@@ -48,6 +48,13 @@ type BEPProvider struct {
 	lastSync         time.Time
 	watcher          *fsnotify.Watcher // nil if fsnotify unavailable; falls back to polling
 	receiver         *receiverState    // ring buffer for received CRD events
+
+	// recheckInterval is how often runFSNotify re-checks watchDir against the
+	// entry cap; 0 uses memWatcherPollInterval.
+	recheckInterval time.Duration
+	// pollInterval overrides the polling period; 0 uses 5s for the fsnotify
+	// failure fallback and memWatcherPollInterval for an oversized directory.
+	pollInterval time.Duration
 }
 
 // ─── Constructor ────────────────────────────────────────────────────────────────
@@ -113,8 +120,17 @@ func (p *BEPProvider) Start() error {
 	}
 
 	// Try fsnotify first; fall back to polling if it fails.
+	// An oversized definitions directory is polled instead: kqueue holds one
+	// fd per file in a watched dir.
+	oversized := dirOverCap(p.watchDir, memWatcherDirEntryCap)
 	fsWatcher, err := fsnotify.NewWatcher()
-	if err != nil {
+	if oversized {
+		log.Printf("[bep] %s has more than %d entries, using polling fallback", p.watchDir, memWatcherDirEntryCap)
+		if err == nil {
+			fsWatcher.Close()
+		}
+		fsWatcher = nil
+	} else if err != nil {
 		log.Printf("[bep] fsnotify unavailable (%v), using polling fallback", err)
 		fsWatcher = nil
 	} else {
@@ -139,8 +155,10 @@ func (p *BEPProvider) Start() error {
 
 	if fsWatcher != nil {
 		go p.runFSNotify(fsWatcher)
+	} else if oversized {
+		go p.runPolling(memWatcherPollInterval)
 	} else {
-		go p.runPolling()
+		go p.runPolling(5 * time.Second)
 	}
 
 	log.Printf("[bep] provider started, watching %s", p.watchDir)
@@ -229,6 +247,15 @@ func (p *BEPProvider) runFSNotify(w *fsnotify.Watcher) {
 	var timer *time.Timer
 	flushCh := make(chan struct{}, 1)
 
+	// The definitions dir can grow past the entry cap after Start; re-check on
+	// a tick and fall over to polling for the rest of the process life.
+	recheck := p.recheckInterval
+	if recheck == 0 {
+		recheck = memWatcherPollInterval
+	}
+	recheckTicker := time.NewTicker(recheck)
+	defer recheckTicker.Stop()
+
 	flush := func() {
 		if len(pending) == 0 {
 			return
@@ -263,6 +290,33 @@ func (p *BEPProvider) runFSNotify(w *fsnotify.Watcher) {
 			if timer != nil {
 				timer.Stop()
 			}
+			return
+
+		case <-recheckTicker.C:
+			if !dirOverCap(p.watchDir, memWatcherDirEntryCap) {
+				continue
+			}
+			// Stop closes stopCh and the watcher under p.mu; only the caller
+			// that still owns the watcher closes it.
+			select {
+			case <-p.stopCh:
+				return
+			default:
+			}
+			p.mu.Lock()
+			if !p.running || p.watcher != w {
+				p.mu.Unlock()
+				return
+			}
+			p.watcher = nil
+			p.mu.Unlock()
+			log.Printf("[bep] %s grew past %d entries, switching to polling", p.watchDir, memWatcherDirEntryCap)
+			if timer != nil {
+				timer.Stop()
+			}
+			flush()
+			w.Close()
+			p.runPolling(memWatcherPollInterval)
 			return
 
 		case <-flushCh:
@@ -307,8 +361,10 @@ func (p *BEPProvider) runFSNotify(w *fsnotify.Watcher) {
 
 // ─── Internal: polling fallback ─────────────────────────────────────────────────
 
-func (p *BEPProvider) runPolling() {
-	const interval = 5 * time.Second
+func (p *BEPProvider) runPolling(interval time.Duration) {
+	if p.pollInterval > 0 {
+		interval = p.pollInterval
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -461,6 +517,6 @@ func (p *BEPProvider) InitPollingForTest() error {
 	p.stopCh = make(chan struct{})
 	p.watcher = nil // nil watcher → polling mode
 
-	go p.runPolling()
+	go p.runPolling(5 * time.Second)
 	return nil
 }

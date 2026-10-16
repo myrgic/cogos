@@ -1016,10 +1016,44 @@ type oaiChoice struct {
 	FinishReason *string     `json:"finish_reason"`
 }
 
+// oaiUsage is the OpenAI-shaped usage object.
+//
+// Convention (matches OpenAI): prompt_tokens is the TOTAL prompt size, i.e.
+// uncached input + cache reads + cache writes, and
+// prompt_tokens_details.cached_tokens is a subset of it. total_tokens is
+// prompt_tokens + completion_tokens. Cache-creation tokens are reported in the
+// extension field prompt_tokens_details.cache_write_tokens (also a subset of
+// prompt_tokens); this is the name Hermes' extract_cache_stats reads.
+// prompt_tokens_details is omitted when both cache counts are zero.
 type oaiUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int                   `json:"prompt_tokens"`
+	CompletionTokens    int                   `json:"completion_tokens"`
+	TotalTokens         int                   `json:"total_tokens"`
+	PromptTokensDetails *oaiPromptTokenDetail `json:"prompt_tokens_details,omitempty"`
+}
+
+type oaiPromptTokenDetail struct {
+	CachedTokens     int `json:"cached_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
+}
+
+// oaiUsageFrom converts provider TokenUsage (whose InputTokens excludes cache
+// reads/writes) into the OpenAI usage shape. Shared by the non-streaming and
+// streaming-final-chunk paths so they cannot drift.
+func oaiUsageFrom(u TokenUsage) *oaiUsage {
+	prompt := u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens
+	out := &oaiUsage{
+		PromptTokens:     prompt,
+		CompletionTokens: u.OutputTokens,
+		TotalTokens:      prompt + u.OutputTokens,
+	}
+	if u.CacheReadTokens != 0 || u.CacheWriteTokens != 0 {
+		out.PromptTokensDetails = &oaiPromptTokenDetail{
+			CachedTokens:     u.CacheReadTokens,
+			CacheWriteTokens: u.CacheWriteTokens,
+		}
+	}
+	return out
 }
 
 type oaiChatResponse struct {
@@ -1621,6 +1655,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// Persist the turn (ledger event + sidecar). Closes cogos#20 by
 	// capturing the full prompt/response pair, which RecordBlock drops.
 	turn.DurationMs = time.Since(inferStart).Milliseconds()
+	// Stamp only when the provider produced usage: an errored turn keeps a
+	// zero Usage so RecordTurn omits the "usage" key as before.
+	if turn.Usage != (TurnUsage{}) {
+		turn.Usage.RequestID = creq.Metadata.RequestID
+		turn.Usage.WallMS = turn.DurationMs
+	}
 	if err := s.process.RecordTurn(turn); err != nil {
 		slog.Warn("chat: RecordTurn failed", "err", err, "session", turn.SessionID)
 	}
@@ -1835,11 +1875,8 @@ func (s *Server) completeChat(w http.ResponseWriter, ctx context.Context, req *C
 	}
 	if turn != nil {
 		turn.Response = resp.Content
-		turn.Usage = TurnUsage{
-			InputTokens:  resp.Usage.InputTokens,
-			OutputTokens: resp.Usage.OutputTokens,
-			TotalTokens:  resp.Usage.InputTokens + resp.Usage.OutputTokens,
-		}
+		turn.Usage = newTurnUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens,
+			resp.Usage.CacheReadTokens, resp.Usage.CacheWriteTokens)
 		// Non-kernel tool calls returned to the client become transcript
 		// entries with empty result (the client will execute them).
 		if len(resp.ToolCalls) > 0 {
@@ -1944,11 +1981,7 @@ func (s *Server) completeChat(w http.ResponseWriter, ctx context.Context, req *C
 			Message:      msg,
 			FinishReason: &finishReason,
 		}},
-		Usage: &oaiUsage{
-			PromptTokens:     resp.Usage.InputTokens,
-			CompletionTokens: resp.Usage.OutputTokens,
-			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
-		},
+		Usage: oaiUsageFrom(resp.Usage),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(oai)
@@ -2354,11 +2387,8 @@ func (s *Server) flushStreamHop(buf *streamHopBuffer, externalCalls []ToolCall,
 	if turn != nil {
 		turn.Response = buf.content.String()
 		if buf.usage != nil {
-			turn.Usage = TurnUsage{
-				InputTokens:  buf.usage.InputTokens,
-				OutputTokens: buf.usage.OutputTokens,
-				TotalTokens:  buf.usage.InputTokens + buf.usage.OutputTokens,
-			}
+			turn.Usage = newTurnUsage(buf.usage.InputTokens, buf.usage.OutputTokens,
+				buf.usage.CacheReadTokens, buf.usage.CacheWriteTokens)
 		}
 		// Audit-fidelity fix: when the model replies via speak/send_text/output
 		// tool calls, the streaming buffer text content is empty. Extract the
@@ -2377,11 +2407,7 @@ func (s *Server) flushStreamHop(buf *streamHopBuffer, externalCalls []ToolCall,
 		Choices: []oaiChoice{{Index: 0, FinishReason: &finishReason}},
 	}
 	if streamOpts != nil && streamOpts.IncludeUsage && buf.usage != nil {
-		data.Usage = &oaiUsage{
-			PromptTokens:     buf.usage.InputTokens,
-			CompletionTokens: buf.usage.OutputTokens,
-			TotalTokens:      buf.usage.InputTokens + buf.usage.OutputTokens,
-		}
+		data.Usage = oaiUsageFrom(*buf.usage)
 	}
 	b, _ := json.Marshal(data)
 	writeSSE(b)

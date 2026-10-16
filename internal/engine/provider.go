@@ -336,6 +336,11 @@ type ToolCallDelta struct {
 }
 
 // TokenUsage tracks token consumption for cost accounting.
+//
+// InputTokens is the UNCACHED input only (Anthropic semantics); cache reads and
+// writes are reported separately and are NOT included in it. Providers whose
+// wire format folds cached tokens into input (e.g. codex) must subtract them
+// before filling this struct.
 type TokenUsage struct {
 	InputTokens      int `json:"input_tokens"`
 	OutputTokens     int `json:"output_tokens"`

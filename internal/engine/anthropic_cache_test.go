@@ -283,3 +283,109 @@ func TestCacheBreakpoints_StringSystemGetsBreakpoint(t *testing.T) {
 		t.Fatal("empty system must not become an empty marked block")
 	}
 }
+
+// ── OAuth single-turn relocated-prefix breakpoint (K2) ──────────────────────────
+
+// oauthSingleTurnWire mirrors the OAuth Complete/Stream wire steps for a
+// single-turn request: relocate system text into the first user turn, then the
+// second normalize pass (which I2-merges it with the user's text), then breakpoints.
+func oauthSingleTurnWire(t *testing.T, relocated, userText string) *anthropicRequest {
+	t.Helper()
+	r := cacheReq(anthropicMessage{Role: "user", Content: userText})
+	prependOAuthSystemToUserTurn(r, relocated)
+	repaired, _ := normalizeAnthropicMessages(r.Messages)
+	r.Messages = repaired
+	applyAnthropicCacheBreakpoints(r)
+	applyOAuthRelocatedCacheBreakpoint(r, relocated)
+	return r
+}
+
+func TestOAuthRelocated_SingleTurnMarksRelocatedBlockOnly(t *testing.T) {
+	t.Parallel()
+	const relocated = "<!-- context id=\"c1\" zone=core salience=0.90 -->\nstable nucleus text"
+	r := oauthSingleTurnWire(t, relocated, "what is up")
+
+	if len(r.Messages) != 1 {
+		t.Fatalf("single-turn wire must be one message after I2 merge; got %d", len(r.Messages))
+	}
+	blocks, ok := r.Messages[0].Content.([]anthropicContentBlock)
+	if !ok || len(blocks) != 2 {
+		t.Fatalf("expected relocated + user text as two blocks; got %+v", r.Messages[0].Content)
+	}
+	if blocks[0].Text != relocated || blocks[0].CacheControl == nil {
+		t.Fatalf("relocated block must be block[0] with cache_control; got %+v", blocks[0])
+	}
+	if blocks[1].CacheControl != nil {
+		t.Fatal("volatile user text must NOT carry cache_control")
+	}
+	// system (last block) + tools (last def) + relocated block = exactly 3.
+	if n := countBreakpoints(t, r); n != 3 {
+		t.Fatalf("breakpoints = %d; want 3 (system, tools, relocated)", n)
+	}
+}
+
+func TestOAuthRelocated_SingleTurnStringContentBecomesMarkedBlock(t *testing.T) {
+	t.Parallel()
+	// No user text at all: the relocated message stands alone with string content.
+	const relocated = "only relocated text"
+	r := cacheReq(anthropicMessage{Role: "user", Content: relocated})
+	applyOAuthRelocatedCacheBreakpoint(r, relocated)
+	blocks, ok := r.Messages[0].Content.([]anthropicContentBlock)
+	if !ok || len(blocks) != 1 || blocks[0].Text != relocated || blocks[0].CacheControl == nil {
+		t.Fatalf("string relocated content must become one marked block; got %+v", r.Messages[0].Content)
+	}
+}
+
+func TestOAuthRelocated_MultiMessageUnchanged(t *testing.T) {
+	t.Parallel()
+	const relocated = "relocated"
+	build := func() *anthropicRequest {
+		return cacheReq(
+			anthropicMessage{Role: "user", Content: relocated + "\n\nfirst"},
+			anthropicMessage{Role: "assistant", Content: "answer"},
+			anthropicMessage{Role: "user", Content: "second"},
+		)
+	}
+	base := build()
+	applyAnthropicCacheBreakpoints(base)
+	withNew := build()
+	applyAnthropicCacheBreakpoints(withNew)
+	applyOAuthRelocatedCacheBreakpoint(withNew, relocated)
+
+	a, _ := json.Marshal(base)
+	b, _ := json.Marshal(withNew)
+	if string(a) != string(b) {
+		t.Fatalf("3-message request must be byte-identical to today's breakpoints\n base: %s\n new:  %s", a, b)
+	}
+}
+
+func TestOAuthRelocated_NoRelocatedTextIsNoop(t *testing.T) {
+	t.Parallel()
+	r := cacheReq(anthropicMessage{Role: "user", Content: "hi"})
+	applyOAuthRelocatedCacheBreakpoint(r, "")
+	if n := countBreakpoints(t, r); n != 0 {
+		t.Fatalf("empty relocated text must add no breakpoint; got %d", n)
+	}
+}
+
+func TestOAuthRelocated_MismatchedFirstBlockIsNoop(t *testing.T) {
+	t.Parallel()
+	r := cacheReq(anthropicMessage{Role: "user", Content: "unrelated user text"})
+	applyOAuthRelocatedCacheBreakpoint(r, "some relocated text")
+	if blocks := r.Messages[0].Content.(string); blocks != "unrelated user text" {
+		t.Fatalf("non-matching single message must be untouched; got %q", blocks)
+	}
+	if n := countBreakpoints(t, r); n != 0 {
+		t.Fatalf("non-matching single message must add no breakpoint; got %d", n)
+	}
+}
+
+func TestOAuthRelocated_Idempotent(t *testing.T) {
+	t.Parallel()
+	const relocated = "relocated once"
+	r := oauthSingleTurnWire(t, relocated, "hi")
+	applyOAuthRelocatedCacheBreakpoint(r, relocated)
+	if n := countBreakpoints(t, r); n != 3 {
+		t.Fatalf("double application must not add breakpoints; got %d", n)
+	}
+}

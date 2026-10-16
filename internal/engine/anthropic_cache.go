@@ -60,6 +60,42 @@ func applyAnthropicCacheBreakpoints(payload *anthropicRequest) {
 	}
 }
 
+// applyOAuthRelocatedCacheBreakpoint marks the OAuth-relocated system text as a
+// breakpoint for single-turn requests.
+//
+// The OAuth path moves operator/agent system content into the first user turn
+// (prependOAuthSystemToUserTurn). For a single-turn request that turn is the only
+// message, so applyAnthropicCacheBreakpoints has no history mark and the relocated
+// prefix was never cached. Here the relocated text is kept as its own leading
+// content block (passAlternation concatenates blocks, so it stays block[0] after
+// the I2 merge) and gets the breakpoint. The volatile user text sits after it.
+//
+// Scope: only when the request is exactly one message whose first block is the
+// relocated text. Multi-message requests are left untouched. Total breakpoints stay
+// at most 3 (system, tools, relocated). Idempotent. Call after
+// applyAnthropicCacheBreakpoints.
+func applyOAuthRelocatedCacheBreakpoint(payload *anthropicRequest, relocated string) {
+	if payload == nil || relocated == "" || len(payload.Messages) != 1 {
+		return
+	}
+	m := &payload.Messages[0]
+	if m.Role != "user" {
+		return
+	}
+	switch c := m.Content.(type) {
+	case string:
+		if c != relocated {
+			return
+		}
+		m.Content = []anthropicContentBlock{{Type: "text", Text: c, CacheControl: ephemeral}}
+	case []anthropicContentBlock:
+		if len(c) == 0 || c[0].Type != "text" || c[0].Text != relocated {
+			return
+		}
+		c[0].CacheControl = ephemeral
+	}
+}
+
 // markLastBlock attaches cache_control to the final content block of m,
 // converting string content to a single text block if needed.
 func markLastBlock(m *anthropicMessage) {
