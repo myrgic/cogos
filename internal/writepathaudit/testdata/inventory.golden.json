@@ -207,7 +207,7 @@
     },
     {
       "file": "internal/engine/bep_provider.go",
-      "line": 118,
+      "line": 111,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "(*BEPProvider).Start",
@@ -219,7 +219,7 @@
     },
     {
       "file": "internal/engine/bep_provider.go",
-      "line": 512,
+      "line": 456,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "(*BEPProvider).InitPollingForTest",
@@ -1575,7 +1575,7 @@
     },
     {
       "file": "internal/engine/serve.go",
-      "line": 1420,
+      "line": 1392,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",
@@ -1683,7 +1683,7 @@
     },
     {
       "file": "internal/engine/turn_storage.go",
-      "line": 250,
+      "line": 229,
       "column": 14,
       "primitive": "os.Create",
       "func": "PatchTurnSpeculative",
@@ -1695,7 +1695,7 @@
     },
     {
       "file": "internal/engine/turn_storage.go",
-      "line": 263,
+      "line": 242,
       "column": 12,
       "primitive": "os.Rename",
       "func": "PatchTurnSpeculative",
@@ -1707,7 +1707,7 @@
     },
     {
       "file": "internal/engine/turn_storage.go",
-      "line": 352,
+      "line": 331,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "appendTurnSidecar",
@@ -1719,7 +1719,7 @@
     },
     {
       "file": "internal/engine/turn_storage.go",
-      "line": 361,
+      "line": 340,
       "column": 12,
       "primitive": "os.OpenFile",
       "func": "appendTurnSidecar",
@@ -3198,7 +3198,7 @@
     },
     {
       "file": "internal/engine/managed_session_hermes.go",
-      "line": 191,
+      "line": 218,
       "column": 9,
       "func": "(*hermesProcess).start",
       "subsystem": "internal:engine",

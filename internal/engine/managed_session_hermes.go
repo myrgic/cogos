@@ -64,6 +64,13 @@ type HermesACPOpts struct {
 	Load       string            `json:"load,omitempty"`        // existing on-disk session id to session/load
 	McpServers []json.RawMessage `json:"mcp_servers,omitempty"` // passed through verbatim
 	Room       string            `json:"room,omitempty"`        // declared room this session lives in (validated)
+	// Class names a kernel-declared runtime class (managed_session_classes.go).
+	// Empty = the built-in default class: today's behavior, request profile.
+	Class string `json:"class,omitempty"`
+	// AllowClass is the caller's class authority, set by the HTTP layer from
+	// the grant (json:"-": a body can never supply it). nil = unrestricted.
+	// It is asked about the EFFECTIVE class ("" for the default class).
+	AllowClass func(class string) bool `json:"-"`
 	// Actor is the person acting, taken from the authenticated grant by the
 	// HTTP layer. json:"-" so a request body can never supply it.
 	Actor string `json:"-"`
@@ -83,6 +90,14 @@ type HermesACPDriverConfig struct {
 	Command func(profile string) []string
 	// Env is the subprocess environment (default os.Environ()).
 	Env []string
+	// Classes is the runtime class registry (kernel.yaml managedSessions).
+	// nil = no named classes; every named class is refused as unknown.
+	Classes *RuntimeClassRegistry
+	// RecordDir persists each session's runtime class (managed_session_records.go)
+	// so a cold resume after a restart checks the recorded class, not the
+	// request's. "" = no durable records: every cold resume reads as the
+	// legacy default class.
+	RecordDir string
 	// RingSize bounds each session's replay buffer.
 	RingSize int
 	// PermissionTimeout is how long a permission request waits in the kernel
@@ -165,6 +180,7 @@ type hermesProcess struct {
 	d       *HermesACPDriver
 	profile string
 	cwd     string
+	class   *ResolvedRuntimeClass // nil = the built-in default class
 
 	mu        sync.Mutex
 	cmd       *exec.Cmd
@@ -177,23 +193,31 @@ type hermesProcess struct {
 	agentInfo json.RawMessage
 }
 
-func (d *HermesACPDriver) newProcess(profile, cwd string) *hermesProcess {
-	return &hermesProcess{d: d, profile: profile, cwd: cwd, sessions: map[string]*HermesACPSession{}}
+func (d *HermesACPDriver) newProcess(profile, cwd string, class *ResolvedRuntimeClass) *hermesProcess {
+	return &hermesProcess{d: d, profile: profile, cwd: cwd, class: class, sessions: map[string]*HermesACPSession{}}
 }
 
 // start spawns the subprocess and runs initialize. The process is NOT tied
 // to any request context: the kernel owns its lifetime.
 func (p *hermesProcess) start(ctx context.Context) (*acprpc.Conn, error) {
-	argv := p.d.cfg.Command(p.profile)
+	var argv, env []string
+	if p.class != nil {
+		// A runtime class owns argv and env outright (allowlist, resolved at
+		// create from the driver's base env). A restart reuses it verbatim.
+		argv, env = p.class.Argv, p.class.Env
+	} else {
+		argv = p.d.cfg.Command(p.profile)
+		env = p.d.cfg.Env
+		if env == nil {
+			env = os.Environ()
+		}
+	}
 	if len(argv) == 0 {
 		return nil, errors.New("hermes-acp: empty command")
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = p.cwd
-	cmd.Env = p.d.cfg.Env
-	if cmd.Env == nil {
-		cmd.Env = os.Environ()
-	}
+	cmd.Env = env
 	cmd.Stderr = io.Discard
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -410,6 +434,8 @@ type HermesACPSession struct {
 	cwd       string
 	forkOf    string
 	room      string // declared room; immutable after create
+	class     string // runtime class name ("" = default); immutable after create
+	receipt   *RuntimeClassReceipt
 	actor     string // person from the creating grant; immutable after create
 	createdAt time.Time
 	proc      *hermesProcess
@@ -449,6 +475,8 @@ type ManagedSessionInfo struct {
 	Cwd                string               `json:"cwd,omitempty"`
 	ForkOf             string               `json:"fork_of,omitempty"`
 	Room               string               `json:"room,omitempty"`
+	Class              string               `json:"class,omitempty"`
+	Receipt            *RuntimeClassReceipt `json:"receipt,omitempty"`
 	Actor              string               `json:"actor,omitempty"`
 	State              string               `json:"state"`
 	Error              string               `json:"error,omitempty"`
@@ -501,7 +529,7 @@ func (s *HermesACPSession) Info() ManagedSessionInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	info := ManagedSessionInfo{
-		SessionID: s.id, Driver: DriverHermesACP, Profile: s.profile, Cwd: s.cwd, ForkOf: s.forkOf, Room: s.room, Actor: s.actor,
+		SessionID: s.id, Driver: DriverHermesACP, Profile: s.profile, Cwd: s.cwd, ForkOf: s.forkOf, Room: s.room, Class: s.class, Receipt: s.receipt, Actor: s.actor,
 		State: s.state.String(), Mode: s.mode, Model: s.model, CreatedAt: s.createdAt, LastSeq: s.ring.LastSeq(),
 		PendingPermissions: make([]*pendingPermission, 0, len(s.perms)),
 	}
@@ -740,13 +768,65 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 	if existing := d.sessions[opts.Load]; existing != nil {
 		if st := existing.State(); st == StateLive || st == StateStarting {
 			d.mu.Unlock()
+			if opts.AllowClass != nil && !opts.AllowClass(existing.class) {
+				return nil, fmt.Errorf("%w: caller may not attach this session", ErrManagedSessionForbidden)
+			}
+			// Every resume path (live, crashed, cold, shared load) refuses a
+			// request that names a class other than the session's own.
+			if opts.Class != "" && opts.Class != existing.class {
+				return nil, fmt.Errorf("%w: a resume cannot change a session's class", ErrManagedSessionForbidden)
+			}
 			return existing, nil
 		}
+		// Registered but not running (e.g. Crashed): the resume keeps the
+		// session's original class, and the caller needs authority over it.
+		// Authority is checked first and no refusal names the recorded class,
+		// so a caller cannot probe another session's class.
+		if opts.AllowClass != nil && !opts.AllowClass(existing.class) {
+			d.mu.Unlock()
+			return nil, fmt.Errorf("%w: caller may not attach this session", ErrManagedSessionForbidden)
+		}
+		if opts.Class != "" && opts.Class != existing.class {
+			d.mu.Unlock()
+			return nil, fmt.Errorf("%w: a resume cannot change a session's class", ErrManagedSessionForbidden)
+		}
+		opts.Class = existing.class
+	}
+	if d.sessions[opts.Load] == nil && d.loads[opts.Load] == nil {
+		// Cold load: the id is not resident (kernel restart). The recorded
+		// class is the ground truth: the request may not change it, and
+		// omitting it inherits the record (never a downgrade to the default).
+		rec, err := d.loadRecord(opts.Load)
+		if err != nil {
+			// Fail closed and classify it the way DeleteAuthorized does: an
+			// unreadable record is a data-integrity refusal (403), not an
+			// upstream agent failure (502).
+			d.mu.Unlock()
+			return nil, fmt.Errorf("%w: %v", ErrManagedSessionForbidden, err)
+		}
+		if opts.AllowClass != nil && !opts.AllowClass(rec.Class) {
+			d.mu.Unlock()
+			return nil, fmt.Errorf("%w: caller may not attach this session", ErrManagedSessionForbidden)
+		}
+		if opts.Class != "" && opts.Class != rec.Class {
+			d.mu.Unlock()
+			return nil, fmt.Errorf("%w: a resume cannot change a session's class", ErrManagedSessionForbidden)
+		}
+		opts.Class = rec.Class
 	}
 	if claim := d.loads[opts.Load]; claim != nil { // a load of this id is in flight: share it
 		d.mu.Unlock()
 		select {
 		case <-claim.done:
+			// Every caller needs authority over the class the load resolved to.
+			if claim.sess != nil && opts.AllowClass != nil && !opts.AllowClass(claim.sess.class) {
+				return nil, fmt.Errorf("%w: caller may not attach this session", ErrManagedSessionForbidden)
+			}
+			// Same rule as the resident and cold paths: a resume cannot
+			// change the session's class, even when it joins a shared load.
+			if claim.sess != nil && opts.Class != "" && opts.Class != claim.sess.class {
+				return nil, fmt.Errorf("%w: a resume cannot change a session's class", ErrManagedSessionForbidden)
+			}
 			return claim.sess, claim.err
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -780,6 +860,7 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		mcp = []json.RawMessage{}
 	}
 	var proc *hermesProcess
+	var receipt *RuntimeClassReceipt
 	if parent != nil {
 		if err := parent.live(); err != nil {
 			return nil, err
@@ -793,15 +874,49 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		}
 		// Room and actor are inherited. Cross-room fork is not in G0, so a
 		// room that differs from the parent's is refused.
+		// Authority over the parent's class comes first, and no refusal
+		// names the parent's class or room.
+		if opts.AllowClass != nil && !opts.AllowClass(parent.class) {
+			return nil, fmt.Errorf("%w: caller may not fork this session", ErrManagedSessionForbidden)
+		}
 		if opts.Room != "" && opts.Room != parent.room {
-			return nil, fmt.Errorf("%w: fork_of %s lives in room %q; cross-room fork is not supported", ErrManagedSessionForbidden, opts.ForkOf, parent.room)
+			return nil, fmt.Errorf("%w: cross-room fork is not supported", ErrManagedSessionForbidden)
 		}
 		opts.Room = parent.room
 		if parent.actor != "" {
 			opts.Actor = parent.actor
 		}
+		// A fork runs in its parent's process, so it has the parent's class.
+		if opts.Class != "" && opts.Class != parent.class {
+			return nil, fmt.Errorf("%w: a fork cannot change its parent's class", ErrManagedSessionForbidden)
+		}
+		opts.Class = parent.class
+		receipt = parent.receipt
+		if opts.AllowClass != nil && !opts.AllowClass(opts.Class) {
+			return nil, fmt.Errorf("%w: caller may not fork this session", ErrManagedSessionForbidden)
+		}
 	} else {
-		proc = d.newProcess(opts.Profile, opts.Cwd)
+		var class *ResolvedRuntimeClass
+		if opts.AllowClass != nil && !opts.AllowClass(opts.Class) {
+			return nil, fmt.Errorf("%w: caller may not create runtime class %q", ErrManagedSessionForbidden, opts.Class)
+		}
+		if opts.Class != "" {
+			if opts.Profile != "" || len(opts.McpServers) > 0 {
+				return nil, fmt.Errorf("%w: profile and mcp_servers come from runtime class %q and may not be sent", ErrInvalidManagedSession, opts.Class)
+			}
+			base := d.cfg.Env
+			if base == nil {
+				base = os.Environ()
+			}
+			var err error
+			if class, err = d.cfg.Classes.Resolve(opts.Class, base, opts.Cwd); err != nil {
+				return nil, err
+			}
+			opts.Profile, opts.Cwd = class.Profile, class.Cwd
+			receipt = class.Receipt()
+			mcp = []json.RawMessage{}
+		}
+		proc = d.newProcess(opts.Profile, opts.Cwd, class)
 		if _, err := proc.start(ctx); err != nil {
 			return nil, err
 		}
@@ -814,7 +929,7 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 	// Register before session/load returns: load replays history as
 	// session/update notifications, which must land in the ring.
 	sess := &HermesACPSession{
-		profile: opts.Profile, cwd: opts.Cwd, forkOf: opts.ForkOf, room: opts.Room, actor: opts.Actor, createdAt: time.Now().UTC(),
+		profile: opts.Profile, cwd: opts.Cwd, forkOf: opts.ForkOf, room: opts.Room, class: opts.Class, receipt: receipt, actor: opts.Actor, createdAt: time.Now().UTC(),
 		proc: proc, permTO: d.cfg.PermissionTimeout, mcp: opts.McpServers, state: StateStarting,
 		perms: map[string]*pendingPermission{},
 	}
@@ -871,6 +986,10 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		return nil, fmt.Errorf("hermes-acp: create session: agent process exited during session setup")
 	}
 
+	if err := d.saveRecord(managedSessionRecord{SessionID: sid, Class: sess.class, CreatedAt: sess.createdAt}); err != nil && sess.class != "" {
+		d.detach(sess)
+		return nil, fmt.Errorf("hermes-acp: persist session class: %w", err)
+	}
 	d.mu.Lock()
 	replaced := d.sessions[sid]
 	d.sessions[sid] = sess
@@ -910,6 +1029,36 @@ func (d *HermesACPDriver) List() []ManagedSessionInfo {
 // removes it from the registry, and stops its process once no session uses
 // it. Idempotent (ADR-093 §6): an unknown id is not an error.
 func (d *HermesACPDriver) Delete(id string) error {
+	d.removeRecord(id)
+	return d.drop(id)
+}
+
+// DeleteAuthorized is Delete behind the class-authority predicate (nil = no
+// restriction). The class is the resident session's, else the durable
+// record's (a cold id): a record is never removed by a caller who could not
+// attach the session it describes. An unreadable record fails closed.
+func (d *HermesACPDriver) DeleteAuthorized(id string, allow func(class string) bool) error {
+	if allow != nil {
+		var class string
+		if sess := d.Get(id); sess != nil {
+			class = sess.class
+		} else {
+			rec, err := d.loadRecord(id)
+			if err != nil {
+				return fmt.Errorf("%w: %v", ErrManagedSessionForbidden, err)
+			}
+			class = rec.Class
+		}
+		if !allow(class) {
+			return fmt.Errorf("%w: caller may not delete this session", ErrManagedSessionForbidden)
+		}
+	}
+	return d.Delete(id)
+}
+
+// drop unregisters and detaches a session but keeps its durable record (Close
+// at kernel shutdown must not forget which class a session belongs to).
+func (d *HermesACPDriver) drop(id string) error {
 	d.mu.Lock()
 	s := d.sessions[id]
 	delete(d.sessions, id)
@@ -966,6 +1115,6 @@ func (d *HermesACPDriver) Close() {
 	}
 	d.mu.Unlock()
 	for _, id := range ids {
-		_ = d.Delete(id)
+		_ = d.drop(id)
 	}
 }

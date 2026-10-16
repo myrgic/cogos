@@ -265,6 +265,9 @@ type Config struct {
 	// by NewServer via SetProviderModelDeny.
 	RoutingDeny []ProviderDenyRule
 
+	// ManagedSessions is the kernel.yaml managedSessions section (nil = none).
+	ManagedSessions *ManagedSessionsConfig
+
 	// StageUI configures the opt-in Stage UI listener (serve_stage_ui.go).
 	// Zero value (empty Addr) means no listener.
 	StageUI StageUIConfig
@@ -317,6 +320,10 @@ type kernelConfigSection struct {
 	// Routing holds optional routing knobs from kernel.yaml. Currently only
 	// the per-provider model deny table.
 	Routing *routingConfig `yaml:"routing"`
+
+	// ManagedSessions declares runtime classes for kernel-managed sessions
+	// (rooms RFC §5.2; managed_session_classes.go).
+	ManagedSessions *ManagedSessionsConfig `yaml:"managedSessions,omitempty"`
 
 	// StageUI is the optional `stage_ui:` block (serve_stage_ui.go).
 	StageUI *stageUISection `yaml:"stage_ui"`
@@ -505,6 +512,9 @@ func applyKernelSection(cfg *Config, s kernelConfigSection) {
 	applyStageUISection(cfg, s.StageUI)
 	if s.MaxToolOutputBytes != 0 {
 		cfg.MaxToolOutputBytes = s.MaxToolOutputBytes
+	}
+	if s.ManagedSessions != nil {
+		cfg.ManagedSessions = s.ManagedSessions
 	}
 	if s.Routing != nil && len(s.Routing.Deny) > 0 {
 		cfg.RoutingDeny = s.Routing.Deny

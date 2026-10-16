@@ -220,7 +220,13 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 	}
 	s.identityGrants = identityGrants
 	s.grantMintLimiter = newGrantMintLimiter(defaultGrantMintRateLimit, defaultGrantMintRateWindow)
-	s.managedSessions = NewHermesACPDriver(HermesACPDriverConfig{})
+	classes, err := NewRuntimeClassRegistry(cfg.ManagedSessions)
+	if err != nil {
+		// Fail closed: an invalid registry is emptied, so every named class
+		// is refused; the default (no class) path is unaffected.
+		slog.Error("serve: managedSessions.runtimeClasses invalid; named runtime classes disabled", "err", err)
+	}
+	s.managedSessions = NewHermesACPDriver(HermesACPDriverConfig{Classes: classes, RecordDir: filepath.Join(cfg.WorkspaceRoot, ".cog", "run", "managed-sessions")})
 
 	mux := http.NewServeMux()
 	s.routeH(mux, "GET /", dashboard.Handler())
