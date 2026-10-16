@@ -37,7 +37,7 @@
 //     headers, including Cookie, Origin, Sec-Fetch-*, Content-Type, and
 //     cf-connecting-ip. The guard reads Origin (cross-site socket hijack and
 //     /local cross-site checks), Sec-Fetch-Site, Content-Type (/local JSON
-//     only), and cf-connecting-ip (tunnel caller vs. darkstar itself, and the
+//     only), and cf-connecting-ip (tunnel caller vs. the Stage host itself, and the
 //     per-IP lockout key).
 //   - Host is forwarded verbatim from the client (not rewritten to the
 //     upstream's host). The guard's allowlist (loopback or the tunnel's own
@@ -53,8 +53,8 @@
 //
 // The one thing the Stage cannot see is the TCP peer: it is always the kernel
 // (loopback). guard.is_self() treats a loopback peer with no cf-connecting-ip
-// as "darkstar itself" (never locked out, /local allowed). That is only safe if
-// nothing but darkstar can reach this listener, so the listener REFUSES a
+// as "the Stage host itself" (never locked out, /local allowed). That is only safe if
+// nothing but the Stage host can reach this listener, so the listener REFUSES a
 // non-loopback bind address. Tunnel traffic still carries cf-connecting-ip, so
 // it is classified exactly as before.
 package engine
@@ -132,7 +132,7 @@ func validateStageUIAddr(addr string) error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("stage_ui.addr %q: host must be loopback (the Stage guard treats the kernel as darkstar itself)", addr)
+		return fmt.Errorf("stage_ui.addr %q: host must be loopback (the Stage guard treats the kernel as the Stage host itself)", addr)
 	}
 	return nil
 }
