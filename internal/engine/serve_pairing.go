@@ -559,6 +559,18 @@ func (s *Server) handlePairingApprove(w http.ResponseWriter, r *http.Request) {
 		Room: body.Room, Scope: body.Scope, TTLHours: body.TTLHours,
 	}
 	if appr.link != nil { // a device approving: defaults come from the approver
+		// A share link approves only device requests, and only into a surface
+		// the kernel picks: naming a surface or room would let it replace
+		// whatever link lives there (cog-review on #689; same shape as the
+		// surface binding on grant minting, serve_identity_grants.go L02).
+		if pr.kind != ShareLinkKindDevice {
+			writeJSONError(w, http.StatusForbidden, "insufficient_scope", "a share link may approve only device requests")
+			return
+		}
+		if body.Surface != "" || body.Room != "" {
+			writeJSONError(w, http.StatusForbidden, "insufficient_scope", "a share link may not choose the new link's surface or room")
+			return
+		}
 		if in.Actor == "" {
 			in.Actor = appr.link.Actor
 		}
@@ -584,7 +596,7 @@ func (s *Server) handlePairingApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if appr.link != nil {
-		if err := checkNoEscalation(appr.link, in); err != nil {
+		if err := checkNoEscalation(appr.link, in, s.shareLinks); err != nil {
 			writeJSONError(w, http.StatusForbidden, "insufficient_scope", err.Error())
 			return
 		}
@@ -624,7 +636,13 @@ func (s *Server) handlePairingApprove(w http.ResponseWriter, r *http.Request) {
 
 // checkNoEscalation: a share link approving may mint only what it could itself
 // act as. Same actor, role no higher, scopes inside its own.
-func checkNoEscalation(approver *ShareLink, in ShareLinkImport) error {
+func checkNoEscalation(approver *ShareLink, in ShareLinkImport, store *ShareLinkStore) error {
+	if store.HasLiveSurface(in.Surface) {
+		return fmt.Errorf("a share link may not replace an existing link")
+	}
+	if in.Room != "" && in.Room != approver.Room {
+		return fmt.Errorf("a share link may not issue into another room")
+	}
 	if in.Actor != approver.Actor {
 		return fmt.Errorf("a share link may approve only for its own actor")
 	}

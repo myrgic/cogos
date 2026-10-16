@@ -350,6 +350,11 @@ func TestPairing_LinkApproverCannotEscalate(t *testing.T) {
 	}{
 		{"other actor", map[string]any{"actor": "vroku", "role": "guest"}},
 		{"scope outside its own", map[string]any{"scope": []string{"stage:admin"}}},
+		// cog-review on #689: naming an existing surface would supersede its link
+		{"replace another room's owner key", map[string]any{"surface": "stage/room/r1/owner", "scope": []string{"stage:device"}}},
+		{"replace another device", map[string]any{"surface": "stage/device/dev-aaa"}},
+		{"pick a fresh surface", map[string]any{"surface": "stage/device/dev-mine"}},
+		{"issue into a room", map[string]any{"room": "r1"}},
 	}
 	for _, c := range cases {
 		_, code, _ := h.newRequest(map[string]any{"kind": "device"})
@@ -534,5 +539,29 @@ func TestPairing_GateExemptionIsScopedToPairingPaths(t *testing.T) {
 	h := newPairingHarness(t)
 	if s, _, _ := h.do("POST", "/v1/stage/keys/list", "link_device", map[string]any{}); s != http.StatusForbidden {
 		t.Errorf("share link on the keys route = %d, want 403", s)
+	}
+}
+
+// A share link cannot approve a non-device request, and nothing it approves
+// can supersede a live link: the victim's key keeps resolving (cog-review on #689).
+func TestPairing_LinkApproverCannotReplaceExistingLinks(t *testing.T) {
+	t.Parallel()
+	h := newPairingHarness(t)
+	_, code, _ := h.newRequest(map[string]any{"kind": "share"})
+	if s, _, raw := h.do("POST", "/v1/pairing/requests/"+code+"/approve", "link_device", map[string]any{"surface": "stage/room/r1/owner"}); s != 403 {
+		t.Errorf("device link approving a share request = %d %s, want 403", s, raw)
+	}
+	if _, ok := h.srv.shareLinks.Resolve(h.tokens["link_noscope"]); !ok {
+		t.Fatal("the room owner key stopped resolving")
+	}
+	if _, ok := h.srv.shareLinks.Resolve(h.tokens["link_device"]); !ok {
+		t.Fatal("the approving device's own key stopped resolving")
+	}
+	// the store-level check holds even if a surface were somehow supplied
+	appr, _ := h.srv.shareLinks.Resolve(h.tokens["link_device"])
+	in := ShareLinkImport{Kind: ShareLinkKindDevice, Surface: "stage/room/r1/owner", Actor: "chaz", Role: "owner",
+		Scope: []string{"stage:device"}, IntegrityHash: sha256Hex("x-0123456789abcdef")}
+	if err := checkNoEscalation(appr, in, h.srv.shareLinks); err == nil {
+		t.Error("checkNoEscalation allowed replacing a live surface")
 	}
 }

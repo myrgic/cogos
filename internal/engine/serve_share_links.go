@@ -269,6 +269,14 @@ func (st *ShareLinkStore) ResolveHash(hash string) (*ShareLink, bool) {
 	return l, true
 }
 
+// HasLiveSurface reports whether surface currently holds an unexpired link.
+func (st *ShareLinkStore) HasLiveSurface(surface string) bool {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	l, ok := st.bySurface[surface]
+	return ok && !l.expired(time.Now().UTC())
+}
+
 // IsShareToken reports whether token is a live share link. The grant gate uses
 // it to refuse share links outright.
 func (st *ShareLinkStore) IsShareToken(token string) bool {
