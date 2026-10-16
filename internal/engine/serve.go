@@ -72,6 +72,7 @@ type Server struct {
 	// Stage UI listener (serve_stage_ui.go); nil unless stage_ui.addr is set.
 	stageUIMu       sync.Mutex
 	stageUISrv      *http.Server
+	stageUIGuard    *stageGuard
 	stageUIAddr     string
 	debug           debugStore      // captures last request pipeline state
 	attentionLog    *attentionLog   // per-server log (avoids global write race)

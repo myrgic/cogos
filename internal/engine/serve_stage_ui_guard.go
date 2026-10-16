@@ -72,6 +72,11 @@ type stageGuard struct {
 	// upstream. Replaced in tests.
 	keyKnown func(ctx context.Context, seg string) bool
 
+	// keysMode is the effective stage_ui.keys mode (off|shadow); shadow is nil
+	// when off. See serve_stage_ui_keys.go.
+	keysMode string
+	shadow   *keyShadow
+
 	mu     sync.Mutex
 	fails  map[string][]time.Time
 	locked map[string]time.Time
@@ -366,22 +371,38 @@ type stageReqKey struct{}
 // afterResponse is the proxy's ModifyResponse: count unknown-key guesses.
 func (g *stageGuard) afterResponse(resp *http.Response) error {
 	info, _ := resp.Request.Context().Value(stageReqKey{}).(*stageReqInfo)
-	if info == nil || info.self || !stageIsKeyedPath(info.path) {
+	if info == nil || !stageIsKeyedPath(info.path) {
 		return nil
 	}
 	// http: 404. websocket: the pre-accept close 4404 is an HTTP 403 on the
 	// wire (indistinguishable from 4403), so any non-101 error counts as a
 	// candidate and the key probe decides.
 	candidate := resp.StatusCode == http.StatusNotFound || (info.ws && resp.StatusCode != http.StatusSwitchingProtocols && resp.StatusCode >= 400)
-	if !candidate {
-		return nil
-	}
 	parts := strings.Split(info.path, "/")
 	seg := ""
 	if len(parts) > 2 {
 		seg = parts[2]
 	}
-	if seg != "" && g.keyKnown(resp.Request.Context(), seg) {
+	// The probe runs at most once per response; the lockout and the shadow
+	// comparison share its answer.
+	var probed, probeVal bool
+	stageKnown := func() bool {
+		if !candidate {
+			return true // the Stage accepted the key
+		}
+		if !probed {
+			probed = true
+			probeVal = seg != "" && g.keyKnown(resp.Request.Context(), seg)
+		}
+		return probeVal
+	}
+	if g.shadow != nil {
+		g.shadow.observe(resp.Request.Context(), info, resp, stageKnown)
+	}
+	if info.self || !candidate {
+		return nil
+	}
+	if stageKnown() {
 		return nil
 	}
 	g.noteMiss(info.ip, info.path)

@@ -495,6 +495,7 @@ func (s *Server) registerShareLinkRoutes(mux *http.ServeMux) {
 	s.route(mux, "POST /v1/stage/keys/resolve", s.handleShareLinkResolve)
 	s.route(mux, "POST /v1/stage/keys/list", s.handleShareLinkList)
 	s.route(mux, "POST /v1/stage/keys/{id}/revoke", s.handleShareLinkRevoke)
+	s.route(mux, "GET /v1/stage/keys/shadow", s.handleKeyShadowStats) // S4 counters
 }
 
 type shareLinkView struct {

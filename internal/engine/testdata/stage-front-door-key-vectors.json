@@ -1,0 +1,220 @@
+{
+ "schema": 1,
+ "source": "subset of apps/stage/tests/fixtures/front-door-vectors.json (S1), rows K01, K05, K06, K07, R14, R15, R16",
+ "format": {
+  "row": "{id, gate (P3 gate per doc section 8 / plan S1), steps, skip (reason) | xfail (reason), setup, note}",
+  "step": "{kind: http|ws|guard|state|action|property (default http), peer: SELF|TUN|UNIX, method, path, headers (null = omit), headers_raw, json|body, repeat, expect, save_json, save_cookie, action, args}",
+  "expect": "status | status_not | status_in | text | error | body_has | body_lacks | json_keys | json_subset | json_ne | json_regex | headers_has | headers_lacks | set_cookie_has | set_cookie_lacks | body_lacks_cookie | ws_close | ws_accept | guard ([code, reason] or null) | guard_fails_len | guard_fails_absent | guard_locked | log_count"
+ },
+ "placeholders": {
+  "K": "owner room key (room fdvshared)",
+  "HK": "owner home key",
+  "GK": "guest member key of fdvshared (generated in-process)",
+  "GH": "guest home key (generated in-process)",
+  "BAD": "unknown key",
+  "RID": "room id of fdvshared (not a key)",
+  "PRIV": "room id of an owner-only room the guest is not in",
+  "GOWN": "key of a room owned by the guest",
+  "TH": "tunnel host",
+  "NEWGH": "guest home key after rekey",
+  "NEWGK": "guest member key after rekey"
+ },
+ "peers": {
+  "SELF": "loopback, no cf header",
+  "TUN": "loopback peer with cf-connecting-ip (tunnel caller)",
+  "UNIX": "non-loopback peer"
+ },
+ "rows": [
+  {
+   "id": "R14",
+   "gate": true,
+   "steps": [
+    {
+     "peer": "TUN",
+     "path": "/r/{BAD}/dashboard/orb.html",
+     "expect": {
+      "status": 404
+     }
+    },
+    {
+     "peer": "TUN",
+     "path": "/r/{GK}/monengine",
+     "expect": {
+      "status": 404,
+      "text": "not found",
+      "guard_fails_len": {
+       "203.0.113.7": 1
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "R15",
+   "gate": true,
+   "steps": [
+    {
+     "peer": "TUN",
+     "method": "POST",
+     "path": "/pair",
+     "json": {
+      "device": "vector screen"
+     },
+     "expect": {
+      "status": 200
+     },
+     "save_json": {
+      "PC": "code",
+      "PS": "secret"
+     }
+    },
+    {
+     "peer": "TUN",
+     "path": "/pair/{PC}?secret=wrong-secret",
+     "expect": {
+      "status": 404,
+      "error": "unknown code",
+      "guard_fails_len": {
+       "203.0.113.7": 1
+      }
+     }
+    },
+    {
+     "action": "age_pair",
+     "args": {
+      "code": "{PC}"
+     }
+    },
+    {
+     "peer": "TUN",
+     "method": "POST",
+     "path": "/pair",
+     "json": {
+      "device": "again"
+     },
+     "expect": {
+      "status": 200
+     }
+    },
+    {
+     "peer": "TUN",
+     "path": "/pair/{PC}?secret={PS}",
+     "expect": {
+      "status": 404,
+      "error": "unknown code",
+      "guard_fails_len": {
+       "203.0.113.7": 2
+      }
+     }
+    }
+   ],
+   "note": "an expired pairing is pruned on the next POST /pair (stage.py _prune_pairs), then answers as unknown"
+  },
+  {
+   "id": "R16",
+   "gate": true,
+   "steps": [
+    {
+     "kind": "ws",
+     "peer": "TUN",
+     "path": "/r/{BAD}/ws/pad",
+     "expect": {
+      "ws_close": 4404
+     }
+    },
+    {
+     "kind": "state",
+     "expect": {
+      "guard_fails_len": {
+       "203.0.113.7": 1
+      }
+     },
+     "note": "one unknown-key websocket counted"
+    },
+    {
+     "kind": "ws",
+     "peer": "TUN",
+     "path": "/r/{BAD}/ws/pad",
+     "headers": {
+      "origin": "https://evil.example"
+     },
+     "expect": {
+      "ws_close": 4403,
+      "guard_fails_len": {
+       "203.0.113.7": 1
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "K01",
+   "gate": false,
+   "steps": [
+    {
+     "path": "/r/{BAD}/dashboard/orb.html",
+     "expect": {
+      "status": 404,
+      "text": "not found"
+     }
+    },
+    {
+     "path": "/r/{BAD}/v/",
+     "expect": {
+      "status": 404
+     }
+    },
+    {
+     "path": "/r/{BAD}/cog",
+     "expect": {
+      "status": 404
+     }
+    },
+    {
+     "path": "/r/{BAD}/dashboard/pad.js",
+     "expect": {
+      "status": 404,
+      "text": "not found"
+     }
+    }
+   ]
+  },
+  {
+   "id": "K05",
+   "gate": false,
+   "steps": [
+    {
+     "path": "/r/{RID}/dashboard/orb.html",
+     "expect": {
+      "status": 404
+     }
+    }
+   ]
+  },
+  {
+   "id": "K06",
+   "gate": false,
+   "steps": [
+    {
+     "kind": "ws",
+     "path": "/r/{RID}/ws/pad",
+     "expect": {
+      "ws_close": 4404
+     }
+    }
+   ]
+  },
+  {
+   "id": "K07",
+   "gate": false,
+   "steps": [
+    {
+     "path": "/r/{GH}/dashboard/orb.html",
+     "expect": {
+      "status": 404
+     }
+    }
+   ]
+  }
+ ]
+}

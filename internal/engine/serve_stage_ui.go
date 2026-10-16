@@ -13,6 +13,15 @@
 //	  static_dir: /path/to/ui       # served from disk, never embedded
 //	  static_prefixes: [/app-icons/] # URL prefixes eligible for static serving
 //	  public_host: stage.myrgic.com  # extra Host the guard accepts (empty = loopback only)
+//	  keys: shadow                  # off (default) | shadow | enforce
+//
+// keys (P3b S4): "off" does nothing. "shadow" resolves the key segment of each
+// /r/ /k/ /h/ request against the share-link store and compares the kernel's
+// verdict with the Stage's, logging "stage-ui: key-disagree" and counting
+// agreements/disagreements (GET /v1/stage/keys/shadow, scope stage:keys). It
+// never changes a response; the Python Stage stays authoritative. "enforce" is
+// S5 and is not implemented: it is accepted, logged once, and runs as shadow.
+// An unrecognised value runs as off. See serve_stage_ui_keys.go.
 //
 // Request routing, in order:
 //
@@ -97,6 +106,11 @@ type StageUIConfig struct {
 	StaticDir      string   // directory of static front-end files (may be empty)
 	StaticPrefixes []string // URL path prefixes eligible for static serving
 	PublicHost     string   // public hostname (e.g. stage.myrgic.com) the guard accepts besides loopback; empty = loopback only
+	Keys           string   // key resolution mode: off (default) | shadow | enforce (S5; treated as shadow here)
+
+	// shareLinks supplies the share-link store for Keys=shadow. Set by
+	// startStageUI; nil in handler-only tests that do not use shadow mode.
+	shareLinks func() *ShareLinkStore
 }
 
 // stageUISection is the `stage_ui:` block of kernel.yaml.
@@ -106,6 +120,7 @@ type stageUISection struct {
 	StaticDir      string   `yaml:"static_dir"`
 	StaticPrefixes []string `yaml:"static_prefixes"`
 	PublicHost     string   `yaml:"public_host"`
+	Keys           string   `yaml:"keys"`
 }
 
 // applyStageUISection overlays a kernel.yaml stage_ui block onto cfg.
@@ -124,6 +139,9 @@ func applyStageUISection(cfg *Config, s *stageUISection) {
 	}
 	if s.PublicHost != "" {
 		cfg.StageUI.PublicHost = s.PublicHost
+	}
+	if s.Keys != "" {
+		cfg.StageUI.Keys = s.Keys
 	}
 	if len(s.StaticPrefixes) > 0 {
 		cfg.StageUI.StaticPrefixes = s.StaticPrefixes
@@ -164,6 +182,19 @@ func newStageUIHandlerG(c StageUIConfig) (http.Handler, *stageGuard, error) {
 	}
 	guard := newStageGuard(c.PublicHost)
 	guard.keyKnown = probeKeyKnown(target)
+	mode, enforceAsked, ok := normalizeStageUIKeysMode(c.Keys)
+	if !ok {
+		slog.Warn("stage-ui: unknown keys mode, running as off", "keys", c.Keys)
+	}
+	if enforceAsked {
+		slog.Warn("stage-ui: keys=enforce is not implemented (S5); running as shadow")
+	}
+	if mode == StageUIKeysShadow && c.shareLinks != nil {
+		guard.keysMode = mode
+		guard.shadow = newKeyShadow(c.shareLinks)
+	} else if mode == StageUIKeysShadow {
+		slog.Warn("stage-ui: keys=shadow without a share-link store, running as off")
+	}
 	prefixes := c.StaticPrefixes
 	if len(prefixes) == 0 {
 		prefixes = DefaultStageUIStaticPrefixes
@@ -254,7 +285,8 @@ func (s *Server) startStageUI() {
 		slog.Error("stage-ui: disabled", "err", err)
 		return
 	}
-	h, err := newStageUIHandler(c)
+	c.shareLinks = func() *ShareLinkStore { return s.shareLinks }
+	h, g, err := newStageUIHandlerG(c)
 	if err != nil {
 		slog.Error("stage-ui: disabled", "err", err)
 		return
@@ -268,6 +300,7 @@ func (s *Server) startStageUI() {
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: 30 * time.Second}
 	s.stageUIMu.Lock()
 	s.stageUISrv = srv
+	s.stageUIGuard = g
 	s.stageUIAddr = ln.Addr().String()
 	s.stageUIMu.Unlock()
 	slog.Info("stage-ui: listening", "addr", ln.Addr().String(), "upstream", c.Upstream, "static_dir", c.StaticDir)
@@ -284,6 +317,7 @@ func (s *Server) stopStageUI() {
 	s.stageUIMu.Lock()
 	srv := s.stageUISrv
 	s.stageUISrv = nil
+	s.stageUIGuard = nil
 	s.stageUIMu.Unlock()
 	if srv != nil {
 		_ = srv.Close()
