@@ -144,6 +144,9 @@ func ParseEntry(raw []byte) (*Entry, error) {
 	if err := exactKeys(v); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
+	if err := requiredKeys(v); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
 	if err := exactValues(v); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
@@ -239,6 +242,28 @@ func exactKeys(v any) error {
 					return err
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// requiredKeys refuses an entry that omits a key RFC section 6.9.1 makes
+// required. Presence is checked, not value: a missing deps and "deps":{}, or a
+// missing prev and "prev":null, must not both parse to one entry and one id
+// (R5-6). room and spec are required on every entry but the genesis, which
+// carries neither.
+func requiredKeys(v any) error {
+	top, ok := v.(map[string]any)
+	if !ok {
+		return errors.New("entry is not an object")
+	}
+	need := []string{"log", "seq", "prev", "deps", "actor", "kind", "body", "hlc", "sig"}
+	if top["kind"] != string(KindGenesis) {
+		need = append(need, "room", "spec")
+	}
+	for _, k := range need {
+		if _, present := top[k]; !present {
+			return fmt.Errorf("entry: required key %q missing", k)
 		}
 	}
 	return nil
