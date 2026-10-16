@@ -559,6 +559,20 @@ func TestRuntimeClass_ColdResumeMismatchedClassRefused(t *testing.T) {
 	}
 }
 
+// Cold load of a corrupt record fails closed as forbidden (403), the same as
+// a cold delete of a corrupt record; never as an agent error (502).
+func TestRuntimeClass_ColdResumeCorruptRecordRefused(t *testing.T) {
+	d, _, id := coldDriver(t)
+	path := d.managedSessionRecordPath(id)
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := d.Create(context.Background(), HermesACPOpts{Load: id, AllowClass: func(string) bool { return true }})
+	if !errors.Is(err, ErrManagedSessionForbidden) {
+		t.Fatalf("corrupt record resume err = %v, want forbidden", err)
+	}
+}
+
 // Cold load: an authorized resume keeps the recorded class and its argv/env,
 // whether the request omits the class or restates it; never the default env.
 func TestRuntimeClass_ColdResumeAuthorizedKeepsRecordedClass(t *testing.T) {

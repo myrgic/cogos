@@ -787,8 +787,11 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 		// omitting it inherits the record (never a downgrade to the default).
 		rec, err := d.loadRecord(opts.Load)
 		if err != nil {
+			// Fail closed and classify it the way DeleteAuthorized does: an
+			// unreadable record is a data-integrity refusal (403), not an
+			// upstream agent failure (502).
 			d.mu.Unlock()
-			return nil, err
+			return nil, fmt.Errorf("%w: %v", ErrManagedSessionForbidden, err)
 		}
 		if opts.Class != "" && opts.Class != rec.Class {
 			d.mu.Unlock()
