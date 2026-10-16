@@ -2,7 +2,7 @@
 // (cmd/cogos) needs to surface in proprioception health blocks.
 //
 // Background: The production providers (agent, component, discord, identity,
-// mcp-tools, openclaw-agents, openclaw-cron, openclaw-gateway, service) were
+// service) were
 // originally defined in the workspace-root package main of the cog CLI.
 // Because package main cannot be imported, the daemon binary (built from
 // cmd/cogos) could not reach those registrations and pkg/reconcile.ListProviders()
@@ -31,8 +31,7 @@
 // ExportConfig cycle runs for real, re-homed from _legacy/wave4-providers/.
 // The identity provider (Wave 6b) is registered here as a stub; the full
 // plan/apply wiring lives in the workspace-root identity_wiring.go.
-// The other seven (agent, eval, identity, mcp-tools, openclaw-agents,
-// openclaw-cron, openclaw-gateway, service) are implemented as minimal
+// The other four (agent, eval, identity, service) are implemented as minimal
 // Health()-only structs below.
 //
 // cmd/cogos/providers_wire.go imports this package (triggering init()) and
@@ -189,10 +188,6 @@ func init() {
 	reconcile.RegisterProvider("discord", globalDiscordProvider)
 	reconcile.RegisterProvider("eval", &evalProvider{stubMethods: stubMethods{name: "eval"}})
 	reconcile.RegisterProvider("identity", &identityProvider{stubMethods: stubMethods{name: "identity"}})
-	reconcile.RegisterProvider("mcp-tools", &mcpToolsProvider{stubMethods: stubMethods{name: "mcp-tools"}})
-	reconcile.RegisterProvider("openclaw-agents", &openclawAgentsProvider{stubMethods: stubMethods{name: "openclaw-agents"}})
-	reconcile.RegisterProvider("openclaw-cron", &openclawCronProvider{stubMethods: stubMethods{name: "openclaw-cron"}})
-	reconcile.RegisterProvider("openclaw-gateway", &openclawGatewayProvider{stubMethods: stubMethods{name: "openclaw-gateway"}})
 	reconcile.RegisterProvider("pin", globalPinProvider)
 	reconcile.RegisterProvider("self-update", selfupdate.Registered())
 	reconcile.RegisterProvider("service", &serviceProvider{stubMethods: stubMethods{name: "service"}})
@@ -316,97 +311,6 @@ func (p *agentProvider) Health() reconcile.ResourceStatus {
 // re-homed provider from _legacy/wave4-providers/ implements the full
 // LoadConfig/FetchLive/ComputePlan/ApplyPlan/BuildState/Health/ExportConfig
 // cycle itself.
-
-// ─── mcp-tools ────────────────────────────────────────────────────────────────
-
-type mcpToolsProvider struct{ stubMethods }
-
-func (p *mcpToolsProvider) Type() string { return "mcp-tools" }
-
-func (p *mcpToolsProvider) Health() reconcile.ResourceStatus {
-	if os.Getenv("OPENCLAW_URL") == "" {
-		return reconcile.ResourceStatus{
-			Sync:      reconcile.SyncStatusUnknown,
-			Health:    reconcile.HealthSuspended,
-			Operation: reconcile.OperationIdle,
-			Message:   "OPENCLAW_URL not set — bridge not available",
-		}
-	}
-	root, bad := resolveRoot()
-	if bad != nil {
-		return *bad
-	}
-	statePath := filepath.Join(root, ".cog", "config", "mcp-tools", ".state.json")
-	if _, err := os.Stat(statePath); err != nil {
-		return reconcile.ResourceStatus{
-			Sync:      reconcile.SyncStatusUnknown,
-			Health:    reconcile.HealthProgressing,
-			Operation: reconcile.OperationIdle,
-			Message:   "no state file — tools not yet discovered",
-		}
-	}
-	return reconcile.NewResourceStatus(reconcile.SyncStatusSynced, reconcile.HealthHealthy)
-}
-
-// ─── openclaw-agents ─────────────────────────────────────────────────────────
-
-type openclawAgentsProvider struct{ stubMethods }
-
-func (p *openclawAgentsProvider) Type() string { return "openclaw-agents" }
-
-func (p *openclawAgentsProvider) Health() reconcile.ResourceStatus {
-	home, _ := os.UserHomeDir()
-	configPath := filepath.Join(home, ".openclaw", "openclaw.json")
-	if _, err := os.Stat(configPath); err != nil {
-		return reconcile.ResourceStatus{
-			Sync:      reconcile.SyncStatusUnknown,
-			Health:    reconcile.HealthMissing,
-			Operation: reconcile.OperationIdle,
-			Message:   "openclaw.json not found",
-		}
-	}
-	return reconcile.NewResourceStatus(reconcile.SyncStatusUnknown, reconcile.HealthHealthy)
-}
-
-// ─── openclaw-cron ───────────────────────────────────────────────────────────
-
-type openclawCronProvider struct{ stubMethods }
-
-func (p *openclawCronProvider) Type() string { return "openclaw-cron" }
-
-func (p *openclawCronProvider) Health() reconcile.ResourceStatus {
-	home, _ := os.UserHomeDir()
-	cronPath := filepath.Join(home, ".openclaw", "cron", "jobs.json")
-	if _, err := os.Stat(cronPath); err != nil {
-		return reconcile.ResourceStatus{
-			Sync:      reconcile.SyncStatusUnknown,
-			Health:    reconcile.HealthMissing,
-			Operation: reconcile.OperationIdle,
-			Message:   "jobs.json not found (will be created on first apply)",
-		}
-	}
-	return reconcile.NewResourceStatus(reconcile.SyncStatusUnknown, reconcile.HealthHealthy)
-}
-
-// ─── openclaw-gateway ────────────────────────────────────────────────────────
-
-type openclawGatewayProvider struct{ stubMethods }
-
-func (p *openclawGatewayProvider) Type() string { return "openclaw-gateway" }
-
-func (p *openclawGatewayProvider) Health() reconcile.ResourceStatus {
-	home, _ := os.UserHomeDir()
-	configPath := filepath.Join(home, ".openclaw", "openclaw.json")
-	if _, err := os.Stat(configPath); err != nil {
-		return reconcile.ResourceStatus{
-			Sync:      reconcile.SyncStatusUnknown,
-			Health:    reconcile.HealthMissing,
-			Operation: reconcile.OperationIdle,
-			Message:   "openclaw.json not found",
-		}
-	}
-	return reconcile.NewResourceStatus(reconcile.SyncStatusUnknown, reconcile.HealthHealthy)
-}
 
 // ─── eval ─────────────────────────────────────────────────────────────────────
 

@@ -130,8 +130,6 @@ type InferenceRequest struct {
 
 	// MCP bridge configuration
 	MCPConfig     string // Path to generated --mcp-config JSON file
-	OpenClawURL   string // OpenClaw gateway URL for bridge proxy
-	OpenClawToken string // Auth token for OpenClaw
 	SessionID     string // Session context for tool execution
 
 	// Claude CLI session continuity

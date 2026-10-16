@@ -12,7 +12,7 @@ func TestChannelRegistry_RegisterAndGet(t *testing.T) {
 
 	desc := &modality.ChannelDescriptor{
 		ID:        "discord-text",
-		Transport: "openclaw-gateway",
+		Transport: "websocket-gateway",
 		Input:     []modality.ModalityType{modality.Text},
 		Output:    []modality.ModalityType{modality.Text, modality.Voice},
 	}
@@ -25,8 +25,8 @@ func TestChannelRegistry_RegisterAndGet(t *testing.T) {
 	if !ok {
 		t.Fatal("Get returned false")
 	}
-	if got.Transport != "openclaw-gateway" {
-		t.Errorf("Transport = %q, want %q", got.Transport, "openclaw-gateway")
+	if got.Transport != "websocket-gateway" {
+		t.Errorf("Transport = %q, want %q", got.Transport, "websocket-gateway")
 	}
 }
 

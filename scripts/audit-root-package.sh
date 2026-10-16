@@ -52,7 +52,6 @@ PORT_TARGETS = {
     "capability":   "internal/capability",
     "decompose":    "internal/decompose",
     "discord":      "internal/providers/discord",
-    "openclaw":     "internal/openclaw",
     "identity":     "internal/engine",
     "agent":        "internal/agent",
 }

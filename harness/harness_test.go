@@ -1,5 +1,5 @@
 // harness_test.go tests the harness package's tool pipeline, Claude CLI
-// argument construction, and OpenClaw MCP bridge wiring.
+// argument construction, and shared test doubles.
 package harness
 
 import (
@@ -188,7 +188,7 @@ func TestMapToolsToCLINames_Empty(t *testing.T) {
 	}
 }
 
-// === GenerateMCPConfig TESTS ===
+// === Test doubles ===
 
 // mockKernel implements KernelServices for testing.
 type mockKernel struct {
@@ -219,94 +219,6 @@ func (m *mockKernel) ConvertOpenAIToolsToMCP(tools []json.RawMessage) []MCPTool 
 }
 func (m *mockKernel) GetAgentToolPolicy(agentID string) (*AgentToolPolicy, error) {
 	return nil, nil
-}
-
-func TestGenerateMCPConfig_Basic(t *testing.T) {
-	kernel := &mockKernel{workspaceRoot: "/tmp/test-ws"}
-	req := &InferenceRequest{
-		OpenClawURL:   "http://localhost:18789",
-		OpenClawToken: "test-token",
-		SessionID:     "sess-123",
-	}
-
-	configPath, err := GenerateMCPConfig(req, kernel)
-	if err != nil {
-		t.Fatalf("GenerateMCPConfig failed: %v", err)
-	}
-	defer os.Remove(configPath)
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("Failed to read config: %v", err)
-	}
-
-	content := string(data)
-
-	// Verify the config contains expected values
-	if !strings.Contains(content, "cogos-bridge") {
-		t.Error("config should contain cogos-bridge server name")
-	}
-	if !strings.Contains(content, "http://localhost:18789") {
-		t.Error("config should contain OpenClaw URL")
-	}
-	if !strings.Contains(content, "test-token") {
-		t.Error("config should contain OpenClaw token")
-	}
-	if !strings.Contains(content, "sess-123") {
-		t.Error("config should contain session ID")
-	}
-	if !strings.Contains(content, "mcp") {
-		t.Error("config should contain mcp serve --bridge args")
-	}
-
-	// Verify it's valid JSON
-	var parsed map[string]interface{}
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Errorf("config should be valid JSON: %v", err)
-	}
-}
-
-func TestGenerateMCPConfig_RequiresURL(t *testing.T) {
-	kernel := &mockKernel{workspaceRoot: "/tmp"}
-	req := &InferenceRequest{
-		OpenClawURL: "", // empty
-	}
-
-	_, err := GenerateMCPConfig(req, kernel)
-	if err == nil {
-		t.Error("GenerateMCPConfig should fail when OpenClawURL is empty")
-	}
-}
-
-func TestGenerateMCPConfig_WithTools(t *testing.T) {
-	kernel := &mockKernel{
-		workspaceRoot: "/tmp/test-ws",
-		mcpTools: []MCPTool{
-			{Name: "test_tool", Description: "A test tool", InputSchema: map[string]interface{}{"type": "object"}},
-		},
-	}
-	req := &InferenceRequest{
-		OpenClawURL: "http://localhost:18789",
-		Tools: []json.RawMessage{
-			json.RawMessage(`{"type":"function","function":{"name":"test_tool"}}`),
-		},
-	}
-
-	configPath, err := GenerateMCPConfig(req, kernel)
-	if err != nil {
-		t.Fatalf("GenerateMCPConfig failed: %v", err)
-	}
-	defer os.Remove(configPath)
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("Failed to read config: %v", err)
-	}
-
-	content := string(data)
-	if !strings.Contains(content, "TOOL_REGISTRY") {
-		t.Error("config should contain TOOL_REGISTRY when tools are provided")
-	}
 }
 
 // === Provider routing TESTS ===

@@ -472,7 +472,7 @@ func (m *MCPServer) registerTools() {
 	// Wave 3: mod3 proxy tools (mcp_modality_proxy.go). The kernel becomes
 	// the MCP front door for mod3 — HTTP-forwards synthesis/stop/voices/
 	// status and plays the returned audio/wav locally. Supersedes the
-	// installed binary's OpenClaw gateway which silently drops audio bytes.
+	// legacy gateway binary, which silently drops audio bytes.
 	// All mod3_* tools are plumbing (registerMod3Tools uses trackToolDeferred).
 	m.registerMod3Tools()
 

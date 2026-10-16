@@ -1,7 +1,7 @@
 // serve_compat.go — v2 compatibility endpoints for Phase 0 cutover.
 //
 // These endpoints allow v3 to replace v2 as the production kernel on port 5100.
-// Consumers: OpenClaw cogos plugin, CogBus plugin, launchd service.
+// Consumers: CogBus plugin, launchd service.
 //
 // DEPRECATED: These compatibility routes exist only for migration from v2.
 // They will be removed once all clients migrate to standard endpoints.
@@ -9,7 +9,7 @@
 //
 // Endpoints:
 //
-//	GET  /v1/card            — kernel capability card (OpenClaw auth flow)
+//	GET  /v1/card            — kernel capability card (auth flow)
 //	GET  /v1/models          — OpenAI-compatible model list
 //	GET  /memory/search      — memory search (was missing from v2 too)
 //	GET  /memory/read        — memory read (was missing from v2 too)
@@ -43,7 +43,7 @@ func (s *Server) logCompatDeprecated(r *http.Request) {
 // registerCompatRoutes adds v2-compatible endpoints to the mux.
 // Called from NewServer after all v3 routes are registered.
 func (s *Server) registerCompatRoutes(mux *http.ServeMux) {
-	// Tier A: blocking for OpenClaw plugin
+	// Tier A: blocking for v2 clients
 	s.route(mux, "GET /v1/card", s.handleCard)
 	s.route(mux, "GET /v1/models", s.handleModels)
 
@@ -59,10 +59,10 @@ func (s *Server) registerCompatRoutes(mux *http.ServeMux) {
 	s.route(mux, "GET /coherence/check", s.handleCoherenceCheck)
 }
 
-// ── Tier A: OpenClaw plugin ────────────────────────────────────────────────────
+// ── Tier A: v2 client ────────────────────────────────────────────────────
 
-// handleCard returns the kernel capability card. Used by the OpenClaw cogos
-// plugin for auth flow and model resolution.
+// handleCard returns the kernel capability card. Used by v2 clients
+// for auth flow and model resolution.
 func (s *Server) handleCard(w http.ResponseWriter, r *http.Request) {
 	s.logCompatDeprecated(r)
 	port := s.cfg.Port

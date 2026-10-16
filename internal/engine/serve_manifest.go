@@ -15,7 +15,7 @@
 //     *mcp.Tool metadata into m.toolMeta and then returns the pointer so the
 //     caller threads it through to mcp.AddTool unchanged.
 //
-// Why not extend /v1/card? The existing /v1/card endpoint is an OpenClaw v2
+// Why not extend /v1/card? The existing /v1/card endpoint is a v2
 // compatibility stub with a specific contract (models list, capabilities
 // booleans, `endpoints` string map). Reshaping it would break that
 // contract. /v1/manifest lives alongside as the CogOS-native surface for

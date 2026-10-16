@@ -1,7 +1,6 @@
 // lifecycle.go — Session-lifecycle schema for the Context Engine.
 //
-// CogOS sessions are independent of OpenClaw sessions: one CogOS conversation
-// may span multiple Claude CLI sessions via rotation. The types below describe
+// A CogOS conversation may span multiple Claude CLI sessions via rotation. The types below describe
 // that lifecycle — current state, retired rotations, persistent working memory
 // across rotations, and the tunable thresholds that govern rotation.
 //
@@ -19,11 +18,10 @@ package session
 import "time"
 
 // State tracks a CogOS-managed conversation across Claude CLI sessions.
-// CogOS sessions are independent of OpenClaw sessions: one CogOS
-// conversation may span multiple Claude CLI sessions via rotation.
+// A CogOS conversation may span multiple Claude CLI sessions via rotation.
 type State struct {
 	ID              string    // CogOS session ID (stable across Claude rotations)
-	ThreadID        string    // OpenClaw thread this session belongs to
+	ThreadID        string    // Thread this session belongs to
 	ClaudeSessionID string    // Current Claude CLI session (may rotate)
 	CreatedAt       time.Time
 	LastActiveAt    time.Time

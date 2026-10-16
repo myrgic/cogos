@@ -73,7 +73,7 @@ func testManifest() *NodeManifest {
 			"gateway": {
 				Kind:      ServiceKindExternal,
 				Port:      18789,
-				Command:   "openclaw gateway",
+				Command:   "example-gateway serve",
 				Health:    "/health",
 				Restart:   "always",
 				DependsOn: []string{"kernel"},

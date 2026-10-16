@@ -126,7 +126,7 @@ Validates StreamTailer-based ingestion from JSONL and process-state gating.
 
 - `cogos` binary built and executable
 - Writable test JSONL file path
-- Adapter format chosen to match configured tailer (`claudecode` or `openclaw`)
+- Adapter format chosen to match configured tailer (`claudecode`)
 
 ### Setup Commands
 

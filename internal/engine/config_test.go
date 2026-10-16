@@ -61,7 +61,7 @@ local_model: gemma4:e2b
 tool_call_validation_enabled: false
 digest_paths:
   claude-code: ~/.claude/events.jsonl
-  openclaw: /tmp/openclaw
+  headless: /tmp/headless
 `
 	writeTestFile(t, filepath.Join(root, ".cog", "config", "kernel.yaml"), kernelYAML)
 
@@ -91,8 +91,8 @@ digest_paths:
 	if cfg.DigestPaths["claude-code"] != "~/.claude/events.jsonl" {
 		t.Errorf("DigestPaths[claude-code] = %q; want ~/.claude/events.jsonl", cfg.DigestPaths["claude-code"])
 	}
-	if cfg.DigestPaths["openclaw"] != "/tmp/openclaw" {
-		t.Errorf("DigestPaths[openclaw] = %q; want /tmp/openclaw", cfg.DigestPaths["openclaw"])
+	if cfg.DigestPaths["headless"] != "/tmp/headless" {
+		t.Errorf("DigestPaths[headless] = %q; want /tmp/headless", cfg.DigestPaths["headless"])
 	}
 }
 

@@ -1188,7 +1188,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Map OpenClaw model names to provider routing via the shared resolver.
+	// Map client model names to provider routing via the shared resolver.
 	// ResolveModelRequest centralises all alias + router-probe logic so that
 	// the gateway and dispatch tool share a single source of truth. The
 	// InjectKernelTools flag is handled below (kernel-agent / ollama path).
