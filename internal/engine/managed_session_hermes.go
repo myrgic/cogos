@@ -769,15 +769,21 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 		if st := existing.State(); st == StateLive || st == StateStarting {
 			d.mu.Unlock()
 			if opts.AllowClass != nil && !opts.AllowClass(existing.class) {
-				return nil, fmt.Errorf("%w: caller may not attach a session of runtime class %q", ErrManagedSessionForbidden, existing.class)
+				return nil, fmt.Errorf("%w: caller may not attach this session", ErrManagedSessionForbidden)
 			}
 			return existing, nil
 		}
 		// Registered but not running (e.g. Crashed): the resume keeps the
 		// session's original class, and the caller needs authority over it.
+		// Authority is checked first and no refusal names the recorded class,
+		// so a caller cannot probe another session's class.
+		if opts.AllowClass != nil && !opts.AllowClass(existing.class) {
+			d.mu.Unlock()
+			return nil, fmt.Errorf("%w: caller may not attach this session", ErrManagedSessionForbidden)
+		}
 		if opts.Class != "" && opts.Class != existing.class {
 			d.mu.Unlock()
-			return nil, fmt.Errorf("%w: session %s runs class %q; a resume cannot change class", ErrManagedSessionForbidden, opts.Load, existing.class)
+			return nil, fmt.Errorf("%w: a resume cannot change a session's class", ErrManagedSessionForbidden)
 		}
 		opts.Class = existing.class
 	}
@@ -793,15 +799,15 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 			d.mu.Unlock()
 			return nil, fmt.Errorf("%w: %v", ErrManagedSessionForbidden, err)
 		}
-		if opts.Class != "" && opts.Class != rec.Class {
-			d.mu.Unlock()
-			return nil, fmt.Errorf("%w: session %s was created under class %q; a resume cannot change class", ErrManagedSessionForbidden, opts.Load, rec.Class)
-		}
-		opts.Class = rec.Class
 		if opts.AllowClass != nil && !opts.AllowClass(rec.Class) {
 			d.mu.Unlock()
-			return nil, fmt.Errorf("%w: caller may not attach a session of runtime class %q", ErrManagedSessionForbidden, rec.Class)
+			return nil, fmt.Errorf("%w: caller may not attach this session", ErrManagedSessionForbidden)
 		}
+		if opts.Class != "" && opts.Class != rec.Class {
+			d.mu.Unlock()
+			return nil, fmt.Errorf("%w: a resume cannot change a session's class", ErrManagedSessionForbidden)
+		}
+		opts.Class = rec.Class
 	}
 	if claim := d.loads[opts.Load]; claim != nil { // a load of this id is in flight: share it
 		d.mu.Unlock()
@@ -809,7 +815,7 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 		case <-claim.done:
 			// Every caller needs authority over the class the load resolved to.
 			if claim.sess != nil && opts.AllowClass != nil && !opts.AllowClass(claim.sess.class) {
-				return nil, fmt.Errorf("%w: caller may not attach a session of runtime class %q", ErrManagedSessionForbidden, claim.sess.class)
+				return nil, fmt.Errorf("%w: caller may not attach this session", ErrManagedSessionForbidden)
 			}
 			return claim.sess, claim.err
 		case <-ctx.Done():
@@ -858,8 +864,13 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		}
 		// Room and actor are inherited. Cross-room fork is not in G0, so a
 		// room that differs from the parent's is refused.
+		// Authority over the parent's class comes first, and no refusal
+		// names the parent's class or room.
+		if opts.AllowClass != nil && !opts.AllowClass(parent.class) {
+			return nil, fmt.Errorf("%w: caller may not fork this session", ErrManagedSessionForbidden)
+		}
 		if opts.Room != "" && opts.Room != parent.room {
-			return nil, fmt.Errorf("%w: fork_of %s lives in room %q; cross-room fork is not supported", ErrManagedSessionForbidden, opts.ForkOf, parent.room)
+			return nil, fmt.Errorf("%w: cross-room fork is not supported", ErrManagedSessionForbidden)
 		}
 		opts.Room = parent.room
 		if parent.actor != "" {
@@ -867,12 +878,12 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		}
 		// A fork runs in its parent's process, so it has the parent's class.
 		if opts.Class != "" && opts.Class != parent.class {
-			return nil, fmt.Errorf("%w: fork_of %s runs class %q; a fork cannot change class", ErrManagedSessionForbidden, opts.ForkOf, parent.class)
+			return nil, fmt.Errorf("%w: a fork cannot change its parent's class", ErrManagedSessionForbidden)
 		}
 		opts.Class = parent.class
 		receipt = parent.receipt
 		if opts.AllowClass != nil && !opts.AllowClass(opts.Class) {
-			return nil, fmt.Errorf("%w: caller may not fork a session of runtime class %q", ErrManagedSessionForbidden, opts.Class)
+			return nil, fmt.Errorf("%w: caller may not fork this session", ErrManagedSessionForbidden)
 		}
 	} else {
 		var class *ResolvedRuntimeClass
@@ -1029,7 +1040,7 @@ func (d *HermesACPDriver) DeleteAuthorized(id string, allow func(class string) b
 			class = rec.Class
 		}
 		if !allow(class) {
-			return fmt.Errorf("%w: caller may not delete a session of runtime class %q", ErrManagedSessionForbidden, class)
+			return fmt.Errorf("%w: caller may not delete this session", ErrManagedSessionForbidden)
 		}
 	}
 	return d.Delete(id)

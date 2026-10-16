@@ -529,6 +529,40 @@ func coldDriver(t *testing.T) (*HermesACPDriver, string, string) {
 	return d2, out, id
 }
 
+// No refusal tells an unauthorized caller what class a session runs: the
+// authority check runs before any class-mismatch check, and refusal messages
+// never carry the recorded class or room (cog-review finding on #685).
+func TestRuntimeClass_RefusalsDoNotDiscloseClass(t *testing.T) {
+	collabOnly := func(c string) bool { return c == "collab" }
+	noLeak := func(t *testing.T, what string, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrManagedSessionForbidden) {
+			t.Fatalf("%s: err = %v, want forbidden", what, err)
+		}
+		if strings.Contains(err.Error(), "chat") {
+			t.Fatalf("%s: refusal discloses the recorded class: %q", what, err.Error())
+		}
+	}
+	// Cold load, with and without a (wrong) class named.
+	d, _, id := coldDriver(t)
+	for _, class := range []string{"", "collab", "other"} {
+		_, err := d.Create(context.Background(), HermesACPOpts{Load: id, Class: class, AllowClass: collabOnly})
+		noLeak(t, "cold resume class="+class, err)
+	}
+	// Live attach and fork of a resident chat session.
+	d2, _ := classDriverAt(t, t.TempDir())
+	s, err := d2.Create(context.Background(), HermesACPOpts{Class: "chat", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = d2.Create(context.Background(), HermesACPOpts{Load: s.ID(), AllowClass: collabOnly})
+	noLeak(t, "live attach", err)
+	for _, class := range []string{"", "collab"} {
+		_, err = d2.Create(context.Background(), HermesACPOpts{ForkOf: s.ID(), Class: class, AllowClass: collabOnly})
+		noLeak(t, "fork class="+class, err)
+	}
+}
+
 // Cold load: a caller scoped to another class cannot adopt a classed session
 // just because the driver forgot it.
 func TestRuntimeClass_ColdResumeByOtherClassScopeRefused(t *testing.T) {
