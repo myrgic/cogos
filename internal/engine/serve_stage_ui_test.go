@@ -29,7 +29,7 @@ func stageUIFixture(t *testing.T, upstream http.Handler) (front *httptest.Server
 	if err := os.WriteFile(filepath.Join(staticDir, "secret.txt"), []byte("nope"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h, err := newStageUIHandler(StageUIConfig{Upstream: up.URL, StaticDir: staticDir})
+	h, err := newStageUIHandler(StageUIConfig{Upstream: up.URL, StaticDir: staticDir, PublicHost: "stage.example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,9 @@ func TestStageUI_UpstreamDownIs502(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/x", nil))
+	req := httptest.NewRequest("GET", "/x", nil)
+	req.Host, req.RemoteAddr = "localhost", "127.0.0.1:5000"
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("got %d", rec.Code)
 	}

@@ -12,9 +12,13 @@
 //	  upstream: http://127.0.0.1:7872   # the Python stage (default shown)
 //	  static_dir: /path/to/ui       # served from disk, never embedded
 //	  static_prefixes: [/app-icons/] # URL prefixes eligible for static serving
+//	  public_host: stage.myrgic.com  # extra Host the guard accepts (empty = loopback only)
 //
 // Request routing, in order:
 //
+//  0. The Stage guard's request-level checks (serve_stage_ui_guard.go): lock,
+//     Host allowlist, websocket Origin, /local rules, key-guess lockout.
+//     A refused request never reaches static serving or the upstream.
 //  1. GET/HEAD whose path starts with one of static_prefixes AND resolves to a
 //     regular file under static_dir (full request path, os.Root-confined) is
 //     served from disk. The files live on disk, not in the binary, so a UI edit
@@ -92,6 +96,7 @@ type StageUIConfig struct {
 	Upstream       string   // Python stage base URL
 	StaticDir      string   // directory of static front-end files (may be empty)
 	StaticPrefixes []string // URL path prefixes eligible for static serving
+	PublicHost     string   // public hostname (e.g. stage.myrgic.com) the guard accepts besides loopback; empty = loopback only
 }
 
 // stageUISection is the `stage_ui:` block of kernel.yaml.
@@ -100,6 +105,7 @@ type stageUISection struct {
 	Upstream       string   `yaml:"upstream"`
 	StaticDir      string   `yaml:"static_dir"`
 	StaticPrefixes []string `yaml:"static_prefixes"`
+	PublicHost     string   `yaml:"public_host"`
 }
 
 // applyStageUISection overlays a kernel.yaml stage_ui block onto cfg.
@@ -115,6 +121,9 @@ func applyStageUISection(cfg *Config, s *stageUISection) {
 	}
 	if s.StaticDir != "" {
 		cfg.StageUI.StaticDir = s.StaticDir
+	}
+	if s.PublicHost != "" {
+		cfg.StageUI.PublicHost = s.PublicHost
 	}
 	if len(s.StaticPrefixes) > 0 {
 		cfg.StageUI.StaticPrefixes = s.StaticPrefixes
@@ -139,14 +148,22 @@ func validateStageUIAddr(addr string) error {
 
 // newStageUIHandler builds the static-then-proxy handler.
 func newStageUIHandler(c StageUIConfig) (http.Handler, error) {
+	h, _, err := newStageUIHandlerG(c)
+	return h, err
+}
+
+// newStageUIHandlerG is newStageUIHandler that also returns the guard (tests).
+func newStageUIHandlerG(c StageUIConfig) (http.Handler, *stageGuard, error) {
 	upstream := c.Upstream
 	if upstream == "" {
 		upstream = DefaultStageUIUpstream
 	}
 	target, err := url.Parse(upstream)
 	if err != nil || target.Scheme == "" || target.Host == "" {
-		return nil, fmt.Errorf("stage_ui.upstream %q: want scheme://host:port", upstream)
+		return nil, nil, fmt.Errorf("stage_ui.upstream %q: want scheme://host:port", upstream)
 	}
+	guard := newStageGuard(c.PublicHost)
+	guard.keyKnown = probeKeyKnown(target)
 	prefixes := c.StaticPrefixes
 	if len(prefixes) == 0 {
 		prefixes = DefaultStageUIStaticPrefixes
@@ -159,7 +176,8 @@ func newStageUIHandler(c StageUIConfig) (http.Handler, error) {
 			// client's Host, so put it back.
 			r.Out.Host = r.In.Host
 		},
-		FlushInterval: -1, // stream (SSE, long polls) without buffering
+		ModifyResponse: guard.afterResponse,
+		FlushInterval:  -1, // stream (SSE, long polls) without buffering
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			slog.Warn("stage-ui: upstream error", "upstream", upstream, "err", err)
 			http.Error(w, "stage upstream unavailable", http.StatusBadGateway)
@@ -167,13 +185,17 @@ func newStageUIHandler(c StageUIConfig) (http.Handler, error) {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ok bool
+		if r, ok = guard.handle(w, r); !ok {
+			return
+		}
 		if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
 			c.StaticDir != "" && hasAnyPrefix(path.Clean(r.URL.Path), prefixes) &&
 			serveStageUIStatic(w, r, c.StaticDir) {
 			return
 		}
 		proxy.ServeHTTP(w, r)
-	}), nil
+	}), guard, nil
 }
 
 // hasAnyPrefix reports whether the cleaned path p is under a prefix. The caller
