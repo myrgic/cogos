@@ -74,7 +74,7 @@ func (c *ctx) defaultClaimant(l *cand, s *Spec) string {
 	for _, y := range c.byID {
 		// Only accepted entries speak: a rejected one stays in the log but
 		// cannot choose who answers.
-		if r, ok := c.status[y.id]; ok && r.ok() && y != l && c.inPast(l, y) {
+		if c.accepted(y) && y != l && c.inPast(l, y) {
 			past = append(past, y)
 		}
 	}
@@ -91,7 +91,9 @@ func (c *ctx) defaultClaimant(l *cand, s *Spec) string {
 			continue
 		}
 		rid, _ := y.e.Body["in_reply_to"].(string)
-		if t := c.byID[rid]; t != nil && t.e.Kind == KindLine && t.e.Actor == l.e.Actor {
+		// The target must itself be accepted: a rejected line cannot pick the
+		// default claimant by being replied to.
+		if t := c.byID[rid]; t != nil && c.accepted(t) && t.e.Kind == KindLine && t.e.Actor == l.e.Actor {
 			return y.e.Actor.Agent
 		}
 	}
@@ -155,7 +157,7 @@ func (c *ctx) checkClaim(x *cand, s *Spec) res {
 	if l == nil || l.e.Kind != KindLine || !c.inPast(x, l) {
 		return rej(CodeClaimLineUnknown)
 	}
-	if lr := c.status[l.id]; !lr.ok() {
+	if !c.accepted(l) {
 		return rej(CodeClaimLineUnknown)
 	}
 	if to, _ := l.e.Body["to"].([]any); len(to) > 0 {
@@ -169,7 +171,7 @@ func (c *ctx) checkClaim(x *cand, s *Spec) res {
 		return rej(CodeClaimDefaultWrong)
 	}
 	for _, r := range c.replies[lid] {
-		if c.status[r.id].ok() && c.inPast(x, r) {
+		if c.accepted(r) && c.inPast(x, r) {
 			return rej(CodeClaimAfterReply)
 		}
 	}

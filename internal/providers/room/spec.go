@@ -75,6 +75,9 @@ func SpecFromEntry(e *Entry) (*Spec, error) {
 	if e.Kind != KindGenesis && e.Kind != KindSpec {
 		return nil, fmt.Errorf("%s is not a spec carrier", e.Kind)
 	}
+	if err := specKeysExact(e.Body); err != nil {
+		return nil, err
+	}
 	raw, err := json.Marshal(e.Body)
 	if err != nil {
 		return nil, err
@@ -93,9 +96,59 @@ func SpecFromEntry(e *Entry) (*Spec, error) {
 	return &s, nil
 }
 
+// specKeysExact rejects any key of a spec or genesis body that is not spelled
+// exactly like a field the RFC defines, at every object level the body has.
+// encoding/json matches struct fields case-insensitively (and folds Unicode,
+// e.g. long s and the Kelvin sign) and merges repeated map keys, so without
+// this "Members" next to "members" would mean two specs to two readers.
+// nodes, cutoffs and node_cutoffs are maps keyed by data, not by field name.
+func specKeysExact(body map[string]any) error {
+	check := func(where string, v any, known ...string) error {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return nil // a wrong type is the decoder's error
+		}
+		for k := range m {
+			if !contains(known, k) {
+				return fmt.Errorf("%s: unknown or mis-cased key %q", where, k)
+			}
+		}
+		return nil
+	}
+	if err := check("spec", body, "name", "gen", "owner", "nodes", "members", "dispatch",
+		"quota", "floor", "scope", "identity", "cutoffs", "node_cutoffs"); err != nil {
+		return err
+	}
+	if ms, ok := body["members"].(map[string]any); ok {
+		for id, m := range ms {
+			if err := check("member "+id, m, "type", "role", "homes", "node", "class", "discord"); err != nil {
+				return err
+			}
+		}
+	}
+	for _, f := range []struct {
+		name  string
+		known []string
+	}{
+		{"dispatch", []string{"node"}},
+		{"quota", []string{"entryBodyBytes", "logBytes"}},
+		{"floor", []string{"priority"}},
+		{"scope", []string{"pipelines"}},
+		{"identity", []string{"heads"}},
+	} {
+		if err := check(f.name, body[f.name], f.known...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Validate is the structural check on a spec. prev is the spec it amends (nil
-// for the genesis).
-func (s *Spec) Validate(prev *Spec) error {
+// for the genesis). history is every spec already in the chain (oldest first,
+// prev included): a node cutoff is permanent, so none of their node_cutoffs
+// DeviceIDs may be listed again (a node that comes back joins under a new
+// DeviceID, RFC section 6.9.1).
+func (s *Spec) Validate(prev *Spec, history ...*Spec) error {
 	if prev == nil && s.Gen != 1 {
 		return fmt.Errorf("genesis spec must be gen 1")
 	}
@@ -157,6 +210,16 @@ func (s *Spec) Validate(prev *Spec) error {
 	if len(s.Identity.Heads) > 0 && !contains(s.Identity.Heads, string(KindSpec)) {
 		return fmt.Errorf("a non-empty identity.heads must list spec")
 	}
+	for _, h := range append(append([]*Spec(nil), history...), prev) {
+		if h == nil {
+			continue
+		}
+		for dev := range h.NodeCutoffs {
+			if containsValue(s.Nodes, dev) {
+				return fmt.Errorf("node %q was cut off at gen %d and cannot rejoin (new DeviceID)", dev, h.Gen)
+			}
+		}
+	}
 	if prev != nil {
 		// A removal pins cutoffs on every log in the previous spec's nodes.
 		for id := range prev.Members {
@@ -191,6 +254,13 @@ func (s *Spec) Validate(prev *Spec) error {
 		for dev := range s.NodeCutoffs {
 			if _, canon, err := CanonicalLog(dev); err != nil || canon != dev {
 				return fmt.Errorf("node_cutoffs: %q is not a canonical device id", dev)
+			}
+			// Only a node the previous spec listed and this one drops.
+			if !containsValue(prev.Nodes, dev) {
+				return fmt.Errorf("node_cutoffs: %q is not a node of the previous spec", dev)
+			}
+			if containsValue(s.Nodes, dev) {
+				return fmt.Errorf("node_cutoffs: %q is still listed in nodes", dev)
 			}
 		}
 		// The effective heads set never shrinks in place.
@@ -272,6 +342,15 @@ func (s *Spec) AgentMembers() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func containsValue(m map[string]string, v string) bool {
+	for _, x := range m {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(xs []string, x string) bool {

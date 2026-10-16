@@ -190,6 +190,18 @@ func held(code string) res          { return res{status: StatusHeld, code: code}
 func (r res) ok() bool              { return r.status == StatusAccepted }
 func (r res) withBefore(b bool) res { r.before = b; return r }
 
+// accepted reports whether x has a stored verdict and it is accepted. The
+// zero Status is StatusAccepted, so a missing verdict (an entry rejected at
+// Layer 2, or one not yet reached) must never be read through c.status[...]
+// directly: use this.
+func (c *ctx) accepted(x *cand) bool {
+	if x == nil {
+		return false
+	}
+	r, ok := c.status[x.id]
+	return ok && r.ok()
+}
+
 // ctx is the read-only view admit() runs against: the replicated spec chain
 // plus the entries this replica holds.
 type ctx struct {

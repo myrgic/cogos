@@ -917,3 +917,179 @@ func TestBoardAdmitItemIDClashBetweenCreates(t *testing.T) {
 	}
 	assertOrderIndependent(t, w, 25)
 }
+
+// Round 2, 3b: a rejected line cannot choose the default claimant through
+// in_reply_to. cog legitimately replied to chaz; node-b forges a line as chaz
+// (actor_not_homed) and sage, legitimate on node-b, replies to the forgery.
+func TestBoardAdmitDefaultClaimantIgnoresRejectedReplyTarget(t *testing.T) {
+	w := newWorld(t, nil)
+	l0 := w.line("node-a", chaz, "first")
+	w.sync()
+	w.mk("node-a", KindLine, cog, map[string]any{"text": "r", "to": []any{}, "in_reply_to": idOfEntry(l0)})
+	w.sync()
+	forged := w.line("node-b", chaz, "forged") // node-b is not chaz's home
+	w.sync()
+	w.mk("node-b", KindLine, sage, map[string]any{"text": "r", "to": []any{}, "in_reply_to": idOfEntry(forged)})
+	w.sync()
+	l := w.line("node-a", chaz, "second")
+	w.sync()
+	body := func() map[string]any {
+		return map[string]any{"line": idOfEntry(l), "default": true, "fallback": false, "name_hit": false}
+	}
+	cogDefault := w.mk("node-a", KindFloorClaim, cog, body())
+	sageDefault := w.mk("node-b", KindFloorClaim, sage, body())
+	o := w.eval()
+	w.rejected(o, forged, CodeActorNotHomed)
+	w.accepted(o, cogDefault)
+	w.rejected(o, sageDefault, CodeClaimDefaultWrong)
+	assertOrderIndependent(t, w, 25)
+}
+
+// Round 2, 3c: a reply rejected at Layer 2 has no stored verdict, and a
+// missing verdict must not read as accepted (StatusAccepted is the zero
+// value), or it would make a later claim claim_after_reply.
+func TestBoardAdmitLayer2RejectedReplyIsNotAReply(t *testing.T) {
+	w := newWorld(t, nil)
+	l := w.line("node-a", chaz, "anyone there")
+	w.mk("node-b", KindLine, vroku, map[string]any{"text": "x", "to": []any{}})
+	w.sync()
+	p := w.mk("node-a", KindLine, cog, map[string]any{"text": "p", "to": []any{}})
+	w.sync()
+	// r drops the node-b dep its predecessor p carries: deps_regress.
+	r := w.mk("node-a", KindLine, cog, map[string]any{"text": "me", "to": []any{}, "in_reply_to": idOfEntry(l)},
+		func(e *Entry) { delete(e.Deps, testNodeSet["node-b"].dev) })
+	w.sync()
+	claim := w.mk("node-b", KindFloorClaim, sage, map[string]any{
+		"line": idOfEntry(l), "default": false, "fallback": false, "name_hit": false})
+	o := w.eval()
+	w.accepted(o, p)
+	w.rejected(o, r, CodeDepsRegress)
+	w.accepted(o, claim)
+	assertOrderIndependent(t, w, 25)
+}
+
+// Round 2, 4b: spec and genesis bodies are read with exact-case keys at every
+// object level the RFC defines.
+func TestBoardAdmitSpecBodyRejectsFoldedKeys(t *testing.T) {
+	cases := map[string]func(b map[string]any){
+		"top-level GEN only": func(b map[string]any) { delete(b, "gen"); b["GEN"] = 1 },
+		"repeated Members": func(b map[string]any) {
+			b["Members"] = map[string]any{"mallory": map[string]any{"type": "person", "role": "collaborator", "homes": []any{"node-b"}}}
+		},
+		"long s scope": func(b map[string]any) { delete(b, "scope"); b["ſcope"] = map[string]any{"pipelines": []any{"review"}} },
+		"identity Heads": func(b map[string]any) {
+			b["floor"] = map[string]any{"priority": []any{"cog@node-a"}}
+			b["identity"] = map[string]any{"Heads": []any{"spec"}}
+		},
+		"member TYPE ROLE": func(b map[string]any) {
+			b["members"].(map[string]any)["vroku"] = map[string]any{"TYPE": "person", "ROLE": "collaborator", "homes": []any{"node-b"}}
+		},
+		"dispatch Node": func(b map[string]any) { b["dispatch"] = map[string]any{"Node": "node-a"} },
+		"quota":         func(b map[string]any) { b["quota"] = map[string]any{"LogBytes": 5} },
+		"member Homes": func(b map[string]any) {
+			b["members"].(map[string]any)["chaz"] = map[string]any{"type": "person", "role": "owner", "Homes": []any{"node-a"}}
+		},
+	}
+	for name, mut := range cases {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld(t, mut)
+			w.rejected(w.eval(), w.g, CodeGenesisBad)
+		})
+	}
+	// The same on a gen-2 spec entry.
+	w := newWorld(t, nil)
+	b := defaultGenesisBody()
+	b["gen"] = 2
+	delete(b, "name")
+	b["Quota"] = map[string]any{"logBytes": 1}
+	s2 := w.mk("node-a", KindSpec, chaz, b)
+	o := w.eval()
+	w.rejected(o, s2, CodeSpecBad)
+	assertOrderIndependent(t, w, 25)
+}
+
+// Round 2, 6: node_cutoffs must name a node the previous spec listed and this
+// spec no longer lists.
+func TestBoardAdmitNodeCutoffsMustMatchDroppedNodes(t *testing.T) {
+	phone := testNodeSet["phone"].dev
+	rogue := testNodeSet["rogue"].dev
+	w := newWorld(t, func(b map[string]any) { b["nodes"].(map[string]any)["phone"] = phone })
+	// Cutoff for a node the same spec still lists.
+	still := defaultGenesisBody()
+	still["gen"] = 2
+	delete(still, "name")
+	still["nodes"].(map[string]any)["phone"] = phone
+	still["node_cutoffs"] = map[string]any{phone: 3}
+	selfContradict := w.mk("node-a", KindSpec, chaz, still)
+	// Cutoff for a node the previous spec never listed.
+	never := defaultGenesisBody()
+	never["gen"] = 2
+	delete(never, "name")
+	never["nodes"].(map[string]any)["phone"] = phone
+	never["node_cutoffs"] = map[string]any{rogue: 3}
+	unknown := w.mk("node-a", KindSpec, chaz, never)
+	o := w.eval()
+	w.rejected(o, selfContradict, CodeSpecBad)
+	w.rejected(o, unknown, CodeSpecBad)
+	assertOrderIndependent(t, w, 25)
+
+	// Unit form.
+	prev := &Spec{Gen: 1, Owner: "chaz", Nodes: map[string]string{"a": testNodeSet["node-a"].dev, "p": phone},
+		Members: map[string]Member{"chaz": {Type: TypePerson, Role: RoleOwner, Homes: []string{"a"}}}}
+	next := &Spec{Gen: 2, Owner: "chaz", Nodes: map[string]string{"a": testNodeSet["node-a"].dev, "p": phone},
+		Members:     prev.Members,
+		NodeCutoffs: map[string]uint64{phone: 1}}
+	if next.Validate(prev) == nil {
+		t.Fatal("a cutoff for a node the spec still lists must be refused")
+	}
+}
+
+// Pilot ruling R12: a node cutoff is permanent. A later spec cannot list a
+// DeviceID that has a cutoff anywhere in the chain; the node returns under a
+// new DeviceID.
+func TestBoardAdmitCutoffNodeCannotRejoin(t *testing.T) {
+	phone := testNodeSet["phone"].dev
+	rogue := testNodeSet["rogue"].dev
+	w := newWorld(t, func(b map[string]any) { b["nodes"].(map[string]any)["phone"] = phone })
+	w.app("phone")
+	rm := defaultGenesisBody()
+	rm["gen"] = 2
+	delete(rm, "name")
+	rm["node_cutoffs"] = map[string]any{phone: 5}
+	removal := w.mk("node-a", KindSpec, chaz, rm)
+	w.sync()
+	again := defaultGenesisBody()
+	again["gen"] = 3
+	delete(again, "name")
+	again["nodes"].(map[string]any)["phone"] = phone
+	rejoin := w.mk("node-a", KindSpec, chaz, again, func(e *Entry) { e.Spec = idOfEntry(removal) })
+	o := w.eval()
+	w.accepted(o, removal)
+	w.rejected(o, rejoin, CodeSpecBad)
+	assertOrderIndependent(t, w, 25)
+
+	// Under a new DeviceID the node comes back.
+	w2 := newWorld(t, func(b map[string]any) { b["nodes"].(map[string]any)["phone"] = phone })
+	rm2 := defaultGenesisBody()
+	rm2["gen"] = 2
+	delete(rm2, "name")
+	rm2["node_cutoffs"] = map[string]any{phone: 5}
+	removal2 := w2.mk("node-a", KindSpec, chaz, rm2)
+	w2.sync()
+	back := defaultGenesisBody()
+	back["gen"] = 3
+	delete(back, "name")
+	back["nodes"].(map[string]any)["phone"] = rogue
+	ok := w2.mk("node-a", KindSpec, chaz, back, func(e *Entry) { e.Spec = idOfEntry(removal2) })
+	o2 := w2.eval()
+	w2.accepted(o2, ok)
+	assertOrderIndependent(t, w2, 25)
+
+	// Unit form.
+	hist := &Spec{Gen: 2, NodeCutoffs: map[string]uint64{phone: 5}}
+	s := &Spec{Gen: 1, Owner: "chaz", Nodes: map[string]string{"a": testNodeSet["node-a"].dev, "p": phone},
+		Members: map[string]Member{"chaz": {Type: TypePerson, Role: RoleOwner, Homes: []string{"a"}}}}
+	if s.Validate(nil, hist) == nil {
+		t.Fatal("a DeviceID with a cutoff in the chain must not be listed again")
+	}
+}

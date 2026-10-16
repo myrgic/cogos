@@ -363,7 +363,7 @@ func (c *ctx) admitKind(x *cand, s *Spec, m Member) res {
 		if ns.Gen != s.Gen+1 {
 			return rej(CodeSpecGenBad)
 		}
-		if ns.Validate(s) != nil {
+		if ns.Validate(s, c.chain...) != nil {
 			return rej(CodeSpecBad)
 		}
 		if cited := c.byID[e.Spec]; cited == nil || !c.inPast(x, cited) {
