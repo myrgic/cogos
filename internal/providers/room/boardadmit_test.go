@@ -1093,3 +1093,124 @@ func TestBoardAdmitCutoffNodeCannotRejoin(t *testing.T) {
 		t.Fatal("a DeviceID with a cutoff in the chain must not be listed again")
 	}
 }
+
+// Round 3, 3d: defaultClaimant step 1 reads an in_reply_to target only when
+// the target is in the claim line's causal past. Here sage replies to a line
+// t written on a log the claim line never saw; whether t is held must not
+// change the verdict on a claim whose whole past is held.
+func TestBoardAdmitDefaultClaimantReplyTargetMustBeInPast(t *testing.T) {
+	phone := testNodeSet["phone"].dev
+	w := newWorld(t, func(b map[string]any) {
+		b["nodes"].(map[string]any)["phone"] = phone
+		b["members"].(map[string]any)["chaz"] = map[string]any{"type": "person", "role": "owner", "homes": []any{"node-a", "phone"}}
+	})
+	w.app("node-b")
+	w.app("phone")
+	// t lives on the phone log and is never synced to anyone.
+	tgt := w.mk("phone", KindLine, chaz, map[string]any{"text": "unseen target", "to": []any{}})
+	cogLine := w.mk("node-a", KindLine, cog, map[string]any{"text": "hello", "to": []any{}})
+	sageReply := w.mk("node-b", KindLine, sage, map[string]any{"text": "r", "to": []any{}, "in_reply_to": idOfEntry(tgt)})
+	a, b := w.apps["node-a"], w.apps["node-b"]
+	a.Observe(sageReply)
+	b.Observe(cogLine)
+	l := w.mk("node-a", KindLine, chaz, map[string]any{"text": "question", "to": []any{}})
+	b.Observe(l)
+	body := func() map[string]any {
+		return map[string]any{"line": idOfEntry(l), "default": true, "fallback": false, "name_hit": false}
+	}
+	cogDefault := w.mk("node-a", KindFloorClaim, cog, body())
+	sageDefault := w.mk("node-b", KindFloorClaim, sage, body())
+
+	var withoutT []*Entry
+	for _, e := range w.all {
+		if e != tgt {
+			withoutT = append(withoutT, e)
+		}
+	}
+	for name, set := range map[string][]*Entry{"t held": w.all, "t absent": withoutT} {
+		o := w.eval(set...)
+		w.accepted(o, cogDefault)
+		w.rejected(o, sageDefault, CodeClaimDefaultWrong)
+		_ = name
+	}
+	assertOrderIndependent(t, w, 25)
+}
+
+// Round 3, 6b: a genesis carries no cutoffs or node_cutoffs, and every
+// cutoffs key of a spec names a member the previous spec has and this spec
+// removes.
+func TestBoardAdmitGenesisAndSpecCutoffsAreBounded(t *testing.T) {
+	nodeB := testNodeSet["node-b"].dev
+	w := newWorld(t, func(b map[string]any) { b["node_cutoffs"] = map[string]any{nodeB: 0} })
+	w.rejected(w.eval(), w.g, CodeGenesisBad)
+	w = newWorld(t, func(b map[string]any) {
+		b["cutoffs"] = map[string]any{"vroku": map[string]any{nodeB: 0}}
+	})
+	w.rejected(w.eval(), w.g, CodeGenesisBad)
+
+	// Specs: a cutoffs key for a member that stays, and one that never existed.
+	w2 := newWorld(t, nil)
+	stays := defaultGenesisBody()
+	stays["gen"] = 2
+	delete(stays, "name")
+	stays["cutoffs"] = map[string]any{"vroku": map[string]any{testNodeSet["node-a"].dev: 1, nodeB: 1}}
+	s1 := w2.mk("node-a", KindSpec, chaz, stays)
+	ghost := defaultGenesisBody()
+	ghost["gen"] = 2
+	delete(ghost, "name")
+	ghost["cutoffs"] = map[string]any{"ghost": map[string]any{nodeB: 1}}
+	s2 := w2.mk("node-a", KindSpec, chaz, ghost)
+	o := w2.eval()
+	w2.rejected(o, s1, CodeSpecBad)
+	w2.rejected(o, s2, CodeSpecBad)
+	assertOrderIndependent(t, w2, 25)
+}
+
+// Round 3, member re-add (pilot ruling R12): a removed member may be re-added
+// under the same id. Entries above the cutoff are admitted only when they cite
+// a spec whose gen is at least the re-adding spec's gen; an older spec stays
+// after_removal.
+func TestBoardAdmitMemberReaddCitesReaddingSpec(t *testing.T) {
+	devA, devB := testNodeSet["node-a"].dev, testNodeSet["node-b"].dev
+	w := newWorld(t, nil)
+	before := w.line("node-b", vroku, "last words")
+	w.sync()
+	rm := defaultGenesisBody()
+	rm["gen"] = 2
+	delete(rm, "name")
+	delete(rm["members"].(map[string]any), "vroku")
+	rm["cutoffs"] = map[string]any{"vroku": map[string]any{devA: 1, devB: before.Seq}}
+	removal := w.mk("node-a", KindSpec, chaz, rm)
+	// Written on node-b before it has seen the removal: cites gen 1.
+	stale := w.mk("node-b", KindLine, vroku, map[string]any{"text": "old spec", "to": []any{}})
+	w.sync()
+	readd := defaultGenesisBody()
+	readd["gen"] = 3
+	delete(readd, "name")
+	readdE := w.mk("node-a", KindSpec, chaz, readd, func(e *Entry) { e.Spec = idOfEntry(removal) })
+	w.sync()
+	back := w.mk("node-b", KindLine, vroku, map[string]any{"text": "i am back", "to": []any{}}, func(e *Entry) { e.Spec = idOfEntry(readdE) })
+	mid := w.mk("node-b", KindLine, vroku, map[string]any{"text": "gen 2", "to": []any{}}, func(e *Entry) { e.Spec = idOfEntry(removal) })
+	o := w.eval()
+	w.accepted(o, removal)
+	w.accepted(o, readdE)
+	w.accepted(o, before)
+	w.rejected(o, stale, CodeAfterRemoval)
+	w.accepted(o, back)
+	w.rejected(o, mid, CodeSpecStale)
+	assertOrderIndependent(t, w, 25)
+
+	// Removed again: the second cutoff binds the gen-3 citations above it.
+	rm2 := defaultGenesisBody()
+	rm2["gen"] = 4
+	delete(rm2, "name")
+	delete(rm2["members"].(map[string]any), "vroku")
+	rm2["cutoffs"] = map[string]any{"vroku": map[string]any{devA: 1, devB: back.Seq}}
+	removal2 := w.mk("node-a", KindSpec, chaz, rm2, func(e *Entry) { e.Spec = idOfEntry(readdE) })
+	late := w.mk("node-b", KindLine, vroku, map[string]any{"text": "gen 3 again", "to": []any{}}, func(e *Entry) { e.Spec = idOfEntry(readdE) })
+	o = w.eval()
+	w.accepted(o, removal2)
+	w.accepted(o, back)
+	w.rejected(o, late, CodeAfterRemoval)
+	assertOrderIndependent(t, w, 25)
+}

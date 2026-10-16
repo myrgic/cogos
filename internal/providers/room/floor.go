@@ -91,9 +91,11 @@ func (c *ctx) defaultClaimant(l *cand, s *Spec) string {
 			continue
 		}
 		rid, _ := y.e.Body["in_reply_to"].(string)
-		// The target must itself be accepted: a rejected line cannot pick the
-		// default claimant by being replied to.
-		if t := c.byID[rid]; t != nil && c.accepted(t) && t.e.Kind == KindLine && t.e.Actor == l.e.Actor {
+		// The target must itself be accepted, and in L's causal past: a
+		// rejected line cannot pick the default claimant by being replied to,
+		// and a target outside the past is a read of something this verdict
+		// does not depend on (or one not yet evaluated).
+		if t := c.byID[rid]; t != nil && c.inPast(l, t) && c.accepted(t) && t.e.Kind == KindLine && t.e.Actor == l.e.Actor {
 			return y.e.Actor.Agent
 		}
 	}

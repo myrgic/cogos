@@ -85,9 +85,12 @@ func (c *ctx) admit(x *cand) res {
 		}
 		// A removal pins cutoffs; later writes on a cutoff log are refused
 		// even if the author cites the old spec and omits the removal.
+		// A re-add under the same member id lifts the cutoff only for entries
+		// citing a spec at least as new as the re-adding one (RFC section
+		// 6.9.1, member re-add).
 		for _, t := range c.chain {
 			if co, removed := t.Cutoffs[a.MemberID()]; removed {
-				if e.Seq > co[e.Log] {
+				if e.Seq > co[e.Log] && !c.readdedBy(t, a.MemberID(), s) {
 					return rej(CodeAfterRemoval)
 				}
 				before = true
@@ -135,6 +138,19 @@ func (c *ctx) admit(x *cand) res {
 		r.before = before
 	}
 	return r
+}
+
+// readdedBy reports whether the member removed by spec rm was re-added by a
+// later chain spec whose gen the cited spec s has reached.
+func (c *ctx) readdedBy(rm *Spec, member string, s *Spec) bool {
+	for _, t := range c.chain {
+		if t.Gen > rm.Gen {
+			if _, in := t.Members[member]; in {
+				return s.Gen >= t.Gen
+			}
+		}
+	}
+	return false
 }
 
 func (c *ctx) effectiveHeads() []string {

@@ -220,7 +220,18 @@ func (s *Spec) Validate(prev *Spec, history ...*Spec) error {
 			}
 		}
 	}
+	if prev == nil && (len(s.Cutoffs) > 0 || len(s.NodeCutoffs) > 0) {
+		return fmt.Errorf("a genesis carries no cutoffs or node_cutoffs")
+	}
 	if prev != nil {
+		// A cutoffs key names a member the previous spec has and this one removes.
+		for id := range s.Cutoffs {
+			_, was := prev.Members[id]
+			_, still := s.Members[id]
+			if !was || still {
+				return fmt.Errorf("cutoffs: %q is not a member this spec removes", id)
+			}
+		}
 		// A removal pins cutoffs on every log in the previous spec's nodes.
 		for id := range prev.Members {
 			if _, still := s.Members[id]; still {
