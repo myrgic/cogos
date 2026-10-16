@@ -19,15 +19,8 @@
 // schema/toolDefs caches. Before #422's fix this entrypoint skipped that
 // call entirely, exposing 14 of the full 21 tools; see newStdioMCPServer.
 //
-// Known gap, not fixed here: root's old --bridge flag (OpenClaw gateway
-// proxy) has no equivalent here — passing --bridge to this subcommand fails
-// flag parsing rather than proxying external tools. Confirmed currently
-// unreachable from any live caller: harness.GenerateMCPConfig (the only code
-// that spawns `cogos mcp serve --bridge`) requires a non-empty
-// InferenceRequest.OpenClawURL, and no production code path sets that field
-// (the OpenClaw integration is archived — myrgic/openclaw-plugin). Tracked
-// as a documented, currently-dormant gap rather than fixed in #422's scope,
-// which is transport tool-set parity, not OpenClaw proxying.
+// Note: root's old --bridge flag (external-tool proxy) has no equivalent
+// here; passing --bridge to this subcommand fails flag parsing.
 //
 // Lifecycle:
 //

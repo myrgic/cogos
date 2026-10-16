@@ -33,7 +33,7 @@ import (
 // are implemented.
 type ChannelDescriptor struct {
 	ID         string         `json:"id"`                 // "discord-text", "claude-code", etc.
-	Transport  string         `json:"transport"`          // "openclaw-gateway", "mcp", "http", "stdio"
+	Transport  string         `json:"transport"`          // "mcp", "http", "stdio"
 	Input      []ModalityType `json:"input"`              // modalities this channel can receive
 	Output     []ModalityType `json:"output"`             // modalities this channel can deliver
 	SessionKey string         `json:"session_key"`        // pattern for session binding, e.g. "discord:{guild}:{channel}:{user}"

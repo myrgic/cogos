@@ -124,8 +124,6 @@ Consequences:
 |--------|------|-----|
 | OpenAI-compatible client ↔ CogOS gateway | Channel | External client sustains one side; CogOS sustains the other; identity/capability layer is the gate |
 | Clog Code REPL | Channel | User attends; TTY is the session; close TTY, channel collapses |
-| OpenClaw Discord bot | Channel *provider* | Discord guilds/DMs are the channels; the provider maintains local attendance |
-| OpenClaw gateway chat | Channel | Named chat inside the gateway's transport; user attends via browser |
 | `watch` TUI (any reconciler) | Channel | User-opened projection onto the bus; closes with the user's session |
 | Memory-write event | Bus | Fact; no peer; many subscribers |
 | `agent.heartbeat` | Bus | Sync primitive for sibling loops |

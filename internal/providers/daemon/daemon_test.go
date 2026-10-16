@@ -1,9 +1,9 @@
-// daemon_test.go — verifies that importing this package registers all 12
+// daemon_test.go — verifies that importing this package registers all 8
 // expected Reconcilable providers with pkg/reconcile.
 //
 // This is the canonical test for verification gate 3: "after the
 // engine.Main-equivalent boot path runs, reconcile.ListProviders() returns
-// the 12 expected names (including identity — Wave 6b, and mlx-inference)."
+// the 8 expected names (including identity — Wave 6b, and mlx-inference)."
 //
 // We don't start a server or invoke engine.Main() — we only confirm that
 // the package's init() side-effect wired the providers. This is sufficient
@@ -33,15 +33,11 @@ var expectedProviders = []string{
 	"eval",
 	"identity",
 	"mlx-inference",
-	"mcp-tools",
-	"openclaw-agents",
-	"openclaw-cron",
-	"openclaw-gateway",
 	"pin",
 	"service",
 }
 
-func TestDaemonInit_RegistersAll12Providers(t *testing.T) {
+func TestDaemonInit_RegistersAll8Providers(t *testing.T) {
 	got := reconcile.ListProviders()
 	sort.Strings(got)
 
@@ -85,8 +81,7 @@ func TestDaemonProviders_HealthDoesNotPanic(t *testing.T) {
 			continue
 		}
 		// Health() must not panic. We don't assert on the return value
-		// because it depends on filesystem state (workspace presence,
-		// ~/.openclaw/openclaw.json, etc.) which varies by environment.
+		// because it depends on filesystem state (workspace presence) which varies by environment.
 		func() {
 			defer func() {
 				if r := recover(); r != nil {

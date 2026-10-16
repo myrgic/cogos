@@ -138,9 +138,9 @@ func (s KernelHealthSnapshot) AllGreen() bool {
 // escalation on every tick for as long as it stayed that way. Measured over
 // a 43-day kernel log: 5,515 of 6,221 escalations (88.6%) were
 // degraded_health, nearly all attributable to three permanently-Suspended
-// providers (margin-bridge with no config yaml, mcp-tools with
-// OPENCLAW_URL unset, mlx-inference with nothing declared) that self-heal
-// was already correctly ignoring. Use HasActionableDegradation() for
+// providers (margin-bridge with no config yaml, mcp-tools (since
+// removed) with its bridge URL unset, mlx-inference with nothing declared)
+// that self-heal was already correctly ignoring. Use HasActionableDegradation() for
 // escalation decisions; keep AllGreen() for reporting.
 func (s KernelHealthSnapshot) HasActionableDegradation() bool {
 	return s.Counts.Degraded > 0 || s.Counts.Missing > 0

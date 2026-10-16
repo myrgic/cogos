@@ -69,14 +69,14 @@ func TestTailerManagerRunsMultipleTailers(t *testing.T) {
 	}
 
 	if err := manager.Register(&stubStreamTailer{
-		name: "openclaw",
+		name: "headless",
 		blocks: []CogBlock{{
-			ID:        "openclaw-1",
+			ID:        "headless-1",
 			Kind:      BlockImport,
 			Timestamp: time.Now().UTC(),
 		}},
-	}, "/tmp/openclaw.jsonl"); err != nil {
-		t.Fatalf("Register openclaw: %v", err)
+	}, "/tmp/headless.jsonl"); err != nil {
+		t.Fatalf("Register headless: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -109,14 +109,14 @@ func TestTailerManagerRunsMultipleTailers(t *testing.T) {
 	if stats["claude-code"].EventsIngested != 1 {
 		t.Fatalf("claude-code events = %d; want 1", stats["claude-code"].EventsIngested)
 	}
-	if stats["openclaw"].EventsIngested != 1 {
-		t.Fatalf("openclaw events = %d; want 1", stats["openclaw"].EventsIngested)
+	if stats["headless"].EventsIngested != 1 {
+		t.Fatalf("headless events = %d; want 1", stats["headless"].EventsIngested)
 	}
 	if stats["claude-code"].LastEventTime.IsZero() {
 		t.Fatal("claude-code last event time should be set")
 	}
-	if stats["openclaw"].LastEventTime.IsZero() {
-		t.Fatal("openclaw last event time should be set")
+	if stats["headless"].LastEventTime.IsZero() {
+		t.Fatal("headless last event time should be set")
 	}
 }
 

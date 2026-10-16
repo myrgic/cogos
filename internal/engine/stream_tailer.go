@@ -18,7 +18,7 @@ type StreamTailer interface {
 	// It sends normalized CogBlocks on the output channel.
 	// It respects context cancellation for graceful shutdown.
 	Tail(ctx context.Context, path string, out chan<- CogBlock) error
-	// Name returns the adapter name (e.g., "claude-code", "openclaw").
+	// Name returns the adapter name (e.g., "claude-code").
 	Name() string
 }
 

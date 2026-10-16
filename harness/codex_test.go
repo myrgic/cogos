@@ -107,33 +107,6 @@ func TestBuildCodexArgs_ResumeUsesSessionID(t *testing.T) {
 	}
 }
 
-func TestBuildCodexArgs_WithMCPBridge(t *testing.T) {
-	kernel := &mockKernel{workspaceRoot: "/tmp/test-ws"}
-	req := &InferenceRequest{
-		Prompt:        "Use tools",
-		Model:         "codex",
-		OpenClawURL:   "http://localhost:18789",
-		OpenClawToken: "secret",
-		SessionID:     "session-123",
-	}
-
-	args, err := BuildCodexArgs(req, "", kernel)
-	if err != nil {
-		t.Fatalf("BuildCodexArgs returned error: %v", err)
-	}
-	joined := strings.Join(args, " ")
-
-	if !strings.Contains(joined, "mcp_servers.cogos_bridge.command=") {
-		t.Fatalf("expected MCP bridge command override, got %v", args)
-	}
-	if !strings.Contains(joined, "mcp_servers.cogos_bridge.env=") {
-		t.Fatalf("expected MCP bridge env override, got %v", args)
-	}
-	if !strings.Contains(joined, "session-123") {
-		t.Fatalf("expected session id to be forwarded in MCP env, got %v", args)
-	}
-}
-
 func TestParseCodexOutputJSONL(t *testing.T) {
 	output := []byte(strings.Join([]string{
 		`{"type":"thread.started","thread_id":"thread-123"}`,
