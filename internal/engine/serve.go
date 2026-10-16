@@ -226,7 +226,7 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 		// is refused; the default (no class) path is unaffected.
 		slog.Error("serve: managedSessions.runtimeClasses invalid; named runtime classes disabled", "err", err)
 	}
-	s.managedSessions = NewHermesACPDriver(HermesACPDriverConfig{Classes: classes})
+	s.managedSessions = NewHermesACPDriver(HermesACPDriverConfig{Classes: classes, RecordDir: filepath.Join(cfg.WorkspaceRoot, ".cog", "run", "managed-sessions")})
 
 	mux := http.NewServeMux()
 	s.routeH(mux, "GET /", dashboard.Handler())

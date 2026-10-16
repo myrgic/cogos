@@ -45,6 +45,13 @@ func classTestConfig(t *testing.T) (*ManagedSessionsConfig, string) {
 
 func classDriver(t *testing.T) (*HermesACPDriver, string) {
 	t.Helper()
+	return classDriverAt(t, t.TempDir())
+}
+
+// classDriverAt builds a class driver over recordDir; two drivers sharing one
+// recordDir model a kernel restart (fresh in-memory map, same durable records).
+func classDriverAt(t *testing.T, recordDir string) (*HermesACPDriver, string) {
+	t.Helper()
 	cfg, out := classTestConfig(t)
 	reg, err := NewRuntimeClassRegistry(cfg)
 	if err != nil {
@@ -52,6 +59,7 @@ func classDriver(t *testing.T) (*HermesACPDriver, string) {
 	}
 	d := fakeHermesDriver(t, func(c *HermesACPDriverConfig) {
 		c.Classes = reg
+		c.RecordDir = recordDir
 		c.Env = append(os.Environ(), acpfake.EnvVar+"=1", "KEEP_ME=yes", "KEEP_DROPPED=no", "SECRET_TOKEN=leak", "HERMES_YOLO_MODE=1")
 	})
 	return d, out
@@ -499,5 +507,92 @@ func TestRuntimeClass_LoadFollowerChecksAuthority(t *testing.T) {
 	}
 	if r := <-good; r.err != nil || r.sess != s {
 		t.Fatalf("authorized follower: sess=%v err=%v", r.sess, r.err)
+	}
+}
+
+// coldDriver creates a chat-class session on one driver, then returns a second
+// driver over the same records (a restart) plus the session id.
+func coldDriver(t *testing.T) (*HermesACPDriver, string, string) {
+	t.Helper()
+	rec := t.TempDir()
+	d1, _ := classDriverAt(t, rec)
+	s, err := d1.Create(context.Background(), HermesACPOpts{Class: "chat", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := s.ID()
+	d1.Close() // kernel shutdown: the durable record must survive it
+	d2, out := classDriverAt(t, rec)
+	if d2.Get(id) != nil {
+		t.Fatal("restarted driver must not hold the session in memory")
+	}
+	return d2, out, id
+}
+
+// Cold load: a caller scoped to another class cannot adopt a classed session
+// just because the driver forgot it.
+func TestRuntimeClass_ColdResumeByOtherClassScopeRefused(t *testing.T) {
+	d, _, id := coldDriver(t)
+	for _, class := range []string{"", "collab"} {
+		_, err := d.Create(context.Background(), HermesACPOpts{Load: id, Class: class, AllowClass: func(c string) bool { return c == "collab" }})
+		if !errors.Is(err, ErrManagedSessionForbidden) {
+			t.Fatalf("class %q: cold resume by collab-scoped caller: err = %v, want forbidden", class, err)
+		}
+	}
+	if d.Get(id) != nil {
+		t.Fatal("refused cold resume must not register a session")
+	}
+}
+
+// Cold load: a class that differs from the record is refused. A session with
+// no record is the legacy default class, so naming a class on it is a mismatch.
+func TestRuntimeClass_ColdResumeMismatchedClassRefused(t *testing.T) {
+	d, _, id := coldDriver(t)
+	_, err := d.Create(context.Background(), HermesACPOpts{Load: id, Class: "collab"})
+	if !errors.Is(err, ErrManagedSessionForbidden) {
+		t.Fatalf("mismatched class: err = %v, want forbidden", err)
+	}
+	// A legacy session (no record) is the default class: naming a class is a mismatch.
+	_, err = d.Create(context.Background(), HermesACPOpts{Load: "unrecorded-1", Class: "chat"})
+	if !errors.Is(err, ErrManagedSessionForbidden) {
+		t.Fatalf("class on unrecorded session: err = %v, want forbidden", err)
+	}
+}
+
+// Cold load: an authorized resume keeps the recorded class and its argv/env,
+// whether the request omits the class or restates it; never the default env.
+func TestRuntimeClass_ColdResumeAuthorizedKeepsRecordedClass(t *testing.T) {
+	for _, supplied := range []string{"", "chat"} {
+		d, out, id := coldDriver(t)
+		for _, f := range []string{"chat.argv", "chat.env"} {
+			if err := os.Remove(filepath.Join(out, f)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+		}
+		s, err := d.Create(context.Background(), HermesACPOpts{Load: id, Class: supplied, AllowClass: func(c string) bool { return c == "chat" }})
+		if err != nil {
+			t.Fatalf("supplied %q: authorized cold resume: %v", supplied, err)
+		}
+		if got := s.Info().Class; got != "chat" {
+			t.Fatalf("supplied %q: class = %q, want chat", supplied, got)
+		}
+		if _, err := os.Stat(filepath.Join(out, "chat.argv")); err != nil {
+			t.Fatalf("supplied %q: resumed process did not run the chat class argv: %v", supplied, err)
+		}
+		if got := readFile(t, filepath.Join(out, "chat.env")); strings.Contains(got, "SECRET_TOKEN") {
+			t.Fatalf("supplied %q: chat env leaked: %s", supplied, got)
+		}
+		d.Close()
+	}
+}
+
+// Delete forgets the record (the id is then a legacy default session).
+func TestRuntimeClass_DeleteRemovesRecord(t *testing.T) {
+	d, _, id := coldDriver(t)
+	if err := d.Delete(id); err != nil {
+		t.Fatal(err)
+	}
+	if rec, err := d.loadRecord(id); err != nil || rec.Class != "" {
+		t.Fatalf("record after delete = %+v, %v", rec, err)
 	}
 }

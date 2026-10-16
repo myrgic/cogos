@@ -93,6 +93,11 @@ type HermesACPDriverConfig struct {
 	// Classes is the runtime class registry (kernel.yaml managedSessions).
 	// nil = no named classes; every named class is refused as unknown.
 	Classes *RuntimeClassRegistry
+	// RecordDir persists each session's runtime class (managed_session_records.go)
+	// so a cold resume after a restart checks the recorded class, not the
+	// request's. "" = no durable records: every cold resume reads as the
+	// legacy default class.
+	RecordDir string
 	// RingSize bounds each session's replay buffer.
 	RingSize int
 	// PermissionTimeout is how long a permission request waits in the kernel
@@ -776,6 +781,25 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 		}
 		opts.Class = existing.class
 	}
+	if d.sessions[opts.Load] == nil && d.loads[opts.Load] == nil {
+		// Cold load: the id is not resident (kernel restart). The recorded
+		// class is the ground truth: the request may not change it, and
+		// omitting it inherits the record (never a downgrade to the default).
+		rec, err := d.loadRecord(opts.Load)
+		if err != nil {
+			d.mu.Unlock()
+			return nil, err
+		}
+		if opts.Class != "" && opts.Class != rec.Class {
+			d.mu.Unlock()
+			return nil, fmt.Errorf("%w: session %s was created under class %q; a resume cannot change class", ErrManagedSessionForbidden, opts.Load, rec.Class)
+		}
+		opts.Class = rec.Class
+		if opts.AllowClass != nil && !opts.AllowClass(rec.Class) {
+			d.mu.Unlock()
+			return nil, fmt.Errorf("%w: caller may not attach a session of runtime class %q", ErrManagedSessionForbidden, rec.Class)
+		}
+	}
 	if claim := d.loads[opts.Load]; claim != nil { // a load of this id is in flight: share it
 		d.mu.Unlock()
 		select {
@@ -938,6 +962,10 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		return nil, fmt.Errorf("hermes-acp: create session: agent process exited during session setup")
 	}
 
+	if err := d.saveRecord(managedSessionRecord{SessionID: sid, Class: sess.class, CreatedAt: sess.createdAt}); err != nil && sess.class != "" {
+		d.detach(sess)
+		return nil, fmt.Errorf("hermes-acp: persist session class: %w", err)
+	}
 	d.mu.Lock()
 	replaced := d.sessions[sid]
 	d.sessions[sid] = sess
@@ -977,6 +1005,13 @@ func (d *HermesACPDriver) List() []ManagedSessionInfo {
 // removes it from the registry, and stops its process once no session uses
 // it. Idempotent (ADR-093 §6): an unknown id is not an error.
 func (d *HermesACPDriver) Delete(id string) error {
+	d.removeRecord(id)
+	return d.drop(id)
+}
+
+// drop unregisters and detaches a session but keeps its durable record (Close
+// at kernel shutdown must not forget which class a session belongs to).
+func (d *HermesACPDriver) drop(id string) error {
 	d.mu.Lock()
 	s := d.sessions[id]
 	delete(d.sessions, id)
@@ -1033,6 +1068,6 @@ func (d *HermesACPDriver) Close() {
 	}
 	d.mu.Unlock()
 	for _, id := range ids {
-		_ = d.Delete(id)
+		_ = d.drop(id)
 	}
 }
