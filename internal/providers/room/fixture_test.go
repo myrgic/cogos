@@ -27,7 +27,7 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	testNodeSet = map[string]*node{}
-	for _, n := range []string{"darkstar", "eclipse", "rogue", "phone"} {
+	for _, n := range []string{"node-a", "node-b", "rogue", "phone"} {
 		d := filepath.Join(dir, n)
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			panic(err)
@@ -51,7 +51,7 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// world is a small constellation: darkstar (owner chaz, agent cog), eclipse
+// world is a small constellation: node-a (owner chaz, agent cog), node-b
 // (collaborator vroku, guest, agent sage). rogue and phone hold keys but are
 // not in spec.nodes unless a test adds them.
 type world struct {
@@ -71,18 +71,18 @@ func defaultGenesisBody() map[string]any {
 		"gen":   1,
 		"owner": "chaz",
 		"nodes": map[string]any{
-			"darkstar": testNodeSet["darkstar"].dev,
-			"eclipse":  testNodeSet["eclipse"].dev,
+			"node-a": testNodeSet["node-a"].dev,
+			"node-b": testNodeSet["node-b"].dev,
 		},
 		"members": map[string]any{
-			"chaz":         map[string]any{"type": "person", "role": "owner", "homes": []any{"darkstar"}},
-			"vroku":        map[string]any{"type": "person", "role": "collaborator", "homes": []any{"eclipse"}},
-			"guest1":       map[string]any{"type": "person", "role": "guest", "homes": []any{"eclipse"}},
-			"cog@darkstar": map[string]any{"type": "agent", "role": "agent", "node": "darkstar", "class": "full"},
-			"sage@eclipse": map[string]any{"type": "agent", "role": "agent", "node": "eclipse", "class": "collab"},
+			"chaz":        map[string]any{"type": "person", "role": "owner", "homes": []any{"node-a"}},
+			"vroku":       map[string]any{"type": "person", "role": "collaborator", "homes": []any{"node-b"}},
+			"guest1":      map[string]any{"type": "person", "role": "guest", "homes": []any{"node-b"}},
+			"cog@node-a":  map[string]any{"type": "agent", "role": "agent", "node": "node-a", "class": "full"},
+			"sage@node-b": map[string]any{"type": "agent", "role": "agent", "node": "node-b", "class": "collab"},
 		},
-		"dispatch": map[string]any{"node": "darkstar"},
-		"floor":    map[string]any{"priority": []any{"cog@darkstar", "sage@eclipse"}},
+		"dispatch": map[string]any{"node": "node-a"},
+		"floor":    map[string]any{"priority": []any{"cog@node-a", "sage@node-b"}},
 		"scope":    map[string]any{"pipelines": []any{"review"}},
 	}
 }
@@ -94,7 +94,7 @@ func newWorld(t *testing.T, mutate func(body map[string]any)) *world {
 	if mutate != nil {
 		mutate(body)
 	}
-	d := testNodeSet["darkstar"]
+	d := testNodeSet["node-a"]
 	w.binding = StubBinding{"chaz": {d.dev}}
 	app := NewAppender("", d.dev, d.key)
 	g, err := app.Genesis(Actor{Person: "chaz"}, body, w.hlc())
@@ -102,7 +102,7 @@ func newWorld(t *testing.T, mutate func(body map[string]any)) *world {
 		t.Fatal(err)
 	}
 	w.g, w.room, w.spec = g, app.Room, app.Room
-	w.apps["darkstar"] = app
+	w.apps["node-a"] = app
 	w.all = []*Entry{g}
 	return w
 }
@@ -243,6 +243,6 @@ var (
 	chaz  = Actor{Person: "chaz"}
 	vroku = Actor{Person: "vroku"}
 	guest = Actor{Person: "guest1"}
-	cog   = Actor{Agent: "cog@darkstar"}
-	sage  = Actor{Agent: "sage@eclipse"}
+	cog   = Actor{Agent: "cog@node-a"}
+	sage  = Actor{Agent: "sage@node-b"}
 )

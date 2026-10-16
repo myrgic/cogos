@@ -79,7 +79,7 @@ func (a Actor) MemberID() string {
 }
 
 // String is the form used in kernel events (R10c): person:vroku,
-// agent:cog@eclipse, node:eclipse.
+// agent:cog@node-b, node:node-b.
 func (a Actor) String() string {
 	switch {
 	case a.Person != "":

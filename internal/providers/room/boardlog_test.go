@@ -9,7 +9,7 @@ import (
 
 func TestBoardLogRoundTripAndGolden(t *testing.T) {
 	w := newWorld(t, nil)
-	l := w.line("darkstar", chaz, "hi")
+	l := w.line("node-a", chaz, "hi")
 	raw, err := json.Marshal(l)
 	if err != nil {
 		t.Fatal(err)
@@ -55,8 +55,8 @@ func TestBoardLogRoundTripAndGolden(t *testing.T) {
 
 func TestBoardLogSignatures(t *testing.T) {
 	w := newWorld(t, nil)
-	good := w.line("darkstar", chaz, "good")
-	forged := w.line("darkstar", chaz, "forged")
+	good := w.line("node-a", chaz, "good")
+	forged := w.line("node-a", chaz, "forged")
 	forged.Body["text"] = "changed after signing"
 
 	// Bad signature.
@@ -72,7 +72,7 @@ func TestBoardLogSignatures(t *testing.T) {
 	// duplicate, never equivocation.
 	hs := flipS(good)
 	resigned := *good
-	if err := resigned.Sign(testNodeSet["darkstar"].key); err != nil {
+	if err := resigned.Sign(testNodeSet["node-a"].key); err != nil {
 		t.Fatal(err)
 	}
 	if resigned.Sig == good.Sig {
@@ -120,15 +120,15 @@ func TestBoardLogSignatures(t *testing.T) {
 
 func TestBoardLogNonCanonicalLog(t *testing.T) {
 	w := newWorld(t, nil)
-	l := w.line("darkstar", chaz, "x")
+	l := w.line("node-a", chaz, "x")
 	lower := *l
 	lower.Log = strings.ToLower(l.Log)
-	if err := lower.Sign(testNodeSet["darkstar"].key); err != nil {
+	if err := lower.Sign(testNodeSet["node-a"].key); err != nil {
 		t.Fatal(err)
 	}
 	nodash := *l
 	nodash.Log = strings.ReplaceAll(l.Log, "-", "")
-	if err := nodash.Sign(testNodeSet["darkstar"].key); err != nil {
+	if err := nodash.Sign(testNodeSet["node-a"].key); err != nil {
 		t.Fatal(err)
 	}
 	o := w.eval(w.g, &lower, &nodash)
@@ -141,9 +141,9 @@ func TestBoardLogNonCanonicalLog(t *testing.T) {
 
 func TestBoardLogSeqGap(t *testing.T) {
 	w := newWorld(t, nil)
-	e2 := w.line("darkstar", chaz, "two")
-	e3 := w.line("darkstar", chaz, "three")
-	e4 := w.line("darkstar", chaz, "four")
+	e2 := w.line("node-a", chaz, "two")
+	e3 := w.line("node-a", chaz, "three")
+	e4 := w.line("node-a", chaz, "four")
 
 	o := w.eval(w.g, e3, e4)
 	w.expect(o, e3, StatusHeld, CodeSeqGap)
@@ -155,7 +155,7 @@ func TestBoardLogSeqGap(t *testing.T) {
 	w.accepted(o, e4)
 
 	// A wrong prev at an existing predecessor is a rejection, not a hold.
-	bad := w.mk("darkstar", KindLine, chaz, map[string]any{"text": "x"}, func(e *Entry) {
+	bad := w.mk("node-a", KindLine, chaz, map[string]any{"text": "x"}, func(e *Entry) {
 		p := strings.Repeat("0", 64)
 		e.Prev = &p
 	})
@@ -165,12 +165,12 @@ func TestBoardLogSeqGap(t *testing.T) {
 
 func TestBoardLogDeps(t *testing.T) {
 	w := newWorld(t, nil)
-	x := w.line("eclipse", vroku, "from eclipse")
+	x := w.line("node-b", vroku, "from node-b")
 	w.sync()
-	d1 := w.line("darkstar", chaz, "saw it")
-	// d2 drops eclipse from its deps: deps regress along darkstar's log.
-	d2 := w.mk("darkstar", KindLine, chaz, map[string]any{"text": "regress"}, func(e *Entry) {
-		delete(e.Deps, testNodeSet["eclipse"].dev)
+	d1 := w.line("node-a", chaz, "saw it")
+	// d2 drops node-b from its deps: deps regress along node-a's log.
+	d2 := w.mk("node-a", KindLine, chaz, map[string]any{"text": "regress"}, func(e *Entry) {
+		delete(e.Deps, testNodeSet["node-b"].dev)
 	})
 	o := w.eval(w.g, x, d1, d2)
 	w.accepted(o, x)
@@ -183,10 +183,10 @@ func TestBoardLogDeps(t *testing.T) {
 
 	// A dep that names a held seq with a different id is bad.
 	w2 := newWorld(t, nil)
-	y := w2.line("eclipse", vroku, "y")
+	y := w2.line("node-b", vroku, "y")
 	w2.sync()
-	z := w2.mk("darkstar", KindLine, chaz, map[string]any{"text": "z"}, func(e *Entry) {
-		k := testNodeSet["eclipse"].dev
+	z := w2.mk("node-a", KindLine, chaz, map[string]any{"text": "z"}, func(e *Entry) {
+		k := testNodeSet["node-b"].dev
 		e.Deps[k] = Dep{Seq: e.Deps[k].Seq, ID: strings.Repeat("9", 64)}
 	})
 	o = w2.eval(w2.g, y, z)
@@ -194,7 +194,7 @@ func TestBoardLogDeps(t *testing.T) {
 
 	// A dep may not name the author's own future.
 	w3 := newWorld(t, nil)
-	f := w3.mk("darkstar", KindLine, chaz, map[string]any{"text": "f"}, func(e *Entry) {
+	f := w3.mk("node-a", KindLine, chaz, map[string]any{"text": "f"}, func(e *Entry) {
 		e.Deps[e.Log] = Dep{Seq: e.Seq, ID: strings.Repeat("1", 64)}
 	})
 	o = w3.eval(w3.g, f)
@@ -203,12 +203,12 @@ func TestBoardLogDeps(t *testing.T) {
 
 func TestBoardLogEquivocation(t *testing.T) {
 	w := newWorld(t, nil)
-	a := w.line("darkstar", chaz, "one")
-	next := w.line("darkstar", chaz, "after")
+	a := w.line("node-a", chaz, "one")
+	next := w.line("node-a", chaz, "after")
 	// A second entry at a's (log, seq) with a different body, validly signed.
 	b := *a
 	b.Body = map[string]any{"text": "two", "to": []any{}}
-	if err := b.Sign(testNodeSet["darkstar"].key); err != nil {
+	if err := b.Sign(testNodeSet["node-a"].key); err != nil {
 		t.Fatal(err)
 	}
 
@@ -235,22 +235,22 @@ func TestBoardLogEquivocation(t *testing.T) {
 			t.Fatalf("%s: equivocation event missing room/actor: %+v", name, found)
 		}
 	}
-	// The genesis log is not touched on the other node: eclipse still works.
+	// The genesis log is not touched on the other node: node-b still works.
 	w.sync()
 }
 
 // The outcome is a function of the set, not of arrival order.
 func TestBoardLogOrderIndependent(t *testing.T) {
 	w := newWorld(t, nil)
-	_, item := w.createItem("darkstar", chaz, nil)
+	_, item := w.createItem("node-a", chaz, nil)
 	w.sync()
-	w.mk("eclipse", KindItemSet, vroku, map[string]any{"item": item, "field": "state", "value": "done"}) // denied
-	w.mk("eclipse", KindItemSet, vroku, map[string]any{"item": item, "field": "title", "value": "t"})
-	w.line("eclipse", guest, "hello")
+	w.mk("node-b", KindItemSet, vroku, map[string]any{"item": item, "field": "state", "value": "done"}) // denied
+	w.mk("node-b", KindItemSet, vroku, map[string]any{"item": item, "field": "title", "value": "t"})
+	w.line("node-b", guest, "hello")
 	w.sync()
-	w.line("darkstar", chaz, "a")
-	w.mk("darkstar", KindApprovalAnswer, chaz, map[string]any{"request": "r", "session": "s"})
-	w.mk("darkstar", KindItemSet, vroku, map[string]any{"item": item, "field": "x", "value": 1}) // not homed
+	w.line("node-a", chaz, "a")
+	w.mk("node-a", KindApprovalAnswer, chaz, map[string]any{"request": "r", "session": "s"})
+	w.mk("node-a", KindItemSet, vroku, map[string]any{"item": item, "field": "x", "value": 1}) // not homed
 
 	base := w.eval()
 	want := verdictMap(base)
@@ -291,7 +291,7 @@ func verdictMap(o *Outcome) map[string]string {
 
 func TestBoardLogEventsCarryRoomAndActor(t *testing.T) {
 	w := newWorld(t, nil)
-	bad := w.mk("eclipse", KindLine, chaz, map[string]any{"text": "chaz from eclipse"})
+	bad := w.mk("node-b", KindLine, chaz, map[string]any{"text": "chaz from node-b"})
 	o := w.eval(w.g, bad)
 	var n int
 	for _, ev := range o.Events {
