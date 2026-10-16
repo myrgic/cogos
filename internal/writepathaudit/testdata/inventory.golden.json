@@ -207,7 +207,7 @@
     },
     {
       "file": "internal/engine/bep_provider.go",
-      "line": 111,
+      "line": 118,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "(*BEPProvider).Start",
@@ -219,7 +219,7 @@
     },
     {
       "file": "internal/engine/bep_provider.go",
-      "line": 456,
+      "line": 512,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "(*BEPProvider).InitPollingForTest",
@@ -1575,7 +1575,7 @@
     },
     {
       "file": "internal/engine/serve.go",
-      "line": 1414,
+      "line": 1420,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",

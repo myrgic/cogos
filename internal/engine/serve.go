@@ -67,8 +67,12 @@ type Server struct {
 	serviceSupervisor ServiceSupervisor // nil until SetServiceSupervisor; defaults to ObserverSupervisor
 	srv               *http.Server
 	// reaperStop ends the session reaper started by Start (nil until then).
-	reaperMu        sync.Mutex
-	reaperStop      context.CancelFunc
+	reaperMu   sync.Mutex
+	reaperStop context.CancelFunc
+	// Stage UI listener (serve_stage_ui.go); nil unless stage_ui.addr is set.
+	stageUIMu       sync.Mutex
+	stageUISrv      *http.Server
+	stageUIAddr     string
 	debug           debugStore      // captures last request pipeline state
 	attentionLog    *attentionLog   // per-server log (avoids global write race)
 	agentController AgentController // nil until SetAgentController is called
@@ -558,12 +562,14 @@ func (s *Server) Start() error {
 // listener first, and calling srv.Serve directly skipped the reaper.
 func (s *Server) Serve(ln net.Listener) error {
 	s.startBackground()
+	s.startStageUI()
 	return s.srv.Serve(ln)
 }
 
 // Shutdown gracefully drains the server and stops its background reaper.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.stopBackground()
+	s.stopStageUI()
 	if s.managedSessions != nil {
 		s.managedSessions.Close()
 	}

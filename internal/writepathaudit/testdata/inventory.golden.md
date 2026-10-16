@@ -32,8 +32,8 @@ Total sites: 241  (cog: 100, home: 2, elsewhere: 13, unanchored: 85, dynamic: 41
 | `{root}/.cog/observatory/quarantine/<call:sanitizeSourceName>/quarantine.jsonl` | (*QuarantineWriter).WriteRecord (`os.OpenFile`) | internal/conversations/quarantine.go:158 | internal:conversations |
 | `<WorkspaceRoot>/.cog/mem/episodic/experiments` | SaveResults (`os.MkdirAll`) | internal/engine/benchmark.go:201 | internal:engine |
 | `<WorkspaceRoot>/.cog/mem/episodic/experiments/<call:fmt.Sprintf>` | SaveResults (`os.WriteFile`) | internal/engine/benchmark.go:249 | internal:engine |
-| `{root}/.cog/bin/agents/definitions` | (*BEPProvider).Start (`os.MkdirAll`) | internal/engine/bep_provider.go:111 | internal:engine |
-| `{root}/.cog/bin/agents/definitions` | (*BEPProvider).InitPollingForTest (`os.MkdirAll`) | internal/engine/bep_provider.go:456 | internal:engine |
+| `{root}/.cog/bin/agents/definitions` | (*BEPProvider).Start (`os.MkdirAll`) | internal/engine/bep_provider.go:118 | internal:engine |
+| `{root}/.cog/bin/agents/definitions` | (*BEPProvider).InitPollingForTest (`os.MkdirAll`) | internal/engine/bep_provider.go:512 | internal:engine |
 | `{root}/.cog/bin/agents/definitions` | (*BEPProvider).ReceiveAgentCRD (`os.MkdirAll`) | internal/engine/bep_receiver.go:87 | internal:engine |
 | `{root}/.cog/bin/agents/definitions/{filename}.tmp` | (*BEPProvider).ReceiveAgentCRD (`os.WriteFile`) | internal/engine/bep_receiver.go:97 | internal:engine |
 | `{root}/.cog/bin/agents/definitions/{filename}` | (*BEPProvider).ReceiveAgentCRD (`os.Rename`) | internal/engine/bep_receiver.go:101 | internal:engine |
@@ -141,7 +141,7 @@ Total sites: 241  (cog: 100, home: 2, elsewhere: 13, unanchored: 85, dynamic: 41
 | `<TempDir>` | (*modalityProxy).playAudio (`os.CreateTemp`) | internal/engine/mcp_modality_proxy.go:853 | internal:engine |
 | `<TempDir>` | streamFetch (`os.CreateTemp`) | internal/engine/remote_hydrate_spike.go:195 | internal:engine |
 | `<TempDir>` | streamFetch (`io.Copy`) | internal/engine/remote_hydrate_spike.go:204 | internal:engine |
-| `<TempDir>` | (*Server).handleChat (`os.MkdirTemp`) | internal/engine/serve.go:1414 | internal:engine |
+| `<TempDir>` | (*Server).handleChat (`os.MkdirTemp`) | internal/engine/serve.go:1420 | internal:engine |
 | `<TempDir>` | (*Server).handleBlockPut (`os.CreateTemp`) | internal/engine/serve_blocks.go:184 | internal:engine |
 | `<TempDir>` | (*Server).handleBlockPut (`io.Copy`) | internal/engine/serve_blocks.go:195 | internal:engine |
 | `<TempDir>` | writeTempMCPConfig (`os.CreateTemp`) | internal/engine/serve_claude_code.go:460 | internal:engine |
