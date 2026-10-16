@@ -536,6 +536,25 @@ func TestRuntimeClass_LoadFollowerCannotChangeClass(t *testing.T) {
 	}
 }
 
+// A resume of a live session may not name another class either.
+func TestRuntimeClass_LiveResumeCannotChangeClass(t *testing.T) {
+	d, _ := classDriver(t)
+	s, err := d.Create(context.Background(), HermesACPOpts{Class: "chat", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	both := func(c string) bool { return c == "chat" || c == "collab" }
+	if _, err := d.Create(context.Background(), HermesACPOpts{Load: s.ID(), Class: "collab", AllowClass: both}); !errors.Is(err, ErrManagedSessionForbidden) {
+		t.Fatalf("live resume naming another class: err = %v, want forbidden", err)
+	}
+	for _, class := range []string{"", "chat"} {
+		got, err := d.Create(context.Background(), HermesACPOpts{Load: s.ID(), Class: class, AllowClass: both})
+		if err != nil || got != s {
+			t.Fatalf("live resume class=%q: sess=%v err=%v, want the same session", class, got, err)
+		}
+	}
+}
+
 // Env.Set replaces an inherited value of the same name; one entry per key.
 func TestBuildClassEnv_SetOverridesInherited(t *testing.T) {
 	var c RuntimeClass

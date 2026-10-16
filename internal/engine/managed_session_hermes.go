@@ -771,6 +771,11 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 			if opts.AllowClass != nil && !opts.AllowClass(existing.class) {
 				return nil, fmt.Errorf("%w: caller may not attach this session", ErrManagedSessionForbidden)
 			}
+			// Every resume path (live, crashed, cold, shared load) refuses a
+			// request that names a class other than the session's own.
+			if opts.Class != "" && opts.Class != existing.class {
+				return nil, fmt.Errorf("%w: a resume cannot change a session's class", ErrManagedSessionForbidden)
+			}
 			return existing, nil
 		}
 		// Registered but not running (e.g. Crashed): the resume keeps the
