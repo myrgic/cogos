@@ -45,8 +45,8 @@ func (s *Server) registerEventBusRoutes(mux *http.ServeMux) {
 // but with observability-flavored semantics: `since` accepts durations
 // ("5m"), verify_chain is always off (use /v1/ledger for audit).
 //
-//	GET /v1/events?session_id=…&event_type=…&source=…&since=…&until=…
-//	                &limit=…&order=…
+//	GET /v1/events?session_id=…&event_type=…&source=…&room=…&actor=…&since=…
+//	                &until=…&limit=…&order=…
 //	200 → { count, events, truncated, next_before? }
 //	400 → bad query
 //	404 → session_id specified but no events on disk
@@ -61,6 +61,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		SessionID:        q.Get("session_id"),
 		EventTypePattern: q.Get("event_type"),
 		Source:           q.Get("source"),
+		Room:             q.Get("room"),
+		Actor:            q.Get("actor"),
 		Order:            q.Get("order"),
 	}
 

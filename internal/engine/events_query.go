@@ -24,6 +24,8 @@ type EventQuery struct {
 	SessionID        string
 	EventTypePattern string
 	Source           string
+	Room             string
+	Actor            string
 	Since            time.Time
 	Until            time.Time
 	Limit            int
@@ -61,6 +63,8 @@ func QueryEvents(workspaceRoot string, q EventQuery) (*EventQueryResult, error) 
 	lq := LedgerQuery{
 		SessionID: q.SessionID,
 		EventType: q.EventTypePattern,
+		Room:      q.Room,
+		Actor:     q.Actor,
 		Limit:     ledgerLimit,
 	}
 	if !q.Since.IsZero() {

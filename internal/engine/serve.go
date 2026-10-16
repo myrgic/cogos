@@ -125,6 +125,10 @@ type Server struct {
 	// /v1/runs. Non-nil after NewServer.
 	runBoard *RunBoardStore
 
+	// roomBoard is the ledger-backed room board store (room_board.go), served
+	// at /v1/rooms. Non-nil after NewServer.
+	roomBoard *RoomBoardStore
+
 	// pairing holds open pairing requests (serve_pairing.go): in-memory, with
 	// hash-only ledger events. pairingLimiter bounds unauthenticated creation;
 	// pairingPollWait overrides the long-poll length when non-zero (tests).
@@ -249,6 +253,20 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 		slog.Warn("serve: run-board ledger rebuild failed; serving the partial fold", "err", err)
 	}
 	s.runBoard = runBoard
+	// The room board folds from the `rooms` ledger bucket. A local device
+	// identity (this node's BEP P-256 key) is loaded when one exists — only
+	// loaded, never minted, and never gated on cluster.enabled: the board
+	// verifies this node's own log whether or not BEP transport is on. See
+	// NodeDeviceKey (room_board.go) — no key material is logged.
+	roomBoard, err := RebuildRoomBoardStoreFromLedger(cfg.WorkspaceRoot)
+	if err != nil {
+		slog.Warn("serve: room-board ledger rebuild failed; serving the partial fold", "err", err)
+	}
+	if keyErr := roomBoard.ConfigureNodeKey(nodeIDCertDir()); keyErr != nil {
+		slog.Debug("serve: no local BEP device key for the room board; this node cannot author room entries",
+			"cert_dir", nodeIDCertDir(), "err", keyErr)
+	}
+	s.roomBoard = roomBoard
 	s.pairing = newPairingStore(cfg.WorkspaceRoot)
 	s.pairingLimiter = newGrantMintLimiter(pairingCreateLimit, pairingCreateWindow)
 	s.grantMintLimiter = newGrantMintLimiter(defaultGrantMintRateLimit, defaultGrantMintRateWindow)
@@ -340,6 +358,7 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 	s.registerIdentityGrantRoutes(mux)
 	s.registerShareLinkRoutes(mux)
 	s.registerRunRoutes(mux)
+	s.registerRoomRoutes(mux)
 	s.registerPairingRoutes(mux)
 
 	// Phase 1B: peer-awareness packet endpoint (READ side of the 4E
