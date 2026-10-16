@@ -328,6 +328,7 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 	// backed + revocable as of chunk 2; see serve_identity_grants.go.
 	s.registerIdentityGrantRoutes(mux)
 	s.registerShareLinkRoutes(mux)
+	s.registerRunRoutes(mux)
 	s.registerPairingRoutes(mux)
 
 	// Phase 1B: peer-awareness packet endpoint (READ side of the 4E
