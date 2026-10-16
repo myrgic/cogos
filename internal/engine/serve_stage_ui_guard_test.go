@@ -424,6 +424,38 @@ func TestStageGuard_R18_UnlockLiftsKernelLock(t *testing.T) {
 	}
 }
 
+// A malformed or ambiguous unlock body never lifts anyone's lock (cog-review
+// #686); only an explicit {"ip": null} lifts all, as stage-cli sends it.
+func TestStageGuard_R18_UnlockBodyIsStrict(t *testing.T) {
+	rig := newGuardRig(t, guardTH)
+	for i := 0; i < 25; i++ {
+		rig.do(gcase{peer: "tun:203.0.113.9", target: fmt.Sprintf("/r/BADKEY%017d/x", i), host: guardTH})
+	}
+	if !rig.g.isLocked("203.0.113.9") {
+		t.Fatal("setup: not locked")
+	}
+	post := func(body string) int {
+		req := httptest.NewRequest("POST", "/local/dev/guard", strings.NewReader(body))
+		req.RemoteAddr, req.Host = guardPeer, "localhost"
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		rig.h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	for _, body := range []string{``, `{}`, `{"ip":`, `[]`, `{"ip": 7}`, `{"ip": ""}`, `{"other": 1}`} {
+		if code := post(body); code != 400 {
+			t.Errorf("body %q: code %d, want 400", body, code)
+		}
+		if !rig.g.isLocked("203.0.113.9") {
+			t.Fatalf("body %q lifted the lock", body)
+		}
+	}
+	post(`{"ip": null}`)
+	if rig.g.isLocked("203.0.113.9") {
+		t.Error(`{"ip": null} must lift all locks`)
+	}
+}
+
 func TestStageGuard_K22_LogPathScrub(t *testing.T) {
 	got := stageGuardLogPath("/r/abcdefghijklmnopqrstuvwx/dashboard/orb.html")
 	if strings.Contains(got, "abcdefghij") || !strings.HasPrefix(got, "/r/…") {

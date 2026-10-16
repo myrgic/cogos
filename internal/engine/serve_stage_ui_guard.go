@@ -272,6 +272,31 @@ func (g *stageGuard) check(r *http.Request, info stageReqInfo) (int, string) {
 	return 0, ""
 }
 
+// stageParseUnlock reads the owner's lockout-lift body. ok=false for anything
+// but a JSON object whose "ip" key is present and is a string or null:
+// {"ip": "1.2.3.4"} lifts one IP, {"ip": null} lifts all (stage-cli guard unlock).
+func stageParseUnlock(b []byte) (ip string, all bool, ok bool) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil || m == nil {
+		return "", false, false
+	}
+	raw, present := m["ip"]
+	if !present {
+		return "", false, false
+	}
+	if string(bytes.TrimSpace(raw)) == "null" {
+		return "", true, true
+	}
+	if err := json.Unmarshal(raw, &ip); err != nil || strings.TrimSpace(ip) == "" {
+		return "", false, false
+	}
+	return ip, false, true
+}
+
+// stageIsKeyedPath: paths whose second segment is a key. Whether a key is
+// known is decided by probeKeyKnown, which (like guard.py key_known) accepts a
+// segment only if it is a room key or a home key, whatever the prefix: /k/ keys
+// are room keys, and a /pair/ code that 404s counts as a miss in guard.py too.
 func stageIsKeyedPath(p string) bool {
 	for _, pre := range []string{"/r/", "/k/", "/h/", "/pair/"} {
 		if strings.HasPrefix(p, pre) {
@@ -315,11 +340,19 @@ func (g *stageGuard) handle(w http.ResponseWriter, r *http.Request) (*http.Reque
 	if r.Method == http.MethodPost && r.URL.Path == "/local/dev/guard" {
 		b, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		r.Body = io.NopCloser(bytes.NewReader(b))
-		var req struct {
-			IP string `json:"ip"`
+		ip, all, ok := stageParseUnlock(b)
+		if !ok {
+			// Never fall through to "unlock everyone" on a malformed or
+			// ambiguous body (cog-review #686). The owner CLI always sends
+			// the ip key: a string for one IP, null for all.
+			g.refuse(w, r, info, http.StatusBadRequest, `unlock body must be {"ip": "<ip>"} or {"ip": null}`)
+			return r, false
 		}
-		_ = json.Unmarshal(b, &req)
-		g.unlock(req.IP)
+		if all {
+			g.unlock("")
+		} else {
+			g.unlock(ip)
+		}
 	}
 	ctx := context.WithValue(r.Context(), stageReqKey{}, &info)
 	return r.WithContext(ctx), true
