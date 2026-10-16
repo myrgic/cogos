@@ -267,6 +267,10 @@ type Config struct {
 
 	// ManagedSessions is the kernel.yaml managedSessions section (nil = none).
 	ManagedSessions *ManagedSessionsConfig
+
+	// StageUI configures the opt-in Stage UI listener (serve_stage_ui.go).
+	// Zero value (empty Addr) means no listener.
+	StageUI StageUIConfig
 }
 
 // kernelConfigSection holds settings that can appear at the top level or inside v3:.
@@ -320,6 +324,9 @@ type kernelConfigSection struct {
 	// ManagedSessions declares runtime classes for kernel-managed sessions
 	// (rooms RFC §5.2; managed_session_classes.go).
 	ManagedSessions *ManagedSessionsConfig `yaml:"managedSessions,omitempty"`
+
+	// StageUI is the optional `stage_ui:` block (serve_stage_ui.go).
+	StageUI *stageUISection `yaml:"stage_ui"`
 }
 
 // routingConfig holds the optional `routing:` section of kernel.yaml.
@@ -502,6 +509,7 @@ func applyKernelSection(cfg *Config, s kernelConfigSection) {
 	if s.Mod3URL != "" {
 		cfg.Mod3URL = s.Mod3URL
 	}
+	applyStageUISection(cfg, s.StageUI)
 	if s.MaxToolOutputBytes != 0 {
 		cfg.MaxToolOutputBytes = s.MaxToolOutputBytes
 	}
