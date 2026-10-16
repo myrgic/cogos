@@ -84,7 +84,7 @@ var (
 	shareLinkHashRe    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	shareLinkRoomRe    = regexp.MustCompile(`^[A-Za-z0-9_-]{0,64}$`)
 	shareLinkSurfaceRe = regexp.MustCompile(`^` + regexp.QuoteMeta(shareLinkSurfacePrefix) + `[A-Za-z0-9._/-]{1,200}$`)
-	shareLinkScopeRe   = regexp.MustCompile(`^stage:[A-Za-z0-9._:-]{1,100}$`)
+	shareLinkScopeRe   = regexp.MustCompile(`^(stage|pairing):[A-Za-z0-9._:-]{1,100}$`)
 )
 
 // ShareLink is the record. IntegrityHash is the sha256 hex of the raw token
@@ -267,6 +267,14 @@ func (st *ShareLinkStore) ResolveHash(hash string) (*ShareLink, bool) {
 		return nil, false
 	}
 	return l, true
+}
+
+// HasLiveSurface reports whether surface currently holds an unexpired link.
+func (st *ShareLinkStore) HasLiveSurface(surface string) bool {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	l, ok := st.bySurface[surface]
+	return ok && !l.expired(time.Now().UTC())
 }
 
 // IsShareToken reports whether token is a live share link. The grant gate uses
