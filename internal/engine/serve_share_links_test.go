@@ -436,3 +436,41 @@ func TestShareLink_RekeyAfterExpiryDropsPredecessor(t *testing.T) {
 		t.Errorf("rebuilt store len = %d; want 1 (expired predecessor resurrected)", re.Len())
 	}
 }
+
+// The same raw token re-imported under another surface after its first link
+// expired drops the expired record everywhere, live and after a rebuild
+// (cog-review round 2 on #688).
+func TestShareLink_ExpiredHashReusedOnOtherSurfaceDropsPredecessor(t *testing.T) {
+	root := t.TempDir()
+	t.Cleanup(resetLedgerCacheForTest)
+	resetLedgerCacheForTest()
+	st := NewShareLinkStoreWithLedger(root)
+	in := shareImport("tok-t", "stage/room/rx/owner")
+	in.TTLHours = 1
+	first, err := st.Import(in, "g1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.mu.Lock()
+	first.ExpiresAt = time.Now().UTC().Add(-time.Minute)
+	st.mu.Unlock()
+
+	if _, err := st.Import(shareImport("tok-t", "stage/room/ry/owner"), "g1"); err != nil {
+		t.Fatal(err)
+	}
+	if st.Len() != 1 {
+		t.Fatalf("live store len = %d; want 1 (expired other-surface record leaked)", st.Len())
+	}
+	if l, ok := st.Resolve("tok-t"); !ok || l.Surface != "stage/room/ry/owner" {
+		t.Errorf("token resolves to %+v, %v; want stage/room/ry/owner", l, ok)
+	}
+
+	resetLedgerCacheForTest()
+	re, err := RebuildShareLinkStoreFromLedger(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if re.Len() != 1 {
+		t.Errorf("rebuilt store len = %d; want 1", re.Len())
+	}
+}

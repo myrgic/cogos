@@ -313,7 +313,17 @@ func (st *ShareLinkStore) Len() int {
 	return len(st.byID)
 }
 
+// insertLocked indexes l, first dropping whatever already holds its hash or
+// its surface. A surface has one link and a hash has one meaning, so a
+// predecessor on either index (live or expired, same surface or another) is
+// gone once l is in, both live and on ledger replay (cog-review on #688).
 func (st *ShareLinkStore) insertLocked(l *ShareLink) {
+	if prev, ok := st.byHash[l.IntegrityHash]; ok && prev.LinkID != l.LinkID {
+		st.dropLocked(prev)
+	}
+	if prev, ok := st.bySurface[l.Surface]; ok && prev.LinkID != l.LinkID {
+		st.dropLocked(prev)
+	}
 	st.byID[l.LinkID] = l
 	st.bySurface[l.Surface] = l
 	st.byHash[l.IntegrityHash] = l
