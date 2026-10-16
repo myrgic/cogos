@@ -136,7 +136,11 @@ var ErrMalformed = errors.New("entry malformed")
 // ParseEntry decodes one wire entry. Unknown fields and duplicate keys are
 // rejected, so one byte string cannot mean two entries.
 func ParseEntry(raw []byte) (*Entry, error) {
-	if _, err := parseStrict(raw); err != nil {
+	v, err := parseStrict(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
+	if err := exactKeys(v); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -149,6 +153,50 @@ func ParseEntry(raw []byte) (*Entry, error) {
 		return nil, err
 	}
 	return &e, nil
+}
+
+// exactKeys rejects any key of the entry, its actor, its attested block or a
+// deps value that is not spelled exactly like a known field. encoding/json
+// matches struct fields case-insensitively and merges repeats, so without this
+// "KIND" and "kind" could carry two meanings for one byte string. Body keys are
+// free-form map keys (case-sensitive already); head and proof are opaque.
+func exactKeys(v any) error {
+	top, ok := v.(map[string]any)
+	if !ok {
+		return errors.New("entry is not an object")
+	}
+	check := func(where string, m map[string]any, known ...string) error {
+		for k := range m {
+			if !contains(known, k) {
+				return fmt.Errorf("%s: unknown or mis-cased key %q", where, k)
+			}
+		}
+		return nil
+	}
+	if err := check("entry", top, "room", "log", "seq", "prev", "deps", "spec", "actor",
+		"attested", "kind", "body", "hlc", "head", "proof", "sig"); err != nil {
+		return err
+	}
+	if m, ok := top["actor"].(map[string]any); ok {
+		if err := check("actor", m, "person", "agent", "node"); err != nil {
+			return err
+		}
+	}
+	if m, ok := top["attested"].(map[string]any); ok {
+		if err := check("attested", m, "subject", "surface", "by"); err != nil {
+			return err
+		}
+	}
+	if deps, ok := top["deps"].(map[string]any); ok {
+		for _, d := range deps {
+			if m, ok := d.(map[string]any); ok {
+				if err := check("deps value", m, "seq", "id"); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // validateShape is the structural check every replica runs before anything
@@ -321,6 +369,10 @@ func CanonicalLog(s string) (bep.DeviceID, string, error) {
 	return id, bep.FormatDeviceID(id), nil
 }
 
+// logShortBytes is how many leading DeviceID bytes the short form carries.
+// A variable only so tests can shrink it to build real collisions.
+var logShortBytes = 6
+
 // LogShort is the short form of a log used in item ids: the first six bytes
 // of the DeviceID as lowercase hex. (The RFC says "canonical log short"
 // without defining it; this is the P4-1 definition.)
@@ -332,7 +384,7 @@ func LogShort(log string) (string, error) {
 	if canon != log {
 		return "", fmt.Errorf("log not canonical")
 	}
-	return hex.EncodeToString(id[:6]), nil
+	return hex.EncodeToString(id[:logShortBytes]), nil
 }
 
 // ItemID is the id an item.create entry must carry: <log short>-<seq>.

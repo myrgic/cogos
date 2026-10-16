@@ -31,9 +31,18 @@ func (c *ctx) admit(x *cand) res {
 		return held(CodeSpecMissing)
 	}
 	// Citing an older spec than one the author had seen buys nothing.
-	for _, y := range c.specCands {
-		if g := c.specGen[y.id]; g > s.Gen && y != x && c.inPast(x, y) {
+	// Only accepted chain specs count: a rejected spec entry stays in the log
+	// and must not make everything that cites it stale.
+	for _, t := range c.chain {
+		if y := c.byID[t.ID]; y != nil && t.Gen > s.Gen && y != x && c.inPast(x, y) {
 			return rej(CodeSpecStale)
+		}
+	}
+	// A node dropped from spec.nodes is closed above its cutoff whatever spec
+	// the entry cites (RFC section 6.9.1, node cutoffs).
+	for _, t := range c.chain {
+		if co, dropped := t.NodeCutoffs[e.Log]; dropped && e.Seq > co {
+			return rej(CodeNodeRemoved)
 		}
 	}
 
@@ -211,6 +220,13 @@ func (c *ctx) admitKind(x *cand, s *Spec, m Member) res {
 				return rej(CodeItemIDClash)
 			}
 			return rej(CodeItemIDBad)
+		}
+		// Two creates can hold one id only by a short-form collision. Of the
+		// creates that pass every other check the lowest entry id wins;
+		// c.idLosers is computed before the main pass, so this is a function
+		// of the set and not of arrival order.
+		if c.idLosers[x.id] {
+			return rej(CodeItemIDClash)
 		}
 		return acc()
 

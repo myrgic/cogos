@@ -72,7 +72,9 @@ func orderLess(a, b *cand) bool {
 func (c *ctx) defaultClaimant(l *cand, s *Spec) string {
 	var past []*cand
 	for _, y := range c.byID {
-		if y != l && c.inPast(l, y) {
+		// Only accepted entries speak: a rejected one stays in the log but
+		// cannot choose who answers.
+		if r, ok := c.status[y.id]; ok && r.ok() && y != l && c.inPast(l, y) {
 			past = append(past, y)
 		}
 	}

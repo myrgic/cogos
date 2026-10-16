@@ -66,6 +66,7 @@ const (
 	CodeLogNotInNodes      = "log_not_in_nodes"
 	CodeExecNotDispatch    = "exec_not_dispatch"
 	CodeAfterRemoval       = "after_removal"
+	CodeNodeRemoved        = "node_removed"
 	CodeQuotaExceeded      = "quota_exceeded"
 	CodeAttestedBad        = "attested_subject_bad"
 	CodeOwnerViaSurface    = "owner_via_surface"
@@ -192,20 +193,20 @@ func (r res) withBefore(b bool) res { r.before = b; return r }
 // ctx is the read-only view admit() runs against: the replicated spec chain
 // plus the entries this replica holds.
 type ctx struct {
-	room      string
-	byID      map[string]*cand
-	byLogSeq  map[string]map[uint64][]*cand
-	genesis   *cand
-	vecs      map[string]map[string]uint64
-	chain     []*Spec
-	specByID  map[string]*Spec
-	specCands []*cand // every held spec entry, for the stale-spec check
-	specGen   map[string]int
-	status    map[string]res
-	creates   map[string]*cand // item id -> accepted item.create
-	ownIDs    map[string]*cand // <log short>-<seq> -> entry
-	replies   map[string][]*cand
-	devices   map[string]bool // canonical DeviceIDs of the logs held
+	room     string
+	byID     map[string]*cand
+	byLogSeq map[string]map[uint64][]*cand
+	genesis  *cand
+	vecs     map[string]map[string]uint64
+	chain    []*Spec
+	specByID map[string]*Spec
+	specGen  map[string]int
+	status   map[string]res
+	creates  map[string]*cand // item id -> accepted item.create
+	ownIDs   map[string]*cand // <log short>-<seq> -> entry
+	replies  map[string][]*cand
+	devices  map[string]bool // canonical DeviceIDs of the logs held
+	idLosers map[string]bool // item.create entry ids that lose an item id to a lower entry id
 }
 
 // Evaluate evaluates a SET of entries for one room. The result is a pure
@@ -231,6 +232,7 @@ func Evaluate(p Params, entries []*Entry) *Outcome {
 		ownIDs:   map[string]*cand{},
 		replies:  map[string][]*cand{},
 		devices:  map[string]bool{},
+		idLosers: map[string]bool{},
 	}
 	keys := keyRing(p.Certs)
 
@@ -396,7 +398,6 @@ func Evaluate(p Params, entries []*Entry) *Outcome {
 			c.chain = []*Spec{gs}
 			c.specByID[c.genesis.id] = gs
 			c.specGen[c.genesis.id] = 1
-			c.specCands = append(c.specCands, c.genesis)
 			c.status[c.genesis.id] = acc()
 		}
 		final[c.genesis.id] = gr
@@ -434,7 +435,6 @@ func Evaluate(p Params, entries []*Entry) *Outcome {
 				continue
 			}
 			c.specGen[x.id] = sp.Gen
-			c.specCands = append(c.specCands, x)
 			byGen[sp.Gen] = append(byGen[sp.Gen], x)
 		}
 		for g := 2; ; g++ {
@@ -496,6 +496,7 @@ func Evaluate(p Params, entries []*Entry) *Outcome {
 			}
 			rest = append(rest, x)
 		}
+		c.markIDClashes(rest)
 		rank := map[string]uint64{}
 		for _, x := range rest {
 			var s uint64
@@ -761,4 +762,32 @@ func (c *ctx) checkGenesis(x *cand, b Binding) (res, *Spec) {
 		return rej(CodeGenesisOwnerUnbond), nil
 	}
 	return acc(), sp
+}
+
+// markIDClashes finds item.create entries that would hold an item id another
+// create also holds. Each is judged on everything but the clash (admit with
+// idLosers still empty); among those that pass, the lowest entry id keeps the
+// id and the others lose it. Creates do not depend on each other for any other
+// check, so this is independent of arrival and causal order.
+func (c *ctx) markIDClashes(rest []*cand) {
+	byItem := map[string][]*cand{}
+	for _, x := range rest {
+		if x.e.Kind != KindItemCreate {
+			continue
+		}
+		id, _ := x.e.Body["id"].(string)
+		if id == "" || !c.admit(x).ok() {
+			continue
+		}
+		byItem[id] = append(byItem[id], x)
+	}
+	for _, xs := range byItem {
+		if len(xs) < 2 {
+			continue
+		}
+		sort.Slice(xs, func(a, b int) bool { return xs[a].id < xs[b].id })
+		for _, l := range xs[1:] {
+			c.idLosers[l.id] = true
+		}
+	}
 }

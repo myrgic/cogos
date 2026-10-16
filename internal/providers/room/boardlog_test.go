@@ -251,6 +251,17 @@ func TestBoardLogOrderIndependent(t *testing.T) {
 	w.line("node-a", chaz, "a")
 	w.mk("node-a", KindApprovalAnswer, chaz, map[string]any{"request": "r", "session": "s"})
 	w.mk("node-a", KindItemSet, vroku, map[string]any{"item": item, "field": "x", "value": 1}) // not homed
+	// Review cases: a rejected spec in the past, a forged agent reply feeding
+	// the default claimant, and a floor claim over both.
+	forgedSpec := defaultGenesisBody()
+	forgedSpec["gen"] = 99
+	delete(forgedSpec, "name")
+	w.mk("node-b", KindSpec, guest, forgedSpec)
+	root := w.line("node-a", chaz, "who answers")
+	w.mk("node-a", KindLine, sage, map[string]any{"text": "r", "to": []any{}, "in_reply_to": idOfEntry(root)})
+	w.sync()
+	w.mk("node-a", KindFloorClaim, cog, map[string]any{"line": idOfEntry(root), "default": true, "fallback": false, "name_hit": false})
+	w.mk("node-b", KindFloorClaim, sage, map[string]any{"line": idOfEntry(root), "default": true, "fallback": false, "name_hit": false})
 
 	base := w.eval()
 	want := verdictMap(base)

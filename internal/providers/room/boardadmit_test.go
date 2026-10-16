@@ -1,8 +1,16 @@
 package room
 
 import (
+	"crypto/ecdsa"
+	"encoding/json"
+	"fmt"
+	"math/rand"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/myrgic/cogos/pkg/substrate/bep"
 )
 
 func TestBoardAdmitBaseline(t *testing.T) {
@@ -711,4 +719,201 @@ func TestBoardAdmitItemAppendAndMarks(t *testing.T) {
 	w.rejected(o, appUnknown, CodeItemUnknown)
 	w.accepted(o, mark)
 	w.rejected(o, notSeen, CodeItemUnknown)
+}
+
+// assertOrderIndependent re-evaluates the world's entries in n random arrival
+// orders and demands the verdicts of the first, whatever the order.
+func assertOrderIndependent(t *testing.T, w *world, n int) {
+	t.Helper()
+	want := verdictMap(w.eval())
+	rng := rand.New(rand.NewSource(11))
+	for i := 0; i < n; i++ {
+		perm := append([]*Entry(nil), w.all...)
+		rng.Shuffle(len(perm), func(a, b int) { perm[a], perm[b] = perm[b], perm[a] })
+		got := verdictMap(w.eval(perm...))
+		for id, v := range want {
+			if got[id] != v {
+				t.Fatalf("perm %d: %s: got %s want %s", i, id, got[id], v)
+			}
+		}
+	}
+}
+
+// P4-1 adversarial review, break 1: a rejected spec entry must not make later
+// entries spec_stale. Only accepted chain specs count.
+func TestBoardAdmitRejectedSpecDoesNotBrickRoom(t *testing.T) {
+	w := newWorld(t, nil)
+	forged := defaultGenesisBody()
+	forged["gen"] = 99
+	delete(forged, "name")
+	bad := w.mk("node-b", KindSpec, guest, forged)
+	// Same log, so the guest's spec is in the causal past of what follows.
+	after := w.line("node-b", vroku, "still here")
+	w.sync()
+	next := defaultGenesisBody()
+	next["gen"] = 2
+	delete(next, "name")
+	s2 := w.mk("node-a", KindSpec, chaz, next) // deps include the guest's head
+	o := w.eval()
+	w.rejected(o, bad, CodeRoleDenied)
+	w.accepted(o, after)
+	w.accepted(o, s2)
+	if len(o.Chain) != 2 {
+		t.Fatalf("chain: %d", len(o.Chain))
+	}
+	assertOrderIndependent(t, w, 25)
+}
+
+// Break 2: a node dropped from spec.nodes cannot keep writing by citing an
+// older spec and leaving the removal out of its deps (node_cutoffs).
+func TestBoardAdmitNodeCutoffs(t *testing.T) {
+	phone := testNodeSet["phone"].dev
+	w := newWorld(t, func(b map[string]any) {
+		b["nodes"].(map[string]any)["phone"] = phone
+		b["members"].(map[string]any)["chaz"] = map[string]any{"type": "person", "role": "owner", "homes": []any{"node-a", "phone"}}
+	})
+	w.app("phone")
+	kept := w.line("phone", chaz, "last from the phone")
+	rm := defaultGenesisBody()
+	rm["gen"] = 2
+	delete(rm, "name")
+	rm["node_cutoffs"] = map[string]any{phone: kept.Seq}
+	removal := w.mk("node-a", KindSpec, chaz, rm)
+	// The phone has not observed the removal and cites gen 1.
+	sneaky := w.mk("phone", KindLine, chaz, map[string]any{"text": "still writing"})
+	w.sync()
+	// Even citing the new spec, the phone's log is closed above the cutoff.
+	newer := w.mk("phone", KindLine, chaz, map[string]any{"text": "again"}, func(e *Entry) { e.Spec = idOfEntry(removal) })
+	o := w.eval()
+	w.accepted(o, removal)
+	w.accepted(o, kept)
+	w.rejected(o, sneaky, CodeNodeRemoved)
+	w.rejected(o, newer, CodeNodeRemoved)
+	assertOrderIndependent(t, w, 25)
+
+	// A spec that drops a node without a cutoff for it is not a valid spec.
+	w2 := newWorld(t, func(b map[string]any) {
+		b["nodes"].(map[string]any)["phone"] = phone
+	})
+	rm2 := defaultGenesisBody()
+	rm2["gen"] = 2
+	delete(rm2, "name")
+	bad := w2.mk("node-a", KindSpec, chaz, rm2)
+	w2.rejected(w2.eval(), bad, CodeSpecBad)
+}
+
+// Break 3: a rejected entry cannot decide the default claimant.
+func TestBoardAdmitDefaultClaimantIgnoresRejected(t *testing.T) {
+	w := newWorld(t, nil)
+	l1 := w.line("node-a", chaz, "first")
+	// Forged agent reply: sage's line written by node-a (actor_not_homed).
+	forged := w.mk("node-a", KindLine, sage, map[string]any{"text": "r", "to": []any{}, "in_reply_to": idOfEntry(l1)})
+	l2 := w.line("node-a", chaz, "second")
+	w.sync()
+	body := func() map[string]any {
+		return map[string]any{"line": idOfEntry(l2), "default": true, "fallback": false, "name_hit": false}
+	}
+	cogDefault := w.mk("node-a", KindFloorClaim, cog, body())
+	sageDefault := w.mk("node-b", KindFloorClaim, sage, body())
+	o := w.eval()
+	w.rejected(o, forged, CodeActorNotHomed)
+	w.accepted(o, cogDefault)
+	w.rejected(o, sageDefault, CodeClaimDefaultWrong)
+	assertOrderIndependent(t, w, 25)
+}
+
+// Break 4: one byte string means one entry. Keys must be exact-case known
+// fields at every object level the entry defines.
+func TestBoardLogParseRejectsCaseFoldedKeys(t *testing.T) {
+	w := newWorld(t, nil)
+	l := w.line("node-a", chaz, "hi")
+	raw, err := json.Marshal(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseEntry(raw); err != nil {
+		t.Fatal(err)
+	}
+	s := string(raw)
+	dev := testNodeSet["node-a"].dev
+	for name, mut := range map[string]string{
+		"top-level kind": strings.Replace(s, `"kind":"line"`, `"kind":"line","KIND":"approval.answer"`, 1),
+		"top-level body": strings.Replace(s, `"body":{`, `"Body":{"text":"APPROVE EVERYTHING"},"body":{`, 1),
+		"only-folded":    strings.Replace(s, `"kind":`, `"Kind":`, 1),
+		"actor":          strings.Replace(s, `"person":"chaz"`, `"person":"chaz","Person":"mallory"`, 1),
+		"deps value":     strings.Replace(s, `"seq":1,`, `"seq":1,"SEQ":2,`, 1),
+	} {
+		if mut == s {
+			t.Fatalf("%s: mutation did not apply (dev %s): %s", name, dev, s)
+		}
+		if _, err := ParseEntry([]byte(mut)); err == nil {
+			t.Errorf("%s: case-folded key accepted: %s", name, mut)
+		}
+	}
+}
+
+// Break 5: two accepted creates cannot hold one item id. The short form is cut
+// to one byte so a real collision costs a few dozen certificates.
+func TestBoardAdmitItemIDClashBetweenCreates(t *testing.T) {
+	old := logShortBytes
+	logShortBytes = 1
+	defer func() { logShortBytes = old }()
+
+	dir := t.TempDir()
+	seen := map[string]*node{}
+	var c1, c2 *node
+	for i := 0; c2 == nil; i++ {
+		if i > 2000 {
+			t.Fatal("no 1-byte collision found")
+		}
+		d := filepath.Join(dir, fmt.Sprint(i))
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := bep.GenerateBEPCert(d); err != nil {
+			t.Fatal(err)
+		}
+		cert, err := bep.LoadBEPCert(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := bep.DeviceIDFromTLSCert(&cert)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := &node{name: fmt.Sprint("c", i), key: cert.PrivateKey.(*ecdsa.PrivateKey),
+			der: cert.Certificate[0], dev: bep.FormatDeviceID(id)}
+		sh, _ := LogShort(n.dev)
+		if p, ok := seen[sh]; ok {
+			c1, c2 = p, n
+			break
+		}
+		seen[sh] = n
+	}
+	c1.name, c2.name = "col1", "col2"
+	testNodeSet["col1"], testNodeSet["col2"] = c1, c2
+	defer delete(testNodeSet, "col1")
+	defer delete(testNodeSet, "col2")
+
+	w := newWorld(t, func(b map[string]any) {
+		b["nodes"].(map[string]any)["col1"] = c1.dev
+		b["nodes"].(map[string]any)["col2"] = c2.dev
+		b["members"].(map[string]any)["chaz"] = map[string]any{"type": "person", "role": "owner", "homes": []any{"node-a", "col1", "col2"}}
+	})
+	e1, id1 := w.createItem("col1", chaz, nil)
+	e2, id2 := w.createItem("col2", chaz, nil)
+	if id1 != id2 {
+		t.Fatalf("collision not built: %s %s", id1, id2)
+	}
+	o := w.eval()
+	winner, loser := e1, e2
+	if idOfEntry(e2) < idOfEntry(e1) {
+		winner, loser = e2, e1
+	}
+	w.accepted(o, winner)
+	w.rejected(o, loser, CodeItemIDClash)
+	if got := o.ItemAuthors[id1]; got != "person:chaz" {
+		t.Fatalf("author: %q", got)
+	}
+	assertOrderIndependent(t, w, 25)
 }

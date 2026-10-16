@@ -62,6 +62,9 @@ type Spec struct {
 	// Cutoffs pins, for each member a spec removes, the head the owner had
 	// seen on every log in Nodes at removal time: member -> log -> seq.
 	Cutoffs map[string]map[string]uint64 `json:"cutoffs,omitempty"`
+	// NodeCutoffs pins, for each node a spec drops from Nodes, the last seq
+	// of its log that still counts: DeviceID -> seq (RFC section 6.9.1).
+	NodeCutoffs map[string]uint64 `json:"node_cutoffs,omitempty"`
 
 	// ID is the id of the entry that carries this spec. Set by SpecFromEntry.
 	ID string `json:"-"`
@@ -168,6 +171,26 @@ func (s *Spec) Validate(prev *Spec) error {
 				if _, ok := c[dev]; !ok {
 					return fmt.Errorf("removed member %q: no cutoff for log %s", id, dev)
 				}
+			}
+		}
+		// A dropped node pins the last seq of its log that still counts.
+		for name, dev := range prev.Nodes {
+			still := false
+			for _, d := range s.Nodes {
+				if d == dev {
+					still = true
+				}
+			}
+			if still {
+				continue
+			}
+			if _, ok := s.NodeCutoffs[dev]; !ok {
+				return fmt.Errorf("dropped node %q has no node_cutoffs entry", name)
+			}
+		}
+		for dev := range s.NodeCutoffs {
+			if _, canon, err := CanonicalLog(dev); err != nil || canon != dev {
+				return fmt.Errorf("node_cutoffs: %q is not a canonical device id", dev)
 			}
 		}
 		// The effective heads set never shrinks in place.
