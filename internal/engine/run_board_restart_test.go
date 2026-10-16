@@ -38,6 +38,9 @@ func TestRunBoardRestartRebuildsEqualFold(t *testing.T) {
 	if _, err := st.Archive(a.ID, "chaz"); err != nil {
 		t.Fatalf("archive a: %v", err)
 	}
+	if _, err := st.End(b.ID, RunEnd{Outcome: RunOutcomeFail, ObservedBy: "kernel"}, "chaz"); err != nil {
+		t.Fatalf("end b: %v", err)
+	}
 	if _, err := st.Delivered(b.ID, RunDelivered{To: "front", At: "2026-10-16T00:00:00Z"}, "chaz"); err != nil {
 		t.Fatalf("delivered b: %v", err)
 	}
