@@ -254,6 +254,8 @@ const (
 	ScopeRoomsWrite = "rooms:write"
 )
 
+// ScopeStageKeys is declared in serve_share_links.go.
+
 // managedSessionsRoutePrefix and roomsRoutePrefix are the route families the
 // two scopes above guard. Only non-GET methods are scoped: reads stay
 // grant-exempt (isGrantExemptRequest), projection of who-may-read is a later
@@ -293,6 +295,11 @@ func requiredScopeForRequest(r *http.Request) string {
 	// GET /v1/services* stays exempt via the blanket GET rule.
 	if strings.HasPrefix(path, "/v1/services/") && r.Method != http.MethodGet {
 		return ScopeAdmin
+	}
+
+	// Share-link store (serve_share_links.go): every method, including reads.
+	if path == shareLinkRoutePrefix || strings.HasPrefix(path, shareLinkRoutePrefix+"/") {
+		return ScopeStageKeys
 	}
 
 	// Managed-session writes (create/fork/resume/prompt/cancel/mode/model/
@@ -536,6 +543,15 @@ func (s *Server) grantAuthMiddleware(next http.Handler) http.Handler {
 			writeJSONError(w, http.StatusUnauthorized, "invalid_grant", "no identity grant registry available")
 			return
 		}
+		// A share link is a leaf credential (ID-L3): it resolves only in the
+		// Stage listener and pairing routes, never here. Refuse it by name
+		// rather than letting it fall through to "invalid grant", so the
+		// caller learns what it presented and nothing can mistake it for one.
+		if s.shareLinks != nil && s.shareLinks.IsShareToken(token) {
+			writeJSONError(w, http.StatusForbidden, "share_link_not_grant",
+				"a share link cannot act as a grant on this API")
+			return
+		}
 		grant, ok := s.identityGrants.VerifyAny(token)
 		if !ok {
 			writeJSONError(w, http.StatusUnauthorized, "invalid_grant",
@@ -594,6 +610,10 @@ func isGrantExemptRequest(r *http.Request) bool {
 	// POST /v1/identity/verify already returned true above; that is the one
 	// deliberate hole and it is method- and path-exact.
 	if isIdentityRoutePath(r.URL.Path) {
+		return false
+	}
+	// The share-link store is gated on every method too.
+	if r.URL.Path == shareLinkRoutePrefix || strings.HasPrefix(r.URL.Path, shareLinkRoutePrefix+"/") {
 		return false
 	}
 	// Every other GET (and HEAD, which ServeMux treats as GET for handler

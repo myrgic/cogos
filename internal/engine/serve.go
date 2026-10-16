@@ -115,6 +115,11 @@ type Server struct {
 	// (rebuilt from .cog/ledger/identity-grants/ on boot) and added revoke.
 	identityGrants *IdentityGrantRegistry
 
+	// shareLinks is the separate, ledger-backed store of bearer share links
+	// (Stage room/home keys, device cookies). Never consulted as a grant; see
+	// serve_share_links.go.
+	shareLinks *ShareLinkStore
+
 	// grantMintLimiter bounds POST /v1/identity/grants throughput on the
 	// bootstrap-exempt path of the write-route grant-auth gate (see
 	// serve_grant_auth.go). Always non-nil after NewServer.
@@ -219,6 +224,12 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 		identityGrants = NewIdentityGrantRegistryWithLedger(cfg.WorkspaceRoot)
 	}
 	s.identityGrants = identityGrants
+	shareLinks, err := RebuildShareLinkStoreFromLedger(cfg.WorkspaceRoot)
+	if err != nil {
+		slog.Warn("serve: share-link ledger rebuild failed; starting with an empty share-link store", "err", err)
+		shareLinks = NewShareLinkStoreWithLedger(cfg.WorkspaceRoot)
+	}
+	s.shareLinks = shareLinks
 	s.grantMintLimiter = newGrantMintLimiter(defaultGrantMintRateLimit, defaultGrantMintRateWindow)
 	classes, err := NewRuntimeClassRegistry(cfg.ManagedSessions)
 	if err != nil {
@@ -306,6 +317,7 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 	// cog://mem/working/2026-07-21-kernel-identity-seat-design). Ledger-
 	// backed + revocable as of chunk 2; see serve_identity_grants.go.
 	s.registerIdentityGrantRoutes(mux)
+	s.registerShareLinkRoutes(mux)
 
 	// Phase 1B: peer-awareness packet endpoint (READ side of the 4E
 	// ambient-awareness loop; Phase 1A populates channel.<sid>.activity).
