@@ -144,7 +144,9 @@ jobs:
       github.event.pull_request.draft == false &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Job ceiling sits above the review step's own timeout so the publish step
+    # still runs and posts an explicit verdict when the reviewer times out.
+    timeout-minutes: 40
     permissions:
       contents: read
       pull-requests: write
@@ -384,7 +386,9 @@ jobs:
 
       - name: Run review
         if: steps.gate.outputs.should_run == 'true' && steps.cred.outputs.skip != 'true' && steps.canary.outputs.sandbox == 'ok'
-        timeout-minutes: 15
+        # 30 min covers up to three attempts at the 80-turn budget below. At
+        # 15 min / 40 turns, large PRs (cogos#682) errored on every attempt.
+        timeout-minutes: 30
         env:
           # The token exists ONLY in canary+review step envs. The agent has no
           # Bash, no network, no write tools — read-only inspection of a
@@ -425,7 +429,7 @@ jobs:
           for attempt in 1 2 3; do
             claude -p "$(cat /tmp/cog-review/prompt.md)" \
               --output-format json \
-              --max-turns 40 \
+              --max-turns 80 \
               --allowedTools "Read" "Grep" \
               --settings "$DENY" \
               --model "$COG_REVIEW_MODEL" \
@@ -442,7 +446,11 @@ jobs:
                 break
               fi
             fi
-            echo "::warning::cog-review reviewer attempt $attempt failed (rc=$CLAUDE_RC or output has no parseable .verdict); retrying" >&2
+            # Name the failure: the CLI envelope carries a subtype (e.g.
+            # error_max_turns) and a turn count, so an exhausted budget is
+            # distinguishable from a crash or an unparseable answer.
+            WHY=$(jq -r '"subtype=\(.subtype // "none") turns=\(.num_turns // "?")"' /tmp/cog-review/raw.json 2>/dev/null || echo "subtype=no-envelope")
+            echo "::warning::cog-review reviewer attempt $attempt failed (rc=$CLAUDE_RC, $WHY, or output has no parseable .verdict); retrying" >&2
             sleep $((attempt * 5))
           done
           set -e
