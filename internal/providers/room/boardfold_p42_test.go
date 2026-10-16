@@ -23,6 +23,11 @@ func runFoldCases(t *testing.T, cases []foldCase) {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			w := newWorld(t, nil)
+			// node-b joins before any item entry is written. w.app seeds a
+			// late-joining node with every entry already written, so a
+			// node-b first touched inside a case would have seen node-a's
+			// sets and the "concurrent" cases below would be sequential.
+			w.app("node-b")
 			check := c.build(t, w)
 			o := w.eval()
 			b := FoldBoard(o, w.all)
@@ -294,7 +299,9 @@ func TestBoardFoldConflictedState(t *testing.T) {
 	runFoldCases(t, []foldCase{{
 		name: "concurrent running and done on state is a conflicted state",
 		build: func(t *testing.T, w *world) func(b *Board) {
-			_, id := w.createItem("node-a", chaz, nil)
+			// vroku authors the item, so both vroku and the owner may set the
+			// effect-bearing state field (a collaborator only edits own items).
+			_, id := w.createItem("node-b", vroku, nil)
 			w.sync()
 			w.mk("node-a", KindItemSet, chaz, map[string]any{"item": id, "field": "state", "value": "running"})
 			w.mk("node-b", KindItemSet, vroku, map[string]any{"item": id, "field": "state", "value": "done"})
