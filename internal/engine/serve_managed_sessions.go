@@ -94,6 +94,15 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 
 func (s *Server) handleManagedSessionList(w http.ResponseWriter, r *http.Request) {
 	sessions := s.managedSessions.List()
+	if allow := managedSessionClassAuthority(r); allow != nil {
+		kept := sessions[:0:0]
+		for _, info := range sessions {
+			if allow(info.Class) {
+				kept = append(kept, info)
+			}
+		}
+		sessions = kept
+	}
 	if room := r.URL.Query().Get("room"); room != "" {
 		kept := sessions[:0:0]
 		for _, info := range sessions {

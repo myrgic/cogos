@@ -2,11 +2,13 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -292,6 +294,67 @@ func TestRuntimeClass_HTTPScopeAuthority(t *testing.T) {
 	// ...but drives its own class.
 	if code := g0Do(t, ts, chatOnly, "POST", "/v1/managed-sessions/"+chat.SessionID+"/cancel", map[string]any{}, nil); code != http.StatusOK {
 		t.Errorf("chat-scoped cancel on chat session = %d, want 200", code)
+	}
+}
+
+func TestRuntimeClass_HTTPListFilteredByClassAuthority(t *testing.T) {
+	srv, ts := classServer(t)
+	cwd := t.TempDir()
+	chatOnly := mintScopedTestGrant(t, srv, "guest-surface", ScopeManagedSessionsClassPrefix+"chat")
+	chatCollab := mintScopedTestGrant(t, srv, "two-class", ScopeManagedSessionsClassPrefix+"chat", ScopeManagedSessionsClassPrefix+"collab")
+	owner := mintActorTestGrant(t, srv, "discord-chaz", "chaz", ScopeManagedSessions)
+	star := mintScopedTestGrant(t, srv, "class-star", ScopeManagedSessionsClassPrefix+"*")
+	node := mintScopedTestGrant(t, srv, "node-like", nodeRootScope)
+
+	// One session per class, including the default class (class "").
+	for _, c := range []string{"chat", "collab", ""} {
+		body := map[string]any{"cwd": cwd}
+		if c != "" {
+			body["class"] = c
+		}
+		if code := g0Do(t, ts, owner, "POST", "/v1/managed-sessions", body, nil); code != http.StatusCreated {
+			t.Fatalf("owner create class %q = %d", c, code)
+		}
+	}
+	// GET reads bypass grantAuthMiddleware today (isGrantExemptRequest), so no
+	// grant reaches the handler over HTTP. Call the handler with the verified
+	// grant in context, as the middleware does for gated routes.
+	classes := func(tok string) string {
+		grant, ok := srv.identityGrants.VerifyAny(tok)
+		if !ok {
+			t.Fatal("grant did not verify")
+		}
+		req := httptest.NewRequest("GET", "/v1/managed-sessions", nil).WithContext(contextWithGrant(context.Background(), grant))
+		rec := httptest.NewRecorder()
+		srv.handleManagedSessionList(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list = %d", rec.Code)
+		}
+		var out struct {
+			Sessions []ManagedSessionInfo `json:"sessions"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, s := range out.Sessions {
+			got = append(got, s.Class)
+		}
+		sort.Strings(got)
+		return strings.Join(got, ",")
+	}
+	// Unrestricted callers see everything, default class included.
+	for name, tok := range map[string]string{"owner": owner, "star": star, "node": node} {
+		if got := classes(tok); got != ",chat,collab" {
+			t.Errorf("%s list classes = %q, want all", name, got)
+		}
+	}
+	// Class-scoped callers see only permitted classes, never the default class.
+	if got := classes(chatOnly); got != "chat" {
+		t.Errorf("chat-scoped list classes = %q, want chat", got)
+	}
+	if got := classes(chatCollab); got != "chat,collab" {
+		t.Errorf("two-class list classes = %q, want chat,collab", got)
 	}
 }
 
