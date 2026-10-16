@@ -299,6 +299,11 @@ func (c *ctx) admitKind(x *cand, s *Spec, m Member) res {
 		if !effectFields[field] || node {
 			return acc()
 		}
+		// RFC §6.9.3 role table: an effect-bearing item.set is owner: yes,
+		// collaborator and agent: own items only, guest: no, not even on an
+		// item the guest created (item.create is open to guests; steering
+		// work is not). Guests are deliberately absent from the own-item
+		// case below.
 		switch role {
 		case RoleOwner:
 			return acc()
