@@ -510,6 +510,51 @@ func TestRuntimeClass_LoadFollowerChecksAuthority(t *testing.T) {
 	}
 }
 
+// A follower that joins an in-flight load is held to the same rule as the
+// resident and cold paths: it may not name a different class (cog-review #685).
+func TestRuntimeClass_LoadFollowerCannotChangeClass(t *testing.T) {
+	d, _ := classDriver(t)
+	s, err := d.Create(context.Background(), HermesACPOpts{Class: "chat", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "inflight-2"
+	claim := &loadClaim{done: make(chan struct{})}
+	d.mu.Lock()
+	d.loads[id] = claim
+	d.mu.Unlock()
+	both := func(c string) bool { return c == "chat" || c == "collab" }
+	ch := make(chan error, 1)
+	go func() {
+		_, err := d.Create(context.Background(), HermesACPOpts{Load: id, Class: "collab", AllowClass: both})
+		ch <- err
+	}()
+	claim.sess = s
+	close(claim.done)
+	if err := <-ch; !errors.Is(err, ErrManagedSessionForbidden) {
+		t.Fatalf("follower naming another class: err = %v, want forbidden", err)
+	}
+}
+
+// Env.Set replaces an inherited value of the same name; one entry per key.
+func TestBuildClassEnv_SetOverridesInherited(t *testing.T) {
+	var c RuntimeClass
+	c.Env.Inherit = []string{"FOO", "BAR"}
+	c.Env.Set = map[string]string{"FOO": "new"}
+	env := buildClassEnv([]string{"FOO=old", "BAR=x", "SECRET=y"}, c, func(v string) string { return v })
+	count := map[string]int{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		count[k]++
+		if k == "FOO" && v != "new" {
+			t.Fatalf("FOO = %q, want the Set value", v)
+		}
+	}
+	if count["FOO"] != 1 || count["BAR"] != 1 || count["SECRET"] != 0 {
+		t.Fatalf("env = %v, want exactly one FOO and BAR, no SECRET", env)
+	}
+}
+
 // coldDriver creates a chat-class session on one driver, then returns a second
 // driver over the same records (a restart) plus the session id.
 func coldDriver(t *testing.T) (*HermesACPDriver, string, string) {

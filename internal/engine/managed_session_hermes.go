@@ -817,6 +817,11 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 			if claim.sess != nil && opts.AllowClass != nil && !opts.AllowClass(claim.sess.class) {
 				return nil, fmt.Errorf("%w: caller may not attach this session", ErrManagedSessionForbidden)
 			}
+			// Same rule as the resident and cold paths: a resume cannot
+			// change the session's class, even when it joins a shared load.
+			if claim.sess != nil && opts.Class != "" && opts.Class != claim.sess.class {
+				return nil, fmt.Errorf("%w: a resume cannot change a session's class", ErrManagedSessionForbidden)
+			}
 			return claim.sess, claim.err
 		case <-ctx.Done():
 			return nil, ctx.Err()

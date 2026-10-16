@@ -263,6 +263,12 @@ func buildClassEnv(baseEnv []string, c RuntimeClass, expand func(string) string)
 			}
 		}
 		if !dropped {
+			// Env.Set wins over an inherited value of the same name: never
+			// emit two entries for one key (which one a child sees would
+			// depend on its libc).
+			if _, set := c.Env.Set[k]; set {
+				continue
+			}
 			env = append(env, kv)
 		}
 	}
