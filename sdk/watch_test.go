@@ -400,3 +400,68 @@ func TestPathToURI(t *testing.T) {
 		})
 	}
 }
+
+// An oversized directory is polled instead of handed to fsnotify (kqueue would
+// hold one fd per file in it), and the poll still reports new files.
+func TestWatcher_OversizedDirIsPolled(t *testing.T) {
+	old := watchPollInterval
+	watchPollInterval = 50 * time.Millisecond
+	defer func() { watchPollInterval = old }()
+
+	tmpDir := t.TempDir()
+	cogDir := filepath.Join(tmpDir, ".cog")
+	bulk := filepath.Join(cogDir, "mem", "bulk")
+	if err := os.MkdirAll(bulk, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cogDir, "id.cog"), []byte("---\nid: test\n---\n# Test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i <= watchDirEntryCap; i++ {
+		name := filepath.Join(bulk, "doc-"+strings.Repeat("x", i%7)+string(rune('a'+i%26))+"-"+time.Duration(i).String()+".cog.md")
+		if err := os.WriteFile(name, []byte("# x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	kernel, err := Connect(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kernel.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	watcher, err := kernel.WatchURI(ctx, "cog:mem/**")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+
+	// The event loop owns watcher.polled, so assert through fsnotify's own
+	// list; the polled create event below proves the poll path.
+	for _, p := range watcher.fsWatch.WatchList() {
+		if strings.HasPrefix(p, bulk) {
+			t.Fatalf("fsnotify watches %s inside the oversized dir", p)
+		}
+	}
+
+	newFile := filepath.Join(bulk, "new-insight.cog.md")
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		os.WriteFile(newFile, []byte("# new"), 0644)
+	}()
+	for {
+		select {
+		case ev := <-watcher.Events:
+			if ev.FilePath == newFile {
+				if ev.Type != WatchCreated {
+					t.Errorf("event.Type = %q, want %q", ev.Type, WatchCreated)
+				}
+				return
+			}
+		case <-ctx.Done():
+			t.Fatal("timeout waiting for polled create event")
+		}
+	}
+}

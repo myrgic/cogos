@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -51,13 +52,54 @@ type Watcher struct {
 	Events <-chan WatchEvent
 
 	// internal fields
-	events   chan WatchEvent
-	fsWatch  *fsnotify.Watcher
-	cancel   context.CancelFunc
-	done     chan struct{}
-	kernel   *Kernel
-	mu       sync.Mutex
-	closed   bool
+	events  chan WatchEvent
+	fsWatch *fsnotify.Watcher
+	cancel  context.CancelFunc
+	done    chan struct{}
+	kernel  *Kernel
+	mu      sync.Mutex
+	closed  bool
+
+	// polled maps each oversized directory (see watchDirEntryCap) to its last
+	// listing. Owned by the event loop once WatchURI has returned.
+	polled       map[string]map[string]polledEntry
+	pollInterval time.Duration
+}
+
+const (
+	// watchDirEntryCap is the largest directory (by entry count) handed to
+	// fsnotify. Its kqueue backend (macOS/BSD) opens one fd per file in every
+	// watched directory, so a bulk directory would hold fds proportional to
+	// its size. Larger directories are polled instead. Same cap and reason
+	// as the kernel's in-process watchers (internal/engine/mem_watcher.go).
+	watchDirEntryCap = 256
+)
+
+// watchPollInterval is how often oversized directories are re-listed. A var
+// so tests can shorten it.
+var watchPollInterval = 30 * time.Second
+
+// polledEntry is the (mtime, size) fingerprint used to diff a polled directory.
+type polledEntry struct {
+	mtime time.Time
+	size  int64
+}
+
+// listDir returns the directory's entries keyed by full path, or nil on error.
+func listDir(dir string) map[string]polledEntry {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]polledEntry, len(entries))
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		out[filepath.Join(dir, e.Name())] = polledEntry{mtime: info.ModTime(), size: info.Size()}
+	}
+	return out
 }
 
 // Close stops watching and releases resources.
@@ -135,8 +177,15 @@ func (k *Kernel) WatchURI(ctx context.Context, uriPattern string) (*Watcher, err
 		return nil, NewError("Watch", err)
 	}
 
-	// Add paths to watcher
+	// Add paths to watcher; directories over watchDirEntryCap are polled.
+	polled := make(map[string]map[string]polledEntry)
 	for _, path := range watchPaths {
+		if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
+			if entries, readErr := os.ReadDir(path); readErr == nil && len(entries) > watchDirEntryCap {
+				polled[path] = listDir(path)
+				continue
+			}
+		}
 		if err := fsWatch.Add(path); err != nil {
 			fsWatch.Close()
 			return nil, NewPathError("Watch", path, err)
@@ -156,6 +205,9 @@ func (k *Kernel) WatchURI(ctx context.Context, uriPattern string) (*Watcher, err
 		cancel:  cancel,
 		done:    make(chan struct{}),
 		kernel:  k,
+
+		polled:       polled,
+		pollInterval: watchPollInterval,
 	}
 
 	// Start event loop
@@ -173,10 +225,32 @@ func (w *Watcher) eventLoop(ctx context.Context, pattern *watchPattern, pathMapp
 	debounce := make(map[string]time.Time)
 	const debounceWindow = 50 * time.Millisecond
 
+	// Poll tick for oversized directories; nil channel (never fires) when
+	// every directory went to fsnotify.
+	var tick <-chan time.Time
+	if len(w.polled) > 0 {
+		ticker := time.NewTicker(w.pollInterval)
+		defer ticker.Stop()
+		tick = ticker.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+
+		case <-tick:
+			for _, ev := range w.pollChanges() {
+				if watchEvent := w.convertFSEvent(ev, pattern, pathMapping); watchEvent != nil {
+					select {
+					case w.events <- *watchEvent:
+					case <-ctx.Done():
+						return
+					default:
+						// Channel full, drop event
+					}
+				}
+			}
 
 		case event, ok := <-w.fsWatch.Events:
 			if !ok {
@@ -212,6 +286,34 @@ func (w *Watcher) eventLoop(ctx context.Context, pattern *watchPattern, pathMapp
 			_ = err
 		}
 	}
+}
+
+// pollChanges re-lists each oversized directory and returns the differences
+// since the last listing as fsnotify events, so they share convertFSEvent.
+func (w *Watcher) pollChanges() []fsnotify.Event {
+	var out []fsnotify.Event
+	for dir, prev := range w.polled {
+		cur := listDir(dir)
+		if cur == nil {
+			continue
+		}
+		for path, e := range cur {
+			old, ok := prev[path]
+			switch {
+			case !ok:
+				out = append(out, fsnotify.Event{Name: path, Op: fsnotify.Create})
+			case !old.mtime.Equal(e.mtime) || old.size != e.size:
+				out = append(out, fsnotify.Event{Name: path, Op: fsnotify.Write})
+			}
+		}
+		for path := range prev {
+			if _, ok := cur[path]; !ok {
+				out = append(out, fsnotify.Event{Name: path, Op: fsnotify.Remove})
+			}
+		}
+		w.polled[dir] = cur
+	}
+	return out
 }
 
 // convertFSEvent converts an fsnotify event to a WatchEvent.
@@ -425,6 +527,11 @@ func (k *Kernel) resolveWatchPaths(pattern *watchPattern) ([]string, map[string]
 			entries, err := filepath.Glob(filepath.Join(basePath, "*"))
 			if err == nil {
 				for _, entry := range entries {
+					// Directories only: a file is already covered by its
+					// parent's watch, and adding it again costs another fd.
+					if info, statErr := os.Stat(entry); statErr != nil || !info.IsDir() {
+						continue
+					}
 					paths = append(paths, entry)
 					relPath := strings.TrimPrefix(entry, k.MemoryDir()+"/")
 					mapping[entry] = "cog:mem/" + relPath
