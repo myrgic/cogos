@@ -356,6 +356,54 @@ func grantHasScope(g *IdentityGrant, want string) bool {
 	return false
 }
 
+// ScopeManagedSessionsClassPrefix narrows a grant to named runtime classes
+// (rooms RFC §5.2): "managed-sessions:class:chat" lets a surface create and
+// drive sessions of class "chat" and nothing else; "managed-sessions:class:*"
+// is every class. A grant carrying the bare ScopeManagedSessions (or the
+// node-root scope, or the legacy write exception) is unscoped: it may use any
+// class, including the default class a request without "class" gets. A grant
+// with ONLY class scopes may never touch a classless session.
+const ScopeManagedSessionsClassPrefix = ScopeManagedSessions + ":class:"
+
+// classScopedManagedSessions lets a grant holding only class scopes through
+// the coarse managed-sessions route gate. Which sessions it may then touch is
+// decided per class by managedSessionClassAuthority.
+func classScopedManagedSessions(g *IdentityGrant, want string) bool {
+	if want != ScopeManagedSessions || g == nil {
+		return false
+	}
+	for _, have := range g.Scope {
+		if strings.HasPrefix(have, ScopeManagedSessionsClassPrefix) && len(have) > len(ScopeManagedSessionsClassPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// managedSessionClassAuthority returns the predicate "may this caller use
+// runtime class c" ("" is the default class). No grant in the context means
+// the request did not pass the grant gate (gate disabled, or an exempt read),
+// which is unrestricted exactly as before runtime classes existed.
+func managedSessionClassAuthority(r *http.Request) func(class string) bool {
+	g, ok := grantFromContext(r.Context())
+	if !ok {
+		return nil
+	}
+	classes := map[string]bool{}
+	for _, have := range g.Scope {
+		switch {
+		case have == nodeRootScope, have == ScopeManagedSessions, have == ScopeManagedSessionsClassPrefix+"*":
+			return nil
+		case have == ScopeWrite && g.Actor == "":
+			// legacyWriteDrivesManagedSessions: the stage-studio surface grant.
+			return nil
+		case strings.HasPrefix(have, ScopeManagedSessionsClassPrefix):
+			classes[strings.TrimPrefix(have, ScopeManagedSessionsClassPrefix)] = true
+		}
+	}
+	return func(class string) bool { return class != "" && classes[class] }
+}
+
 // legacyWriteDrivesManagedSessions is the one compatibility rule for G0: a
 // surface grant (no actor) carrying ScopeWrite may still drive managed
 // sessions, because the stage's `stage-studio` grant is minted with
@@ -500,7 +548,7 @@ func (s *Server) grantAuthMiddleware(next http.Handler) http.Handler {
 		// 403 rather than 401: the credential is genuine and the caller is
 		// authenticated, it simply lacks authority for THIS route, so
 		// re-presenting or refreshing the same grant will not help.
-		if want := requiredScopeForRequest(r); !grantHasScope(grant, want) && !legacyWriteDrivesManagedSessions(grant, want) {
+		if want := requiredScopeForRequest(r); !grantHasScope(grant, want) && !legacyWriteDrivesManagedSessions(grant, want) && !classScopedManagedSessions(grant, want) {
 			writeJSONError(w, http.StatusForbidden, "insufficient_scope",
 				"grant does not carry the '"+want+"' scope required for this route")
 			return
