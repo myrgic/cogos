@@ -219,6 +219,9 @@ type ctx struct {
 	replies  map[string][]*cand
 	devices  map[string]bool // canonical DeviceIDs of the logs held
 	idLosers map[string]bool // item.create entry ids that lose an item id to a lower entry id
+	// final is Evaluate's verdict table so far. admit reads it only to tell a
+	// cited spec that is held in this call (held) from one rejected (spec_lost).
+	final map[string]res
 }
 
 // Evaluate evaluates a SET of entries for one room. The result is a pure
@@ -338,6 +341,7 @@ func Evaluate(p Params, entries []*Entry) *Outcome {
 	}
 
 	final := map[string]res{} // id -> verdict decided so far
+	c.final = final
 	// ---- Equivocation (Layer 2.3), a function of the set. ---------------
 	equivFrom := map[string]uint64{}
 	for log, m := range c.byLogSeq {
@@ -382,7 +386,7 @@ func Evaluate(p Params, entries []*Entry) *Outcome {
 				changed = true
 				continue
 			}
-			r, ok := c.resolve(x, resolved)
+			r, ok := c.resolve(x, resolved, final)
 			if !ok {
 				heldWhy[x.id] = r.code
 				continue
@@ -619,7 +623,7 @@ func wireCheck(e *Entry, keys map[bep.DeviceID]*ecdsa.PublicKey, room, id string
 
 // resolve decides whether x's predecessor and deps are in hand. ok is false
 // when x must wait; otherwise the res is accepted or a Layer 2 rejection.
-func (c *ctx) resolve(x *cand, resolved map[string]bool) (res, bool) {
+func (c *ctx) resolve(x *cand, resolved map[string]bool, final map[string]res) (res, bool) {
 	e := x.e
 	var pred *cand
 	switch {
@@ -648,6 +652,11 @@ func (c *ctx) resolve(x *cand, resolved map[string]bool) (res, bool) {
 		}
 		if !resolved[pred.id] {
 			return held(CodeSeqGap), false
+		}
+		// A rejected predecessor rejects its successors on the same log
+		// (R4-1): the chain past a Layer-2 rejection is not admitted.
+		if final[pred.id].status == StatusRejected {
+			return rej(CodePrevBad), true
 		}
 	}
 	for log, d := range e.Deps {

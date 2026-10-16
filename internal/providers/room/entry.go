@@ -11,8 +11,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"regexp"
+	"strings"
 
 	"github.com/myrgic/cogos/pkg/substrate/bep"
 )
@@ -143,6 +145,9 @@ func ParseEntry(raw []byte) (*Entry, error) {
 	if err := exactKeys(v); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
+	if err := exactNumbers(v); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var e Entry
@@ -153,6 +158,44 @@ func ParseEntry(raw []byte) (*Entry, error) {
 		return nil, err
 	}
 	return &e, nil
+}
+
+// exactNumbers keeps every number on the wire exact in the float64 that
+// decoding produces. Without it, two byte strings that differ only in a body
+// integer above 2^53 (or in digits a float64 cannot hold) collapse to one
+// value and hash to one id. A number is accepted only when its literal is the
+// shortest round-trip form of its float64, and integers stay within 2^53-1.
+func exactNumbers(v any) error {
+	switch x := v.(type) {
+	case json.Number:
+		f, err := x.Float64()
+		if err != nil {
+			return fmt.Errorf("number %s: %v", x, err)
+		}
+		if math.IsInf(f, 0) || math.IsNaN(f) {
+			return fmt.Errorf("number %s is not finite", x)
+		}
+		if !strings.ContainsAny(string(x), ".eE") && math.Abs(f) > MaxSafeInt {
+			return fmt.Errorf("integer %s is above 2^53-1", x)
+		}
+		s, err := FormatNumber(f)
+		if err != nil || s != string(x) {
+			return fmt.Errorf("number %s does not round-trip exactly (canonical %s)", x, s)
+		}
+	case map[string]any:
+		for _, m := range x {
+			if err := exactNumbers(m); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, m := range x {
+			if err := exactNumbers(m); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // exactKeys rejects any key of the entry, its actor, its attested block or a

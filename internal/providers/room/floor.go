@@ -52,11 +52,40 @@ func firstRune(s string) rune {
 	return 0
 }
 
+// hlcCompare orders two HLC strings ("<UTC timestamp>/<counter>", counter
+// decimal, unpadded allowed by the entry grammar). The timestamp is fixed
+// width, so it compares lexically; the counter compares numerically, so "/9"
+// sorts before "/10" (R4-3).
+func hlcCompare(a, b string) int {
+	ta, ca, _ := strings.Cut(a, "/")
+	tb, cb, _ := strings.Cut(b, "/")
+	if ta != tb {
+		if ta < tb {
+			return -1
+		}
+		return 1
+	}
+	ca, cb = strings.TrimLeft(ca, "0"), strings.TrimLeft(cb, "0")
+	if len(ca) != len(cb) {
+		if len(ca) < len(cb) {
+			return -1
+		}
+		return 1
+	}
+	if ca != cb {
+		if ca < cb {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
 // orderKey is the display order: hlc, then log, then seq. It is used only
 // where the RFC says "last" over a causal past; it never decides validity.
 func orderLess(a, b *cand) bool {
-	if a.e.HLC != b.e.HLC {
-		return a.e.HLC < b.e.HLC
+	if c := hlcCompare(a.e.HLC, b.e.HLC); c != 0 {
+		return c < 0
 	}
 	if a.e.Log != b.e.Log {
 		return a.e.Log < b.e.Log
@@ -230,19 +259,26 @@ func PickWinner(claims []Claim, priority []string) (string, bool) {
 		}
 	}
 	set = tie
+	// R4-6: with several default claims, the winner is chosen by the same
+	// deterministic order below (priority, then member id), never by input order.
+	var defs []Claim
 	for _, cl := range set {
 		if cl.Default {
-			return cl.Member, true
+			defs = append(defs, cl)
 		}
 	}
-	var firm []Claim
-	for _, cl := range set {
-		if !cl.Fallback {
-			firm = append(firm, cl)
+	if len(defs) > 0 {
+		set = defs
+	} else {
+		var firm []Claim
+		for _, cl := range set {
+			if !cl.Fallback {
+				firm = append(firm, cl)
+			}
 		}
-	}
-	if len(firm) > 0 {
-		set = firm
+		if len(firm) > 0 {
+			set = firm
+		}
 	}
 	rank := func(id string) int {
 		for i, p := range priority {

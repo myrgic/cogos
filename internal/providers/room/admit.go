@@ -22,6 +22,11 @@ func (c *ctx) admit(x *cand) res {
 	// The spec the entry is written under.
 	s := c.specByID[e.Spec]
 	if s == nil {
+		// A cited spec held in this call is held, never rejected (RFC
+		// section 6.9.1 held spec; P4-1 round 4 R4-5).
+		if r, decided := c.final[e.Spec]; decided && r.status == StatusHeld {
+			return held(CodeSpecMissing)
+		}
 		if _, known := c.specGen[e.Spec]; known {
 			return rej(CodeSpecLost)
 		}
@@ -90,8 +95,14 @@ func (c *ctx) admit(x *cand) res {
 		// 6.9.1, member re-add).
 		for _, t := range c.chain {
 			if co, removed := t.Cutoffs[a.MemberID()]; removed {
-				if e.Seq > co[e.Log] && !c.readdedBy(t, a.MemberID(), s) {
-					return rej(CodeAfterRemoval)
+				// A log absent from the cutoff map has no cutoff; it is not cutoff 0.
+				if cut, pinned := co[e.Log]; pinned && e.Seq > cut {
+					if !c.readdedBy(t, a.MemberID(), s) {
+						return rej(CodeAfterRemoval)
+					}
+					// Above the cutoff and lifted by a re-add: new work, not
+					// before the removal.
+					continue
 				}
 				before = true
 			}
