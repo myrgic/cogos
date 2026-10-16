@@ -1503,7 +1503,7 @@
     },
     {
       "file": "internal/engine/room_board.go",
-      "line": 403,
+      "line": 423,
       "column": 12,
       "primitive": "engine.AppendEvent(bucket)",
       "func": "(*RoomBoardStore).appendRoomEntryLocked",

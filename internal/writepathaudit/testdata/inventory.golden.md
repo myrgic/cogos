@@ -73,7 +73,7 @@ Total sites: 245  (cog: 104, home: 2, elsewhere: 13, unanchored: 85, dynamic: 41
 | `{root}/.cog/mem/semantic/lineage/projections` | (*ProjectionReconciler).LoadConfig (`os.MkdirAll`) | internal/engine/projection_reconciler.go:218 | internal:engine |
 | `dirname(<WorkspaceRoot>/.cog/run/proprioceptive.jsonl)` | NewProprioceptiveLogger (`os.MkdirAll`) | internal/engine/proprioceptive.go:54 | internal:engine |
 | `<WorkspaceRoot>/.cog/run/proprioceptive.jsonl` | (*ProprioceptiveLogger).Log (`os.OpenFile`) | internal/engine/proprioceptive.go:72 | internal:engine |
-| `<WorkspaceRoot>/.cog/ledger/rooms/events.jsonl` | (*RoomBoardStore).appendRoomEntryLocked (`engine.AppendEvent(bucket)`) | internal/engine/room_board.go:403 | internal:engine |
+| `<WorkspaceRoot>/.cog/ledger/rooms/events.jsonl` | (*RoomBoardStore).appendRoomEntryLocked (`engine.AppendEvent(bucket)`) | internal/engine/room_board.go:423 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/runs/events.jsonl` | (*RunBoardStore).commitLocked (`engine.AppendEvent(bucket)`) | internal/engine/run_board.go:364 | internal:engine |
 | `<WorkspaceRoot>/.cog/run` | newAttentionLog (`os.MkdirAll`) | internal/engine/serve_attention.go:46 | internal:engine |
 | `<WorkspaceRoot>/.cog/run/attention.jsonl` | (*attentionLog).append (`os.OpenFile`) | internal/engine/serve_attention.go:53 | internal:engine |

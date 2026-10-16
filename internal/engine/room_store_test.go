@@ -377,6 +377,85 @@ func TestRoomStoreEventsActorFilter(t *testing.T) {
 	}
 }
 
+// TestRoomStoreSelfCertNotDuplicated: every entry this node authors already
+// carries the node's own certificate through certListLocked, so appending
+// several self-authored entries must not accumulate duplicate copies of that
+// certificate in the room's cert list.
+func TestRoomStoreSelfCertNotDuplicated(t *testing.T) {
+	root := t.TempDir()
+	resetLedgerCacheForTest()
+	t.Cleanup(resetLedgerCacheForTest)
+
+	f := newRoomStoreFixture(t)
+	st := NewRoomBoardStore(root)
+	if err := st.ConfigureNodeKey(f.certDir); err != nil {
+		t.Fatalf("ConfigureNodeKey: %v", err)
+	}
+	roomID := f.declare("oracles")
+	owner := RoomCaller{Actor: "chaz"}
+
+	// One genesis plus several further entries, all authored on this node's
+	// own log (the fixture signs with this node's key).
+	if _, err := st.Append(roomID, f.genesisJSON(roomID), nil, owner); err != nil {
+		t.Fatalf("append genesis: %v", err)
+	}
+	const extra = 5
+	for i := 0; i < extra; i++ {
+		e, _ := f.itemCreate(roomID, room.Actor{Person: "chaz"}, nil)
+		if _, err := st.Append(roomID, roomJSON(t, e), nil, owner); err != nil {
+			t.Fatalf("append self-authored item.create %d: %v", i, err)
+		}
+	}
+
+	st.mu.Lock()
+	rec := st.rooms[roomID]
+	if rec == nil {
+		st.mu.Unlock()
+		t.Fatalf("no room record for %s", roomID)
+	}
+	stored := append([][]byte(nil), rec.certs...)
+	effective := st.certListLocked(rec)
+	st.mu.Unlock()
+
+	// Non-vacuous: the node's own certificate must actually be in the list,
+	// otherwise the entries were not self-authored and nothing is proven.
+	if !roomCertListHas(effective, f.key.certDER) {
+		t.Fatalf("room cert list does not carry this node's certificate after %d self-authored appends", extra+1)
+	}
+	for _, tc := range []struct {
+		name  string
+		certs [][]byte
+	}{
+		{"stored", stored},
+		{"effective", effective},
+	} {
+		counts := map[string]int{}
+		for _, c := range tc.certs {
+			counts[string(c)]++
+		}
+		for _, n := range counts {
+			if n != 1 {
+				t.Errorf("%s cert list holds %d copies of one certificate; want each distinct cert once (%d entries, %d distinct, after %d self-authored appends)",
+					tc.name, n, len(tc.certs), len(counts), extra+1)
+			}
+		}
+		if len(counts) != len(tc.certs) {
+			t.Errorf("%s cert list has %d entries but %d distinct certs; want no duplicates",
+				tc.name, len(tc.certs), len(counts))
+		}
+	}
+}
+
+// roomCertListHas reports whether der appears in certs.
+func roomCertListHas(certs [][]byte, der []byte) bool {
+	for _, c := range certs {
+		if bytes.Equal(c, der) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestRoomStoreNodeKeyDeviceIdMatchesCert: the device id the store reports for
 // this node's key equals the id the BEP cert tooling reports for the same cert.
 // The key is a fixture generated inside the test — never a real key on disk.

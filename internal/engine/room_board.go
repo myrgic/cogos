@@ -24,6 +24,7 @@ package engine
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
@@ -204,13 +205,31 @@ func (st *RoomBoardStore) ConfigureNodeKey(certDir string) error {
 	return nil
 }
 
+// hasCertDER reports whether der is already in certs. Certificates are DER
+// byte strings, so the test is byte equality.
+func hasCertDER(certs [][]byte, der []byte) bool {
+	for _, c := range certs {
+		if bytes.Equal(c, der) {
+			return true
+		}
+	}
+	return false
+}
+
 // certListLocked returns the DER certificates available for a room: those
 // carried in the ledger plus this node's own certificate once a key is loaded.
-// Caller holds st.mu.
+// It is the single place that assembles the cert list, and it never emits the
+// same certificate twice — a certificate that reached the room both through
+// the ledger and through this node's key is listed once. Caller holds st.mu.
 func (st *RoomBoardStore) certListLocked(rec *roomRec) [][]byte {
 	out := make([][]byte, 0, len(rec.certs)+1)
-	out = append(out, rec.certs...)
-	if st.key != nil && len(st.key.certDER) > 0 {
+	for _, c := range rec.certs {
+		if len(c) == 0 || hasCertDER(out, c) {
+			continue
+		}
+		out = append(out, c)
+	}
+	if st.key != nil && len(st.key.certDER) > 0 && !hasCertDER(out, st.key.certDER) {
 		out = append(out, st.key.certDER)
 	}
 	return out
@@ -258,8 +277,9 @@ func (st *RoomBoardStore) ensureFoldedLocked(rec *roomRec) {
 // Append validates and persists one entry for a room, then folds it. raw is
 // the strict JSON of a room.Entry (RFC section 6.9.1). certDER is an optional
 // DER certificate delivered with the entry; when nil and the entry is on this
-// node's own log, the node's own certificate is used. The caller must be the
-// genesis owner (genesis) or a member of the room's latest spec.
+// node's own log, the node's own certificate is used. A certificate the room
+// already holds is never recorded twice. The caller must be the genesis owner
+// (genesis) or a member of the room's latest spec.
 func (st *RoomBoardStore) Append(roomID string, raw []byte, certDER []byte, caller RoomCaller) (RoomEntryView, error) {
 	e, err := room.ParseEntry(raw)
 	if err != nil {
@@ -317,7 +337,7 @@ func (st *RoomBoardStore) Append(roomID string, raw []byte, certDER []byte, call
 
 	entries := append(append([]*room.Entry(nil), rec.entries...), e)
 	certs := st.certListLocked(rec)
-	if len(certDER) > 0 {
+	if len(certDER) > 0 && !hasCertDER(certs, certDER) {
 		certs = append(certs, certDER)
 	}
 	binding := rec.genesisLog
@@ -351,7 +371,7 @@ func (st *RoomBoardStore) Append(roomID string, raw []byte, certDER []byte, call
 		st.order = append(st.order, roomID)
 	}
 	rec.entries = entries
-	if len(certDER) > 0 {
+	if len(certDER) > 0 && !hasCertDER(rec.certs, certDER) {
 		rec.certs = append(rec.certs, certDER)
 	}
 	if e.Kind == room.KindGenesis {
@@ -608,7 +628,7 @@ func RebuildRoomBoardStoreFromLedger(workspaceRoot string) (*RoomBoardStore, err
 			p.genesisLog = e.Log
 		}
 		if s, _ := d["cert"].(string); s != "" {
-			if der, derr := base64.StdEncoding.DecodeString(s); derr == nil {
+			if der, derr := base64.StdEncoding.DecodeString(s); derr == nil && !hasCertDER(p.certs, der) {
 				p.certs = append(p.certs, der)
 			}
 		}
