@@ -1575,7 +1575,7 @@
     },
     {
       "file": "internal/engine/serve.go",
-      "line": 1426,
+      "line": 1438,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",
@@ -1680,6 +1680,18 @@
       "resolved": true,
       "subsystem": "internal:engine",
       "raw": "identityGrantsLedgerSession"
+    },
+    {
+      "file": "internal/engine/serve_share_links.go",
+      "line": 385,
+      "column": 9,
+      "primitive": "engine.AppendEvent(bucket)",
+      "func": "(*ShareLinkStore).appendLocked",
+      "pattern": "\u003cWorkspaceRoot\u003e/.cog/ledger/identity-share-links/events.jsonl",
+      "category": "cog",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "shareLinksLedgerSession"
     },
     {
       "file": "internal/engine/turn_storage.go",
@@ -2895,14 +2907,14 @@
     }
   ],
   "summary": {
-    "total": 241,
-    "cog": 100,
+    "total": 242,
+    "cog": 101,
     "home": 2,
     "elsewhere": 13,
     "unanchored": 85,
     "dynamic": 41,
     "by_primitive": {
-      "engine.AppendEvent(bucket)": 5,
+      "engine.AppendEvent(bucket)": 6,
       "io.Copy": 7,
       "os.Create": 6,
       "os.CreateTemp": 8,
