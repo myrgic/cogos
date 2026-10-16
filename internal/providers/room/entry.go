@@ -14,7 +14,6 @@ import (
 	"math"
 	"math/big"
 	"regexp"
-	"strings"
 
 	"github.com/myrgic/cogos/pkg/substrate/bep"
 )
@@ -178,7 +177,7 @@ func exactNumbers(v any) error {
 		if math.IsInf(f, 0) || math.IsNaN(f) {
 			return fmt.Errorf("number %s is not finite", x)
 		}
-		if !strings.ContainsAny(string(x), ".eE") && math.Abs(f) > MaxSafeInt {
+		if math.Abs(f) > MaxSafeInt { // every notation, exponent forms included (cog-review on a576d63)
 			return fmt.Errorf("integer %s is above 2^53-1", x)
 		}
 		s, err := FormatNumber(f)

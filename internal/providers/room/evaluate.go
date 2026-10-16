@@ -668,7 +668,17 @@ func (c *ctx) resolve(x *cand, resolved map[string]bool, final map[string]res) (
 			return rej(CodePrevBad), true
 		}
 	}
-	for log, d := range e.Deps {
+	// Deps are checked in sorted log order and in two passes, so the verdict
+	// never depends on Go's map iteration order: any bad dep rejects the
+	// entry before any unheld dep can hold it (cog-review on a576d63).
+	depLogs := make([]string, 0, len(e.Deps))
+	for log := range e.Deps {
+		depLogs = append(depLogs, log)
+	}
+	sort.Strings(depLogs)
+	unheld := false
+	for _, log := range depLogs {
+		d := e.Deps[log]
 		if _, canon, err := CanonicalLog(log); err != nil || canon != log {
 			return rej(CodeDepsBad), true
 		}
@@ -685,13 +695,16 @@ func (c *ctx) resolve(x *cand, resolved map[string]bool, final map[string]res) (
 		switch {
 		case match != nil:
 			if !resolved[match.id] {
-				return held(CodeDepsUnheld), false
+				unheld = true
 			}
 		case len(cs) > 0:
 			return rej(CodeDepsBad), true
 		default:
-			return held(CodeDepsUnheld), false
+			unheld = true
 		}
+	}
+	if unheld {
+		return held(CodeDepsUnheld), false
 	}
 	if pred != nil && pred.e.Kind != KindGenesis {
 		for log, pd := range pred.e.Deps {
