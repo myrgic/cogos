@@ -486,6 +486,9 @@ func Evaluate(p Params, entries []*Entry) *Outcome {
 			}
 		}
 		// Spec entries the chain never reached.
+		// Lowest gen first, so a cited spec has its verdict before the entry
+		// that cites it (P4-1 round 5 R5-1). Ties keep cands order.
+		var unreached []*cand
 		for _, x := range cands {
 			if x.e.Kind != KindSpec {
 				continue
@@ -493,6 +496,12 @@ func Evaluate(p Params, entries []*Entry) *Outcome {
 			if _, has := final[x.id]; has {
 				continue
 			}
+			unreached = append(unreached, x)
+		}
+		sort.SliceStable(unreached, func(a, b int) bool {
+			return c.specGen[unreached[a].id] < c.specGen[unreached[b].id]
+		})
+		for _, x := range unreached {
 			final[x.id] = c.admit(x)
 		}
 

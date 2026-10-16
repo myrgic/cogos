@@ -48,6 +48,9 @@ func Canonicalize(v any) ([]byte, error) {
 }
 
 func parseStrict(raw []byte) (any, error) {
+	if err := checkText(raw); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	v, err := parseValue(dec)
@@ -58,6 +61,62 @@ func parseStrict(raw []byte) (any, error) {
 		return nil, fmt.Errorf("%w: trailing content", ErrJCS)
 	}
 	return v, nil
+}
+
+// checkText refuses text that cannot round-trip. encoding/json rewrites
+// invalid UTF-8 bytes and unpaired \uD800-\uDFFF escapes to U+FFFD, so several
+// distinct byte strings would decode to one value and hash to one id.
+func checkText(raw []byte) error {
+	if !utf8.Valid(raw) {
+		return fmt.Errorf("%w: invalid UTF-8", ErrJCS)
+	}
+	for i := 0; i+1 < len(raw); i++ {
+		if raw[i] != '\\' {
+			continue
+		}
+		if raw[i+1] != 'u' {
+			i++ // skip the escaped character, so \\uD800 is not a surrogate escape
+			continue
+		}
+		cu, ok := unicodeEscape(raw, i)
+		if !ok {
+			continue // malformed escape; the decoder rejects it
+		}
+		switch {
+		case cu >= 0xDC00 && cu <= 0xDFFF:
+			return fmt.Errorf("%w: unpaired low surrogate escape", ErrJCS)
+		case cu >= 0xD800 && cu <= 0xDBFF:
+			lo, ok := unicodeEscape(raw, i+6)
+			if !ok || lo < 0xDC00 || lo > 0xDFFF {
+				return fmt.Errorf("%w: unpaired high surrogate escape", ErrJCS)
+			}
+			i += 11
+		default:
+			i += 5
+		}
+	}
+	return nil
+}
+
+// unicodeEscape reads a \uXXXX escape starting at raw[at].
+func unicodeEscape(raw []byte, at int) (int, bool) {
+	if at < 0 || at+6 > len(raw) || raw[at] != '\\' || raw[at+1] != 'u' {
+		return 0, false
+	}
+	v := 0
+	for _, c := range raw[at+2 : at+6] {
+		switch {
+		case c >= '0' && c <= '9':
+			v = v*16 + int(c-'0')
+		case c >= 'a' && c <= 'f':
+			v = v*16 + int(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			v = v*16 + int(c-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return v, true
 }
 
 func parseValue(dec *json.Decoder) (any, error) {

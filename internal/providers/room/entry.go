@@ -145,6 +145,9 @@ func ParseEntry(raw []byte) (*Entry, error) {
 	if err := exactKeys(v); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
+	if err := exactValues(v); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
 	if err := exactNumbers(v); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
@@ -237,6 +240,55 @@ func exactKeys(v any) error {
 					return err
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// exactValues rejects null or empty-string values for known fields. omitempty
+// drops a nil pointer, an empty string and an empty value alike, and ID() runs
+// over the re-marshaled struct, so without this "attested":null,
+// "actor":{"agent":""} and "room":"" would hash to the same id as the clean
+// form. prev is the one nullable field (null on the genesis). body is
+// free-form, head and proof are opaque, and deps is normalized by Canonical.
+func exactValues(v any) error {
+	top, ok := v.(map[string]any)
+	if !ok {
+		return errors.New("entry is not an object")
+	}
+	nonEmpty := func(where string, m map[string]any, keys ...string) error {
+		for _, k := range keys {
+			x, present := m[k]
+			if !present {
+				continue
+			}
+			if s, isStr := x.(string); !isStr || s == "" {
+				return fmt.Errorf("%s: %q must be a non-empty string", where, k)
+			}
+		}
+		return nil
+	}
+	for _, k := range []string{"actor", "attested", "deps"} {
+		if x, present := top[k]; present && x == nil {
+			return fmt.Errorf("entry: %q must not be null", k)
+		}
+	}
+	if err := nonEmpty("entry", top, "room", "log", "spec", "kind", "hlc", "sig"); err != nil {
+		return err
+	}
+	if x := top["prev"]; x != nil {
+		if err := nonEmpty("entry", top, "prev"); err != nil {
+			return err
+		}
+	}
+	if m, ok := top["actor"].(map[string]any); ok {
+		if err := nonEmpty("actor", m, "person", "agent", "node"); err != nil {
+			return err
+		}
+	}
+	if m, ok := top["attested"].(map[string]any); ok {
+		if err := nonEmpty("attested", m, "subject", "surface", "by"); err != nil {
+			return err
 		}
 	}
 	return nil

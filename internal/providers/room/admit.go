@@ -27,7 +27,12 @@ func (c *ctx) admit(x *cand) res {
 		if r, decided := c.final[e.Spec]; decided && r.status == StatusHeld {
 			return held(CodeSpecMissing)
 		}
+		// A cited spec with no verdict yet is held too, whatever the
+		// evaluation order (P4-1 round 5 R5-1).
 		if _, known := c.specGen[e.Spec]; known {
+			if _, decided := c.final[e.Spec]; !decided {
+				return held(CodeSpecMissing)
+			}
 			return rej(CodeSpecLost)
 		}
 		if y := c.byID[e.Spec]; y != nil && (y.e.Kind == KindSpec || y.e.Kind == KindGenesis) {
@@ -96,7 +101,8 @@ func (c *ctx) admit(x *cand) res {
 		for _, t := range c.chain {
 			if co, removed := t.Cutoffs[a.MemberID()]; removed {
 				// A log absent from the cutoff map has no cutoff; it is not cutoff 0.
-				if cut, pinned := co[e.Log]; pinned && e.Seq > cut {
+				cut, pinned := co[e.Log]
+				if pinned && e.Seq > cut {
 					if !c.readdedBy(t, a.MemberID(), s) {
 						return rej(CodeAfterRemoval)
 					}
@@ -104,7 +110,11 @@ func (c *ctx) admit(x *cand) res {
 					// before the removal.
 					continue
 				}
-				before = true
+				// Only a pinned log at or below its cutoff is before the
+				// removal. An unpinned log (a device that joined later) is not.
+				if pinned {
+					before = true
+				}
 			}
 		}
 	}

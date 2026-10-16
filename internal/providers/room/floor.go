@@ -81,11 +81,31 @@ func hlcCompare(a, b string) int {
 	return 0
 }
 
-// orderKey is the display order: hlc, then log, then seq. It is used only
-// where the RFC says "last" over a causal past; it never decides validity.
+// orderLess is the display order: hlc, then log, then seq. It never decides
+// validity; the causal past is ordered by causalLess.
 func orderLess(a, b *cand) bool {
 	if c := hlcCompare(a.e.HLC, b.e.HLC); c != 0 {
 		return c < 0
+	}
+	if a.e.Log != b.e.Log {
+		return a.e.Log < b.e.Log
+	}
+	return a.e.Seq < b.e.Seq
+}
+
+// causalLess orders two entries of a causal past by the Layer 3 linearization
+// (evaluate.go): vec-sum rank, then log, then seq. A predecessor always sorts
+// before its successors, and hlc is not read (R5-3).
+func (c *ctx) causalLess(a, b *cand) bool {
+	var sa, sb uint64
+	for _, v := range c.vec(a) {
+		sa += v
+	}
+	for _, v := range c.vec(b) {
+		sb += v
+	}
+	if sa != sb {
+		return sa < sb
 	}
 	if a.e.Log != b.e.Log {
 		return a.e.Log < b.e.Log
@@ -107,7 +127,7 @@ func (c *ctx) defaultClaimant(l *cand, s *Spec) string {
 			past = append(past, y)
 		}
 	}
-	sort.Slice(past, func(a, b int) bool { return orderLess(past[a], past[b]) })
+	sort.Slice(past, func(a, b int) bool { return c.causalLess(past[a], past[b]) })
 
 	isAgent := func(id string) bool {
 		m, ok := s.Members[id]
