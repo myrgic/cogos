@@ -768,11 +768,22 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 			}
 			return existing, nil
 		}
+		// Registered but not running (e.g. Crashed): the resume keeps the
+		// session's original class, and the caller needs authority over it.
+		if opts.Class != "" && opts.Class != existing.class {
+			d.mu.Unlock()
+			return nil, fmt.Errorf("%w: session %s runs class %q; a resume cannot change class", ErrManagedSessionForbidden, opts.Load, existing.class)
+		}
+		opts.Class = existing.class
 	}
 	if claim := d.loads[opts.Load]; claim != nil { // a load of this id is in flight: share it
 		d.mu.Unlock()
 		select {
 		case <-claim.done:
+			// Every caller needs authority over the class the load resolved to.
+			if claim.sess != nil && opts.AllowClass != nil && !opts.AllowClass(claim.sess.class) {
+				return nil, fmt.Errorf("%w: caller may not attach a session of runtime class %q", ErrManagedSessionForbidden, claim.sess.class)
+			}
 			return claim.sess, claim.err
 		case <-ctx.Done():
 			return nil, ctx.Err()

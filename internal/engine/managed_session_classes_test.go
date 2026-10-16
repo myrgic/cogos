@@ -422,3 +422,82 @@ func TestRuntimeClass_LoadsFromKernelYAML(t *testing.T) {
 		t.Fatalf("env = %v", rc.Env)
 	}
 }
+
+// Resuming a registered-but-dead (Crashed) classed session keeps its class,
+// and the authority check runs against that class, not the empty default.
+func TestRuntimeClass_ResumeOfCrashedKeepsClassAndChecksAuthority(t *testing.T) {
+	d, out := classDriver(t) // CrashWindow = 1h: an early crash is terminal
+	old, err := d.Create(context.Background(), HermesACPOpts{Class: "chat", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = old.Prompt(json.RawMessage(`"crash now"`))
+	waitState(t, old, StateCrashed)
+	if err := os.Remove(filepath.Join(out, "chat.argv")); err != nil {
+		t.Fatal(err)
+	}
+
+	// A caller scoped to another class is refused; the crashed entry is untouched.
+	if _, err := d.Create(context.Background(), HermesACPOpts{Load: old.ID(), AllowClass: func(c string) bool { return c == "collab" }}); !errors.Is(err, ErrManagedSessionForbidden) {
+		t.Fatalf("unauthorized resume: err = %v, want forbidden", err)
+	}
+	if d.Get(old.ID()) != old || old.State() != StateCrashed {
+		t.Fatal("refused resume must not replace or detach the crashed session")
+	}
+	// A resume may not change class.
+	if _, err := d.Create(context.Background(), HermesACPOpts{Load: old.ID(), Class: "collab"}); !errors.Is(err, ErrManagedSessionForbidden) {
+		t.Fatalf("resume changing class: err = %v, want forbidden", err)
+	}
+
+	// The chat-scoped caller resumes with no class in the request; class is kept.
+	fresh, err := d.Create(context.Background(), HermesACPOpts{Load: old.ID(), AllowClass: func(c string) bool { return c == "chat" }})
+	if err != nil {
+		t.Fatalf("authorized resume: %v", err)
+	}
+	if got := fresh.Info().Class; got != "chat" {
+		t.Fatalf("resumed class = %q, want chat", got)
+	}
+	// The process was spawned from the class's pinned argv, not the default command.
+	if _, err := os.Stat(filepath.Join(out, "chat.argv")); err != nil {
+		t.Fatalf("resumed process did not run the chat class argv: %v", err)
+	}
+}
+
+// A follower sharing an in-flight load is checked against the class the load
+// resolved to, exactly like every other attach path.
+func TestRuntimeClass_LoadFollowerChecksAuthority(t *testing.T) {
+	d, _ := classDriver(t)
+	s, err := d.Create(context.Background(), HermesACPOpts{Class: "chat", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "inflight-1"
+	claim := &loadClaim{done: make(chan struct{})}
+	d.mu.Lock()
+	d.loads[id] = claim
+	d.mu.Unlock()
+
+	type res struct {
+		sess *HermesACPSession
+		err  error
+	}
+	follow := func(allow func(string) bool) chan res {
+		ch := make(chan res, 1)
+		go func() {
+			sess, err := d.Create(context.Background(), HermesACPOpts{Load: id, AllowClass: allow})
+			ch <- res{sess, err}
+		}()
+		return ch
+	}
+	bad := follow(func(c string) bool { return c == "collab" })
+	good := follow(func(c string) bool { return c == "chat" })
+	claim.sess = s
+	close(claim.done)
+
+	if r := <-bad; !errors.Is(r.err, ErrManagedSessionForbidden) || r.sess != nil {
+		t.Fatalf("unauthorized follower: sess=%v err=%v, want forbidden", r.sess, r.err)
+	}
+	if r := <-good; r.err != nil || r.sess != s {
+		t.Fatalf("authorized follower: sess=%v err=%v", r.sess, r.err)
+	}
+}
