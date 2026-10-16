@@ -34,13 +34,16 @@ type LedgerQuery struct {
 	EventType      string // exact match, or "prefix.*" wildcard
 	AfterSeq       int64  // return events with seq > this (requires SessionID)
 	SinceTimestamp string // RFC3339; return events with timestamp >= this
+	Room           string // match the event data's "room" field (board events)
+	Actor          string // match the event data's "actor" field (board events)
 	Limit          int    // default 100, capped at 1000
 	VerifyChain    bool   // recompute hashes + validate prior_hash links
 }
 
 // LedgerEvent is the public JSON shape for a returned event. It flattens the
 // internal EventEnvelope so clients don't need to know about the two-level
-// hashed_payload/metadata split.
+// hashed_payload/metadata split. Room and Actor are lifted out of the event's
+// data when it carries them (board events carry both, R10c).
 type LedgerEvent struct {
 	Type      string                 `json:"type"`
 	Timestamp string                 `json:"timestamp"`
@@ -49,6 +52,8 @@ type LedgerEvent struct {
 	Hash      string                 `json:"hash"`
 	PriorHash string                 `json:"prior_hash,omitempty"`
 	Source    string                 `json:"source,omitempty"`
+	Room      string                 `json:"room,omitempty"`
+	Actor     string                 `json:"actor,omitempty"`
 	Data      map[string]interface{} `json:"data,omitempty"`
 }
 
@@ -189,6 +194,12 @@ readLoop:
 			if typeMatch != nil && !typeMatch(env.HashedPayload.Type) {
 				continue
 			}
+			if q.Room != "" && dataString(env.HashedPayload.Data, "room") != q.Room {
+				continue
+			}
+			if q.Actor != "" && dataString(env.HashedPayload.Data, "actor") != q.Actor {
+				continue
+			}
 			if q.AfterSeq > 0 && env.Metadata.Seq <= q.AfterSeq {
 				continue
 			}
@@ -234,8 +245,20 @@ func envelopeToLedgerEvent(env *EventEnvelope) LedgerEvent {
 		Hash:      env.Metadata.Hash,
 		PriorHash: env.HashedPayload.PriorHash,
 		Source:    env.Metadata.Source,
+		Room:      dataString(env.HashedPayload.Data, "room"),
+		Actor:     dataString(env.HashedPayload.Data, "actor"),
 		Data:      env.HashedPayload.Data,
 	}
+}
+
+// dataString returns the string value at key in an event's data map, or ""
+// when the map is nil or the value is absent/not a string.
+func dataString(data map[string]interface{}, key string) string {
+	if data == nil {
+		return ""
+	}
+	s, _ := data[key].(string)
+	return s
 }
 
 // verifyEventAgainstChain recomputes the canonical hash for env and checks

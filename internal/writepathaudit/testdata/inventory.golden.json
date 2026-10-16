@@ -1502,6 +1502,18 @@
       "raw": "marker"
     },
     {
+      "file": "internal/engine/room_board.go",
+      "line": 403,
+      "column": 12,
+      "primitive": "engine.AppendEvent(bucket)",
+      "func": "(*RoomBoardStore).appendRoomEntryLocked",
+      "pattern": "\u003cWorkspaceRoot\u003e/.cog/ledger/rooms/events.jsonl",
+      "category": "cog",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "RoomsLedgerBucket"
+    },
+    {
       "file": "internal/engine/rotating_writer.go",
       "line": 47,
       "column": 12,
@@ -1587,7 +1599,7 @@
     },
     {
       "file": "internal/engine/serve.go",
-      "line": 1461,
+      "line": 1480,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",
@@ -2931,14 +2943,14 @@
     }
   ],
   "summary": {
-    "total": 244,
-    "cog": 103,
+    "total": 245,
+    "cog": 104,
     "home": 2,
     "elsewhere": 13,
     "unanchored": 85,
     "dynamic": 41,
     "by_primitive": {
-      "engine.AppendEvent(bucket)": 8,
+      "engine.AppendEvent(bucket)": 9,
       "io.Copy": 7,
       "os.Create": 6,
       "os.CreateTemp": 8,

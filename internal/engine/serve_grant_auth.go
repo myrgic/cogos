@@ -270,6 +270,13 @@ const (
 	roomsRoutePrefix           = "/v1/rooms"
 )
 
+// isRoomsRoutePath reports whether path is in the /v1/rooms route family.
+// Matched exactly or as a path-segment boundary so a hypothetical
+// "/v1/roomsfoo" route is not silently swept in.
+func isRoomsRoutePath(path string) bool {
+	return path == roomsRoutePrefix || strings.HasPrefix(path, roomsRoutePrefix+"/")
+}
+
 // requiredScopeForRequest returns the scope a caller's grant must carry to
 // reach r, or "" when the route carries no scope requirement (liveness alone
 // suffices, exactly as before this change — this function only ever ADDS a
@@ -316,8 +323,10 @@ func requiredScopeForRequest(r *http.Request) string {
 		return ScopeManagedSessions
 	}
 
-	// Room apply: no route exists yet; the mapping is reserved so the first
-	// handler lands already gated.
+	// Room board (serve_rooms.go). Reads are member-gated too, but that is
+	// enforced in the handlers (which know the room's spec); this mapping
+	// only scopes the writes. The whole family is carved out of the blanket
+	// GET exemption so a read still requires a live grant.
 	if r.Method != http.MethodGet && r.Method != http.MethodHead &&
 		(path == roomsRoutePrefix || strings.HasPrefix(path, roomsRoutePrefix+"/")) {
 		return ScopeRoomsWrite
@@ -543,6 +552,14 @@ func (s *Server) grantAuthMiddleware(next http.Handler) http.Handler {
 
 		token := grantTokenFromRequest(r)
 		if token == "" {
+			// The room surface is member-only: a request with no credential
+			// at all is refused 403 (not the write routes' 401), so a caller
+			// cannot mistake "authenticate" for "you are not a member".
+			if isRoomsRoutePath(r.URL.Path) {
+				writeJSONError(w, http.StatusForbidden, "member_grant_required",
+					"a member grant is required for the room API")
+				return
+			}
 			writeJSONError(w, http.StatusUnauthorized, "missing_grant",
 				GrantHeaderName+" header (or Authorization: Bearer <grant>, or x-api-key: <grant>) required for this route")
 			return
@@ -630,6 +647,12 @@ func isGrantExemptRequest(r *http.Request) bool {
 	// The run board is gated on every method too (like /v1/identity): GET is
 	// carved out of the blanket read exemption.
 	if r.URL.Path == runsRoutePrefix || strings.HasPrefix(r.URL.Path, runsRoutePrefix+"/") {
+		return false
+	}
+	// The room board is gated on every method too, and a missing credential
+	// on it is 403 rather than 401 (see grantAuthMiddleware): the room API is
+	// member-only, not merely write-gated.
+	if isRoomsRoutePath(r.URL.Path) {
 		return false
 	}
 	// The pairing flow authenticates inside its handlers: creation and the
