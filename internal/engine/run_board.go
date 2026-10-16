@@ -476,7 +476,18 @@ func validRunOutcome(o string) bool {
 func validRunOwner(o string) bool { return o == "cog" || o == "work" }
 
 // Open writes item.create for a new run (executor manual only in W1).
+// OpenKernelRun (run_board_kernel.go) is the same open path for the executor
+// kinds the kernel hosts itself.
 func (st *RunBoardStore) Open(in RunOpen, actor string) (*Run, error) {
+	if in.Executor.Kind != RunExecutorManual {
+		return nil, fmt.Errorf("%w: executor %q is not accepted in W1 (manual only)", ErrRunInvalid, in.Executor.Kind)
+	}
+	return st.openRun(in, actor)
+}
+
+// openRun writes item.create for a run. Behavior and validation are Open's:
+// callers have already accepted the executor kind.
+func (st *RunBoardStore) openRun(in RunOpen, actor string) (*Run, error) {
 	if strings.TrimSpace(in.Title) == "" || len(in.Title) > maxRunTitleBytes {
 		return nil, fmt.Errorf("%w: title must be 1 to %d bytes", ErrRunInvalid, maxRunTitleBytes)
 	}
@@ -485,9 +496,6 @@ func (st *RunBoardStore) Open(in RunOpen, actor string) (*Run, error) {
 	}
 	if !validRunOwner(in.Owner) {
 		return nil, fmt.Errorf("%w: owner must be cog or work", ErrRunInvalid)
-	}
-	if in.Executor.Kind != RunExecutorManual {
-		return nil, fmt.Errorf("%w: executor %q is not accepted in W1 (manual only)", ErrRunInvalid, in.Executor.Kind)
 	}
 	if in.Origin.By == "" {
 		return nil, fmt.Errorf("%w: origin.by is required", ErrRunInvalid)
