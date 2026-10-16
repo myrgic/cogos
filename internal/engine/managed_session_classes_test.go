@@ -596,3 +596,73 @@ func TestRuntimeClass_DeleteRemovesRecord(t *testing.T) {
 		t.Fatalf("record after delete = %+v, %v", rec, err)
 	}
 }
+
+// Cold delete: a caller not authorized for the recorded class cannot remove
+// the record (which would downgrade the session to the default class), and a
+// default-scoped cold resume is still refused afterwards.
+func TestRuntimeClass_ColdDeleteByUnauthorizedCallerRefused(t *testing.T) {
+	d, _, id := coldDriver(t)
+	for name, allow := range map[string]func(string) bool{
+		"default-only": func(c string) bool { return c == "" },
+		"other-class":  func(c string) bool { return c == "collab" },
+	} {
+		if err := d.DeleteAuthorized(id, allow); !errors.Is(err, ErrManagedSessionForbidden) {
+			t.Fatalf("%s: cold delete err = %v, want forbidden", name, err)
+		}
+		if rec, err := d.loadRecord(id); err != nil || rec.Class != "chat" {
+			t.Fatalf("%s: record after refused delete = %+v, %v", name, rec, err)
+		}
+	}
+	_, err := d.Create(context.Background(), HermesACPOpts{Load: id, AllowClass: func(c string) bool { return c == "" }})
+	if !errors.Is(err, ErrManagedSessionForbidden) {
+		t.Fatalf("default-scoped cold resume after refused delete: err = %v, want forbidden", err)
+	}
+}
+
+// Cold delete fails closed on an unreadable record.
+func TestRuntimeClass_ColdDeleteCorruptRecordRefused(t *testing.T) {
+	d, _, id := coldDriver(t)
+	path := d.managedSessionRecordPath(id)
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.DeleteAuthorized(id, func(string) bool { return true }); !errors.Is(err, ErrManagedSessionForbidden) {
+		t.Fatalf("corrupt record delete err = %v, want forbidden", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("corrupt record must survive a refused delete: %v", err)
+	}
+}
+
+// Cold delete by an authorized caller removes the record.
+func TestRuntimeClass_ColdDeleteAuthorizedRemovesRecord(t *testing.T) {
+	d, _, id := coldDriver(t)
+	if err := d.DeleteAuthorized(id, func(c string) bool { return c == "chat" }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(d.managedSessionRecordPath(id)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("record after authorized delete: %v", err)
+	}
+}
+
+// Over HTTP: the same bypass through the real grant gate.
+func TestRuntimeClass_HTTPColdDeleteGated(t *testing.T) {
+	srv, ts := classServer(t)
+	d := srv.managedSessions
+	owner := mintActorTestGrant(t, srv, "discord-chaz", "chaz", ScopeManagedSessions)
+	collab := mintScopedTestGrant(t, srv, "collab-surface", ScopeManagedSessionsClassPrefix+"collab")
+	var info ManagedSessionInfo
+	if code := g0Do(t, ts, owner, "POST", "/v1/managed-sessions", map[string]any{"class": "chat", "cwd": t.TempDir()}, &info); code != http.StatusCreated {
+		t.Fatalf("create = %d", code)
+	}
+	d.drop(info.SessionID) // forget it in memory, keep the record: now cold
+	if code := g0Do(t, ts, collab, "DELETE", "/v1/managed-sessions/"+info.SessionID, nil, nil); code != http.StatusForbidden {
+		t.Fatalf("collab cold delete = %d, want 403", code)
+	}
+	if rec, err := d.loadRecord(info.SessionID); err != nil || rec.Class != "chat" {
+		t.Fatalf("record after refused cold delete = %+v, %v", rec, err)
+	}
+	if code := g0Do(t, ts, owner, "DELETE", "/v1/managed-sessions/"+info.SessionID, nil, nil); code != http.StatusNoContent {
+		t.Fatalf("owner cold delete = %d, want 204", code)
+	}
+}

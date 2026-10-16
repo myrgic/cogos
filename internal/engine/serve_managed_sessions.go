@@ -177,13 +177,11 @@ func (s *Server) handleManagedSessionGet(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleManagedSessionDelete(w http.ResponseWriter, r *http.Request) {
-	if sess := s.managedSessions.Get(r.PathValue("id")); sess != nil {
-		if allow := managedSessionClassAuthority(r); allow != nil && !allow(sess.class) {
-			writeJSONError(w, http.StatusForbidden, "forbidden", "grant does not permit sessions of this runtime class")
-			return
-		}
+	// Resident or cold, the caller needs authority over the session's class.
+	if err := s.managedSessions.DeleteAuthorized(r.PathValue("id"), managedSessionClassAuthority(r)); err != nil {
+		writeJSONError(w, http.StatusForbidden, "forbidden", "grant does not permit sessions of this runtime class")
+		return
 	}
-	_ = s.managedSessions.Delete(r.PathValue("id"))
 	w.WriteHeader(http.StatusNoContent)
 }
 

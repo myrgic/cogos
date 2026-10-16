@@ -1009,6 +1009,29 @@ func (d *HermesACPDriver) Delete(id string) error {
 	return d.drop(id)
 }
 
+// DeleteAuthorized is Delete behind the class-authority predicate (nil = no
+// restriction). The class is the resident session's, else the durable
+// record's (a cold id): a record is never removed by a caller who could not
+// attach the session it describes. An unreadable record fails closed.
+func (d *HermesACPDriver) DeleteAuthorized(id string, allow func(class string) bool) error {
+	if allow != nil {
+		var class string
+		if sess := d.Get(id); sess != nil {
+			class = sess.class
+		} else {
+			rec, err := d.loadRecord(id)
+			if err != nil {
+				return fmt.Errorf("%w: %v", ErrManagedSessionForbidden, err)
+			}
+			class = rec.Class
+		}
+		if !allow(class) {
+			return fmt.Errorf("%w: caller may not delete a session of runtime class %q", ErrManagedSessionForbidden, class)
+		}
+	}
+	return d.Delete(id)
+}
+
 // drop unregisters and detaches a session but keeps its durable record (Close
 // at kernel shutdown must not forget which class a session belongs to).
 func (d *HermesACPDriver) drop(id string) error {
