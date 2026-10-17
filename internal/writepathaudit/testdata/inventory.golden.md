@@ -205,8 +205,8 @@ These sites structurally resolved (the shape of the path is known) but the ROOT 
 | `{path}` | (*rotatingWriter).rotateLocked (`os.OpenFile`) | internal/engine/rotating_writer.go:141 | internal:engine |
 | `dirname({s.LogFile})` | (*stageUISupervisor).startChild (`os.MkdirAll`) | internal/engine/stage_ui_supervisor.go:512 | internal:engine |
 | `{s.LogFile}` | (*stageUISupervisor).startChild (`os.OpenFile`) | internal/engine/stage_ui_supervisor.go:516 | internal:engine |
-| `dirname({s.PidFile})` | writePidFile (`os.MkdirAll`) | internal/engine/stage_ui_supervisor.go:844 | internal:engine |
-| `{s.PidFile}` | writePidFile (`os.WriteFile`) | internal/engine/stage_ui_supervisor.go:848 | internal:engine |
+| `dirname({s.PidFile})` | writePidFile (`os.MkdirAll`) | internal/engine/stage_ui_supervisor.go:851 | internal:engine |
+| `{s.PidFile}` | writePidFile (`os.WriteFile`) | internal/engine/stage_ui_supervisor.go:855 | internal:engine |
 | `<call:turnSidecarPath>.tmp` | PatchTurnSpeculative (`os.Create`) | internal/engine/turn_storage.go:250 | internal:engine |
 | `<call:turnSidecarPath>` | PatchTurnSpeculative (`os.Rename`) | internal/engine/turn_storage.go:263 | internal:engine |
 | `dirname(<call:turnSidecarPath>)` | appendTurnSidecar (`os.MkdirAll`) | internal/engine/turn_storage.go:352 | internal:engine |
