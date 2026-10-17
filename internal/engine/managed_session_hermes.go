@@ -943,6 +943,9 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 	case opts.Load != "":
 		sid = opts.Load
 		sess.id, sess.ring = sid, NewEventRing(sid, d.cfg.RingSize)
+		if j := newSessionJournalForSession(sess); j != nil {
+			sess.ring.SetJournal(j)
+		}
 		proc.mu.Lock()
 		proc.sessions[sid] = sess
 		proc.mu.Unlock()
@@ -969,6 +972,9 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 	}
 	if sess.ring == nil {
 		sess.id, sess.ring = sid, NewEventRing(sid, d.cfg.RingSize)
+		if j := newSessionJournalForSession(sess); j != nil {
+			sess.ring.SetJournal(j)
+		}
 		proc.mu.Lock()
 		proc.sessions[sid] = sess
 		proc.mu.Unlock()
