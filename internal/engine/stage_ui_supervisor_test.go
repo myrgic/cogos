@@ -1245,3 +1245,21 @@ func fileSize(t *testing.T, path string) int64 {
 	}
 	return st.Size()
 }
+
+// A supervise block that is present but has no cmd is a config error, not
+// "no block" (cog-review on #700): enabled() is true, and building the
+// supervisor fails with the missing field named.
+func TestStageUISupervisor_IncompleteBlockIsAConfigError(t *testing.T) {
+	cfg := &Config{}
+	applyStageUISection(cfg, &stageUISection{Supervise: &stageUISupervisorSection{
+		PidFile: filepath.Join(t.TempDir(), "stage.pid"), LogFile: filepath.Join(t.TempDir(), "stage.log")}})
+	if !cfg.StageUI.Supervise.enabled() {
+		t.Fatal("a present supervise block without cmd reads as absent")
+	}
+	if _, err := newStageUISupervisor(cfg.StageUI); err == nil || !strings.Contains(err.Error(), "cmd") {
+		t.Fatalf("newStageUISupervisor err = %v; want the missing cmd named", err)
+	}
+	if (&Config{}).StageUI.Supervise.enabled() {
+		t.Fatal("an absent block reads as enabled")
+	}
+}

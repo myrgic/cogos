@@ -168,6 +168,7 @@ type StageUIConfig struct {
 // that IS the Stage upstream, and where its pid, log and environment live. An
 // empty Cmd means the block was absent and the supervisor is off.
 type StageUISupervisorConfig struct {
+	Present   bool     // a supervise block appeared in kernel.yaml (even an incomplete one)
 	Cmd       []string // argv of the upstream process; empty = supervisor off
 	Cwd       string   // working directory for the child (optional)
 	EnvFile   string   // KEY=VALUE file layered over the parent environment (optional)
@@ -177,7 +178,11 @@ type StageUISupervisorConfig struct {
 }
 
 // enabled reports whether the supervise block is present (a command is set).
-func (s StageUISupervisorConfig) enabled() bool { return len(s.Cmd) > 0 }
+// enabled reports whether a supervise block was written at all. A block that
+// is present but incomplete (no cmd, pidfile or log_file) still counts, so it
+// reaches newStageUISupervisor and is reported as a config error instead of
+// silently reading as "no block" (cog-review on #700).
+func (s StageUISupervisorConfig) enabled() bool { return s.Present || len(s.Cmd) > 0 }
 
 // stageUISection is the `stage_ui:` block of kernel.yaml.
 type stageUISection struct {
@@ -233,6 +238,7 @@ func applyStageUISection(cfg *Config, s *stageUISection) {
 		// Overlay rather than replace: a sub-block that names only some fields
 		// keeps the defaults for the rest. An absent block (sp == nil) leaves
 		// Supervise untouched, i.e. off.
+		cfg.StageUI.Supervise.Present = true
 		if len(sp.Cmd) > 0 {
 			cfg.StageUI.Supervise.Cmd = sp.Cmd
 		}
