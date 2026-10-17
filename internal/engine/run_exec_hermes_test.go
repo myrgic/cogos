@@ -104,21 +104,86 @@ func turnEnds(t *testing.T, s *HermesACPSession) []ManagedSessionEvent {
 	return out
 }
 
-// waitTurnInFlight blocks until the executor hosts runID and its session has a
-// turn running.
-func waitTurnInFlight(t *testing.T, e *HermesRunExecutor, runID string) {
+// testRunExecutor builds the executor with short cancel bounds. The grace and
+// its retry are policy (runCancelGrace / runCancelRetry in the kernel); a test
+// runs them small so a cancel that has to be forced is still bounded by
+// seconds, not tens of them.
+func testRunExecutor(t *testing.T, board *RunBoardStore, d *HermesACPDriver) *HermesRunExecutor {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	e := NewHermesRunExecutor(board, d)
+	e.cancelGrace = 500 * time.Millisecond
+	e.cancelRetry = 2 * time.Millisecond
+	return e
+}
+
+// runCtx bounds a run's host loop. A turn that never ends fails the test at
+// the deadline instead of hanging the test binary, and a run that ends early
+// is unaffected.
+func runCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// startRun hosts a run on its own goroutine and returns the channel Start's
+// error arrives on. The host loop's context is bounded (runCtx), so a test
+// that stops driving the run still sees Start return.
+func startRun(t *testing.T, e *HermesRunExecutor, runID string, opts HermesACPOpts) <-chan error {
+	t.Helper()
+	ctx := runCtx(t)
+	out := make(chan error, 1)
+	go func() { out <- e.Start(ctx, runID, opts) }()
+	return out
+}
+
+// turnRunningOnAgent reports whether the session's ring shows the agent
+// executing its current turn: an update from the agent after the turn's
+// turn_start. It is the evidence that the agent has taken the prompt in hand,
+// without which a cancel can race the agent's own registration of the turn.
+func turnRunningOnAgent(sess *HermesACPSession) bool {
+	evs, _ := sess.Events().Since(0)
+	start := uint64(0)
+	for _, ev := range evs {
+		if ev.Kind == MSEventTurnStart {
+			start = ev.Seq
+		}
+	}
+	if start == 0 {
+		return false
+	}
+	for _, ev := range evs {
+		if ev.Seq > start && ev.Kind == MSEventSessionUpdate {
+			return true
+		}
+	}
+	return false
+}
+
+// waitAgentTurn blocks until the executor hosts runID, its session has a turn
+// in flight, and the agent has begun that turn. Only then is a cancel safe to
+// send: ACP lets an agent drop a session/cancel that arrives for a turn it has
+// not started, so a cancel sent before the agent reports the turn is a race
+// the test must not rely on. Every wait is deadline-bounded, and a run that
+// ends while its turn is starting fails the test at once: that is a run
+// closed by something other than its turn.
+func waitAgentTurn(t *testing.T, board *RunBoardStore, e *HermesRunExecutor, runID string) *HermesACPSession {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
+		if r, ok := board.Get(runID); ok && r.End != nil {
+			t.Fatalf("run %s ended %s (%q) while its turn was starting", runID, r.End.Outcome, r.End.Reason)
+		}
 		e.mu.Lock()
 		a := e.active[runID]
 		e.mu.Unlock()
-		if a != nil && a.sess != nil && a.sess.Info().TurnInFlight != "" {
-			return
+		if a != nil && a.sess != nil && a.sess.Info().TurnInFlight != "" && turnRunningOnAgent(a.sess) {
+			return a.sess
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("run %s never had a turn in flight", runID)
+	t.Fatalf("run %s never had a turn running on the agent", runID)
+	return nil
 }
 
 // TestRunHermesOKWritesOneRunEnd: a turn that completes normally ends the run
@@ -129,7 +194,7 @@ func TestRunHermesOKWritesOneRunEnd(t *testing.T) {
 	e := NewHermesRunExecutor(board, d)
 	run := openHermesRun(t, board, "answer the brief", "hello from node-a")
 
-	if err := e.Start(context.Background(), run.ID, HermesACPOpts{Profile: "cog", Cwd: t.TempDir()}); err != nil {
+	if err := e.Start(runCtx(t), run.ID, HermesACPOpts{Profile: "cog", Cwd: t.TempDir()}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 
@@ -169,13 +234,11 @@ func TestRunHermesOKWritesOneRunEnd(t *testing.T) {
 func TestRunHermesCancelKills(t *testing.T) {
 	board := NewRunBoardStore("")
 	d := fakeHermesDriver(t, nil)
-	e := NewHermesRunExecutor(board, d)
+	e := testRunExecutor(t, board, d)
 	run := openHermesRun(t, board, "cancel me", "slow work for node-b")
-	cwd := t.TempDir()
 
-	started := make(chan error, 1)
-	go func() { started <- e.Start(context.Background(), run.ID, HermesACPOpts{Cwd: cwd}) }()
-	waitTurnInFlight(t, e, run.ID)
+	started := startRun(t, e, run.ID, HermesACPOpts{Cwd: t.TempDir()})
+	waitAgentTurn(t, board, e, run.ID)
 
 	if err := e.Cancel(run.ID, "cancelled by node-b", "node:node-b"); err != nil {
 		t.Fatalf("cancel: %v", err)
@@ -196,6 +259,150 @@ func TestRunHermesCancelKills(t *testing.T) {
 	}
 }
 
+// TestRunHermesCancelSurvivesLostNotification: an agent that ignores
+// session/cancel must not wedge the run. The kernel re-sends the cancel and,
+// once its grace has elapsed, ends the turn itself, so a cancel always
+// produces exactly one killed run.end.
+func TestRunHermesCancelSurvivesLostNotification(t *testing.T) {
+	board := NewRunBoardStore("")
+	d := fakeHermesDriver(t, nil)
+	e := testRunExecutor(t, board, d)
+	run := openHermesRun(t, board, "agent that ignores cancel", "ignore_cancel work for node-b")
+
+	started := startRun(t, e, run.ID, HermesACPOpts{Cwd: t.TempDir()})
+	waitAgentTurn(t, board, e, run.ID)
+
+	// The cancel is the code's own wait to bound: give it the grace plus the
+	// time an ended turn needs to fold, and fail the test (not the binary) if
+	// it neither returns nor ends the run.
+	cancelled := make(chan error, 1)
+	go func() { cancelled <- e.Cancel(run.ID, "cancelled by node-b", "node:node-b") }()
+	select {
+	case err := <-cancelled:
+		if err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("cancel did not return: the agent ignored the cancel and the grace did not end the turn")
+	}
+	if err := <-started; err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	end := runEndOf(t, board, run.ID)
+	if end.Outcome != RunOutcomeKilled {
+		t.Fatalf("run.end outcome = %q, want %q (reason %q)", end.Outcome, RunOutcomeKilled, end.Reason)
+	}
+	if end.Reason != "cancelled by node-b" {
+		t.Fatalf("run.end reason = %q, want the cancel reason", end.Reason)
+	}
+	if n := endEntries(t, board, run.ID); n != 1 {
+		t.Fatalf("run.end entries = %d, want exactly 1", n)
+	}
+}
+
+// TestRunHermesDroppedSubscriberStillEndsRun: a subscriber the ring drops
+// for falling behind (buffer overflow) is not a session that ended. The turn
+// runs on, the run stays open, and it ends on the turn's real outcome — not
+// crash, which is what a single immediate re-read of the ring would have
+// decided while the turn was still in flight.
+func TestRunHermesDroppedSubscriberStillEndsRun(t *testing.T) {
+	board := NewRunBoardStore("")
+	d, session := captureHermesSession(t)
+	e := testRunExecutor(t, board, d)
+	// Overflow the subscriber the moment Start has it: 512 events fill its
+	// buffer, the next one drops it, before the brief is even sent.
+	e.afterSubscribe = func(s *HermesACPSession) {
+		for i := 0; i <= runEventBuffer; i++ {
+			s.Events().Append(MSEventSessionUpdate, map[string]any{"update": "filler", "n": i})
+		}
+	}
+	run := openHermesRun(t, board, "dropped subscriber", "slow work for node-b")
+
+	started := startRun(t, e, run.ID, HermesACPOpts{Cwd: t.TempDir()})
+	waitAgentTurn(t, board, e, run.ID)
+
+	// The session is live and the turn is in flight: the dropped subscriber
+	// must not have read as "the session vanished before its turn_end".
+	sess := session()
+	if sess == nil {
+		t.Fatal("the executor created no session")
+	}
+	if d.Get(sess.ID()) != sess || sess.State() != StateLive {
+		t.Fatalf("the session did not survive the drop: %v state %v", d.Get(sess.ID()), sess.State())
+	}
+	if end := getRun(t, board, run.ID).End; end != nil {
+		t.Fatalf("run ended %s while its turn was running: a dropped subscriber was read as a gone session", end.Outcome)
+	}
+
+	// End the turn for real: the run must fold that turn's outcome.
+	if err := e.Cancel(run.ID, "cancelled by node-b", "node:node-b"); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if err := <-started; err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	end := runEndOf(t, board, run.ID)
+	if end.Outcome != RunOutcomeKilled {
+		t.Fatalf("run.end outcome = %q, want %q (reason %q)", end.Outcome, RunOutcomeKilled, end.Reason)
+	}
+	if end.Reason != "cancelled by node-b" {
+		t.Fatalf("run.end reason = %q, want the cancel reason", end.Reason)
+	}
+	if n := endEntries(t, board, run.ID); n != 1 {
+		t.Fatalf("run.end entries = %d, want exactly 1", n)
+	}
+	if sess := session(); sess.State() != StateDetached {
+		t.Fatalf("session state = %s, want detached after the run ended", sess.State())
+	}
+}
+
+// TestRunHermesVanishedSessionEndsRunCrash: the drop fix must not swing the
+// other way: a session that is really gone (deleted out from under its run)
+// has no turn_end left to report, so the run still ends — crash, exactly
+// once, without waiting on an event that can never come. The agent here
+// ignores cancels, so the teardown cannot put a turn_end on the ring that
+// reads as the turn ending (a session whose agent does acknowledge the
+// cancel is the killed case, runEndForTurn's existing mapping).
+func TestRunHermesVanishedSessionEndsRunCrash(t *testing.T) {
+	board := NewRunBoardStore("")
+	d, session := captureHermesSession(t)
+	e := testRunExecutor(t, board, d)
+	run := openHermesRun(t, board, "session deleted under it", "ignore_cancel work for node-b")
+
+	started := startRun(t, e, run.ID, HermesACPOpts{Cwd: t.TempDir()})
+	sess := waitAgentTurn(t, board, e, run.ID)
+	if got := session(); got != sess {
+		t.Fatalf("captured session = %p, want the run's %p", got, sess)
+	}
+
+	// The session goes away with the turn still open (a client deleted it, or
+	// its driver let it go): the kernel can no longer observe a turn_end for
+	// the run, and the wait for one must not run on.
+	if err := d.Delete(sess.ID()); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+	select {
+	case err := <-started:
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("start did not return: a session that is gone left the run's wait running")
+	}
+
+	end := runEndOf(t, board, run.ID)
+	if end.Outcome != RunOutcomeCrash {
+		t.Fatalf("run.end outcome = %q, want %q (reason %q)", end.Outcome, RunOutcomeCrash, end.Reason)
+	}
+	if end.Reason == "" {
+		t.Fatal("a crash run.end carries no reason")
+	}
+	if n := endEntries(t, board, run.ID); n != 1 {
+		t.Fatalf("run.end entries = %d, want exactly 1", n)
+	}
+}
+
 // TestRunHermesAgentExitMidTurnCrashes: an agent process that exits during the
 // turn ends the run crash, exactly once, with one turn_end carrying the
 // driver's "agent process exited" error.
@@ -205,7 +412,7 @@ func TestRunHermesAgentExitMidTurnCrashes(t *testing.T) {
 	e := NewHermesRunExecutor(board, d)
 	run := openHermesRun(t, board, "crash mid-turn", "crash now, node-a")
 
-	if err := e.Start(context.Background(), run.ID, HermesACPOpts{Cwd: t.TempDir()}); err != nil {
+	if err := e.Start(runCtx(t), run.ID, HermesACPOpts{Cwd: t.TempDir()}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 
@@ -297,7 +504,7 @@ func TestRunHermesSecondEndRefused(t *testing.T) {
 	e := NewHermesRunExecutor(board, d)
 	run := openHermesRun(t, board, "one end only", "hello node-a")
 
-	if err := e.Start(context.Background(), run.ID, HermesACPOpts{Cwd: t.TempDir()}); err != nil {
+	if err := e.Start(runCtx(t), run.ID, HermesACPOpts{Cwd: t.TempDir()}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	if n := endEntries(t, board, run.ID); n != 1 {
@@ -310,7 +517,7 @@ func TestRunHermesSecondEndRefused(t *testing.T) {
 	if n := endEntries(t, board, run.ID); n != 1 {
 		t.Fatalf("run.end entries after the refused second end = %d, want 1", n)
 	}
-	if err := e.Start(context.Background(), run.ID, HermesACPOpts{Cwd: t.TempDir()}); !errors.Is(err, ErrRunConflict) {
+	if err := e.Start(runCtx(t), run.ID, HermesACPOpts{Cwd: t.TempDir()}); !errors.Is(err, ErrRunConflict) {
 		t.Fatalf("start of an ended run = %v, want a conflict", err)
 	}
 }

@@ -6,11 +6,13 @@
 // (type "run", 30 s tick) is the backstop that closes runs whose turn_end was
 // missed.
 //
-// Ownership: the kernel owns the agent process (ADR-093), so Start is the
-// run's host loop and does not return on the caller's context alone. A run
-// ends when its turn ends (Start writes run.end), when a cancel ends the turn
-// (Cancel -> killed), or when a backstop finds the session gone (BootSweep,
-// the reconcile tick: lost/crash).
+// Ownership: the kernel owns the agent process (ADR-093), not the caller.
+// A run ends when its turn ends (Start writes run.end), when a cancel ends the
+// turn (Cancel -> killed), or when a backstop finds the session gone
+// (BootSweep, the reconcile tick: lost/crash). Start's ctx is the host loop's
+// bound, not the run's lifetime: it bounds the wait for the turn to be
+// observed, and a ctx that ends first ends the run crash (the turn went
+// unreported) rather than leaving the loop running.
 package engine
 
 import (
@@ -41,13 +43,39 @@ const runAgentExited = "agent process exited"
 
 // runEventBuffer is the subscription buffer Start watches the ring with. A
 // subscriber that falls behind is dropped by the ring (not blocked), so
-// awaitTurnEnd falls back to the retained events.
+// awaitTurnEnd re-reads the retained events and re-attaches: a drop is not
+// the turn's end and must not read as one.
 const runEventBuffer = 512
+
+// Cancel bounds. runCancelGrace is how long Cancel re-sends session/cancel
+// before it ends the turn itself, and runCancelRetry is how often it re-sends
+// inside that window: ACP lets an agent ignore a cancel for a turn it has not
+// registered yet, and an agent learns of the turn from the prompt request on
+// a goroutine of its own, so the notification that arrives first can be
+// dropped and the turn then runs on. runCancelStopGrace bounds the wait after
+// that — the turn ending (or being forced), the run.end, and the session
+// teardown that follows it (a stopped agent process) all happen inside it; it
+// is only ever reached when the teardown is stuck.
+const (
+	runCancelGrace     = 5 * time.Second
+	runCancelRetry     = 50 * time.Millisecond
+	runCancelStopGrace = 15 * time.Second
+)
 
 // HermesRunExecutor drives hermes-fork runs on the run board.
 type HermesRunExecutor struct {
 	board  *RunBoardStore
 	driver *HermesACPDriver
+
+	// cancelGrace and cancelRetry are policy: the bound on Cancel's wait for
+	// the agent to end the turn, and how often it re-sends the cancel inside
+	// it (runCancelGrace, runCancelRetry). A kernel and a test each set them.
+	cancelGrace time.Duration
+	cancelRetry time.Duration
+
+	// afterSubscribe is a test seam: called in Start right after the session's
+	// event ring is subscribed, before the brief is sent.
+	afterSubscribe func(*HermesACPSession)
 
 	mu     sync.Mutex
 	active map[string]*runExecSession // run id -> hosting session
@@ -70,16 +98,24 @@ type runExecSession struct {
 // NewHermesRunExecutor builds the executor over a run board and a driver.
 func NewHermesRunExecutor(board *RunBoardStore, driver *HermesACPDriver) *HermesRunExecutor {
 	return &HermesRunExecutor{
-		board:  board,
-		driver: driver,
-		active: map[string]*runExecSession{},
+		board:       board,
+		driver:      driver,
+		cancelGrace: runCancelGrace,
+		cancelRetry: runCancelRetry,
+		active:      map[string]*runExecSession{},
 	}
 }
 
 // Start hosts an already-opened run: creates the Hermes session (opts), sends
 // the brief as the first prompt, and watches the ring for turn_end. The turn
 // result is folded into exactly one run.end (observed_by kernel), and the
-// session is closed before Start returns.
+// session is closed before Start returns. The agent process belongs to the
+// kernel, not the caller (ADR-093), so ctx does not end the run: it bounds
+// how long this host loop waits for the turn to be observed. A ctx that ends
+// while the turn is unobserved ends the run the way a session that vanished
+// before its turn_end does (crash): the session's own turn_end is the only
+// evidence Start folds into another outcome, and Cancel is the way to stop a
+// run before its turn ends.
 func (e *HermesRunExecutor) Start(ctx context.Context, runID string, opts HermesACPOpts) error {
 	run, ok := e.board.Get(runID)
 	if !ok {
@@ -124,6 +160,9 @@ func (e *HermesRunExecutor) Start(ctx context.Context, runID string, opts Hermes
 	baseline := sess.Events().LastSeq()
 	sub := sess.Events().Subscribe(baseline, runEventBuffer)
 	defer sess.Events().Unsubscribe(sub)
+	if e.afterSubscribe != nil { // test seam
+		e.afterSubscribe(sess)
+	}
 
 	brief, err := json.Marshal(run.Brief)
 	if err != nil {
@@ -144,7 +183,7 @@ func (e *HermesRunExecutor) Start(ctx context.Context, runID string, opts Hermes
 		return fmt.Errorf("run %s: first prompt: %w", runID, err)
 	}
 
-	turn, seen := awaitTurnEnd(sess, sub, baseline)
+	turn, seen := e.awaitTurnEnd(ctx, sess, sub, baseline)
 	e.mu.Lock()
 	cancelled, reason := a.cancelled, a.reason
 	e.mu.Unlock()
@@ -170,12 +209,12 @@ func (e *HermesRunExecutor) Cancel(runID, reason, actor string) error {
 	a.reason = reason
 	e.mu.Unlock()
 
-	// Not held across the session call: Cancel reaches the agent, and a
+	// Not held across the session calls: Cancel reaches the agent, and a
 	// session that already died leaves the turn to end on its own.
-	if err := a.sess.Cancel(); err != nil && !errors.Is(err, ErrSessionNotLive) {
-		return fmt.Errorf("run %s: cancel turn: %w", runID, err)
+	if err := e.endTurn(runID, a); err != nil {
+		return err
 	}
-	<-a.done
+	<-a.done // closed by the time endTurn returns nil: Start has written the run.end
 
 	// Start writes the outcome the turn reached. If the turn completed before
 	// the cancel landed, the cancel lost the race and is a conflict, not a
@@ -185,6 +224,57 @@ func (e *HermesRunExecutor) Cancel(runID, reason, actor string) error {
 	}
 	return nil
 }
+
+// endTurn ends the run's in-flight turn and returns once it has, or with an
+// error when it cannot be ended at all. The cancel is re-sent until the turn
+// ends: an agent may drop a session/cancel that arrives for a turn it has not
+// registered (ACP: a cancel for a session with no in-flight turn is a no-op),
+// and the first notification can always beat the prompt's own registration of
+// the turn on the agent's side. An agent that never ends the turn is stopped
+// outright once the grace has elapsed: the run is over either way, so the
+// session it ran in goes with it, and awaitTurnEnd stops waiting for a turn
+// that can no longer arrive.
+func (e *HermesRunExecutor) endTurn(runID string, a *runExecSession) error {
+	grace, retry := e.cancelGrace, e.cancelRetry
+	if grace <= 0 {
+		grace = runCancelGrace
+	}
+	if retry <= 0 {
+		retry = runCancelRetry
+	}
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if err := a.sess.Cancel(); err != nil && !errors.Is(err, ErrSessionNotLive) {
+			return fmt.Errorf("run %s: cancel turn: %w", runID, err)
+		}
+		select {
+		case <-a.done:
+			return nil
+		case <-time.After(retry):
+		}
+		if !turnRunning(a.sess) {
+			break // the turn is ending; Cancel waits for the run.end below
+		}
+	}
+	if turnRunning(a.sess) && a.sess.State() == StateLive {
+		slog.Warn("run exec hermes: turn still running after cancel; ending it",
+			"run", runID, "session", a.sess.ID(), "grace", grace.String())
+		_ = e.driver.Delete(a.sess.ID()) // cancels the turn again, closes the ring, stops the process
+	}
+	// The turn is over, or the session hosting it is: Start writes the run.end
+	// and lets the session go. Both are bounded by the stop grace (the agent
+	// process is stopped here), and a.done closes with them.
+	select {
+	case <-a.done:
+		return nil
+	case <-time.After(runCancelStopGrace):
+		return fmt.Errorf("run %s: no run.end %s after the turn ended", runID, runCancelStopGrace)
+	}
+}
+
+// turnRunning reports whether the session still has a turn in flight: the
+// driver clears it as the turn ends, immediately before the turn_end event.
+func turnRunning(sess *HermesACPSession) bool { return sess.Info().TurnInFlight != "" }
 
 // BootSweep closes every kernel-owned hermes-fork run left running by a
 // previous kernel with run.end outcome lost (U2: sessions do not survive a
@@ -253,28 +343,77 @@ type runTurnEnd struct {
 	Error      string `json:"error"`
 }
 
-// awaitTurnEnd reads the session's ring for the turn_end, from the
-// subscription's replay, its live channel, and (when the subscription ends
-// early: the ring closed, or this subscriber was dropped for falling behind)
-// the events retained after baseline.
-func awaitTurnEnd(sess *HermesACPSession, sub *RingSubscription, baseline uint64) (runTurnEnd, bool) {
-	for _, ev := range sub.Replay {
-		if ev.Kind == MSEventTurnEnd {
-			return parseTurnEnd(ev), true
+// awaitTurnEnd reads the session's ring for the turn_end: the subscription's
+// replay, then its live channel. When the subscription ends before the turn
+// does — the ring closed, or the ring dropped this subscriber for falling
+// behind, which is not the turn's end and must not read as one — the wait
+// re-reads the events retained after baseline and attaches a fresh
+// subscription, and goes on until the turn_end arrives, the session is
+// confirmed gone (Start then ends the run crash, the session having no turn
+// to report), or ctx is done.
+func (e *HermesRunExecutor) awaitTurnEnd(ctx context.Context, sess *HermesACPSession, sub *RingSubscription, baseline uint64) (runTurnEnd, bool) {
+	dropped := false
+	for {
+		// The subscription's snapshot and live tail, in seq order.
+		for _, ev := range sub.Replay {
+			if ev.Kind == MSEventTurnEnd {
+				return parseTurnEnd(ev), true
+			}
 		}
-	}
-	for ev := range sub.Live {
-		if ev.Kind == MSEventTurnEnd {
-			return parseTurnEnd(ev), true
+		for open := true; open; {
+			select {
+			case ev, ok := <-sub.Live:
+				if !ok {
+					open = false
+					continue
+				}
+				if ev.Kind == MSEventTurnEnd {
+					return parseTurnEnd(ev), true
+				}
+			case <-ctx.Done():
+				return runTurnEnd{}, false
+			}
 		}
-	}
-	evs, _ := sess.Events().Since(baseline)
-	for _, ev := range evs {
-		if ev.Kind == MSEventTurnEnd {
-			return parseTurnEnd(ev), true
+
+		// The subscription ended. The drop races the turn_end it may have
+		// dropped, so read what the ring retained before deciding anything.
+		evs, _ := sess.Events().Since(baseline)
+		for _, ev := range evs {
+			if ev.Kind == MSEventTurnEnd {
+				return parseTurnEnd(ev), true
+			}
 		}
+		if e.sessionGone(sess) {
+			return runTurnEnd{}, false
+		}
+		if ctx.Err() != nil {
+			return runTurnEnd{}, false
+		}
+		if !dropped {
+			// A dropped subscriber is not a session that ended: say so once,
+			// then re-attach and keep waiting on the turn.
+			slog.Warn("run exec hermes: event subscription ended before the turn did; re-attaching",
+				"session", sess.ID(), "baseline", baseline)
+			dropped = true
+		}
+		// Re-attach from baseline: the replay carries everything the drop
+		// skipped over, the live channel carries what follows. The dropped
+		// subscription is already out of the ring; the one re-attached here
+		// is closed with the session, which goes when the run ends.
+		sub = sess.Events().Subscribe(baseline, runEventBuffer)
 	}
-	return runTurnEnd{}, false
+}
+
+// sessionGone reports whether the session can no longer deliver the run's
+// turn_end: the driver no longer holds it as this run's session (a client
+// deleted it, its kernel let it go, or a resume replaced it), or it was
+// detached with the turn still open. A crashed session is not gone: its
+// turn_end carries the driver's report of the lost turn.
+func (e *HermesRunExecutor) sessionGone(sess *HermesACPSession) bool {
+	if e.driver.Get(sess.ID()) != sess {
+		return true
+	}
+	return sess.State() == StateDetached
 }
 
 func parseTurnEnd(ev ManagedSessionEvent) runTurnEnd {
