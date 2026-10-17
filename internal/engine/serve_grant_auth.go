@@ -277,6 +277,25 @@ func isRoomsRoutePath(path string) bool {
 	return path == roomsRoutePrefix || strings.HasPrefix(path, roomsRoutePrefix+"/")
 }
 
+// isRoomKernelWriteRequest reports whether r targets one of the two
+// kernel-authored room write routes: POST /v1/rooms (create a room) and
+// POST /v1/rooms/{room}/ops (apply a board item op). Those two are ordinary
+// kernel write routes — a trusted local client presents a grant and the kernel
+// signs on its own device log (serve_rooms.go) — so a request carrying no
+// credential at all is the write routes' 401 missing_grant. Every other route
+// in the /v1/rooms family is member-only and answers a missing credential with
+// 403 member_grant_required (see grantAuthMiddleware and serve_rooms.go's
+// header).
+func isRoomKernelWriteRequest(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	if r.URL.Path == roomsRoutePrefix {
+		return true
+	}
+	return strings.HasPrefix(r.URL.Path, roomsRoutePrefix+"/") && strings.HasSuffix(r.URL.Path, "/ops")
+}
+
 // requiredScopeForRequest returns the scope a caller's grant must carry to
 // reach r, or "" when the route carries no scope requirement (liveness alone
 // suffices, exactly as before this change — this function only ever ADDS a
@@ -554,8 +573,11 @@ func (s *Server) grantAuthMiddleware(next http.Handler) http.Handler {
 		if token == "" {
 			// The room surface is member-only: a request with no credential
 			// at all is refused 403 (not the write routes' 401), so a caller
-			// cannot mistake "authenticate" for "you are not a member".
-			if isRoomsRoutePath(r.URL.Path) {
+			// cannot mistake "authenticate" for "you are not a member". The
+			// two kernel-authored write routes (POST /v1/rooms and
+			// POST /v1/rooms/{room}/ops) are the exception — see
+			// isRoomKernelWriteRequest.
+			if isRoomsRoutePath(r.URL.Path) && !isRoomKernelWriteRequest(r) {
 				writeJSONError(w, http.StatusForbidden, "member_grant_required",
 					"a member grant is required for the room API")
 				return

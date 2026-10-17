@@ -59,6 +59,9 @@ var (
 	ErrRoomHeld         = errors.New("room board: entry is held")
 	ErrRoomConflict     = errors.New("room board: conflict")
 	ErrRoomLedgerFailed = errors.New("room board: ledger append failed")
+	// ErrRoomUnavailable is the kernel-authored write path with no node
+	// device key: nothing can be signed, so the routes are 503.
+	ErrRoomUnavailable = errors.New("room board: no node device key")
 )
 
 // roomNodeBinding is the Binding room.Evaluate consults at the genesis: the
@@ -100,6 +103,7 @@ type RoomEntryView struct {
 // RoomSummary is one row of GET /v1/rooms.
 type RoomSummary struct {
 	ID      string `json:"id"`
+	Alias   string `json:"alias,omitempty"`
 	Name    string `json:"name,omitempty"`
 	Owner   string `json:"owner,omitempty"`
 	Gen     int    `json:"gen"`
@@ -156,6 +160,7 @@ func LoadNodeDeviceKey(certDir string) (*NodeDeviceKey, error) {
 // roomRec is the in-memory state of one room.
 type roomRec struct {
 	id         string
+	alias      string // the client's label for this room ("" when none)
 	entries    []*room.Entry
 	certs      [][]byte
 	genesisLog string
@@ -170,6 +175,8 @@ type RoomBoardStore struct {
 	mu            sync.RWMutex
 	rooms         map[string]*roomRec
 	order         []string
+	aliases       map[string]string // client alias -> room id
+	appenders     map[string]*room.Appender
 	workspaceRoot string
 	appendEvent   identityGrantAppendFunc
 	key           *NodeDeviceKey
@@ -180,6 +187,8 @@ type RoomBoardStore struct {
 func NewRoomBoardStore(workspaceRoot string) *RoomBoardStore {
 	return &RoomBoardStore{
 		rooms:         make(map[string]*roomRec),
+		aliases:       make(map[string]string),
+		appenders:     make(map[string]*room.Appender),
 		workspaceRoot: workspaceRoot,
 		appendEvent:   AppendEvent,
 		now:           func() time.Time { return time.Now().UTC() },
@@ -199,6 +208,9 @@ func (st *RoomBoardStore) ConfigureNodeKey(certDir string) error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.key = key
+	// Appenders hold the key that signed what is already on the log; a key
+	// change invalidates them, so they are rebuilt from the stored entries.
+	st.appenders = make(map[string]*room.Appender)
 	for _, rec := range st.rooms {
 		rec.dirty = true
 	}
@@ -281,6 +293,16 @@ func (st *RoomBoardStore) ensureFoldedLocked(rec *roomRec) {
 // already holds is never recorded twice. The caller must be the genesis owner
 // (genesis) or a member of the room's latest spec.
 func (st *RoomBoardStore) Append(roomID string, raw []byte, certDER []byte, caller RoomCaller) (RoomEntryView, error) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.appendLocked(roomID, raw, certDER, caller, "")
+}
+
+// appendLocked is Append under st.mu. alias is optional: when non-empty it is
+// recorded on the write-ahead event and registered as this room's idempotency
+// handle (the create route's `alias`, see CreateRoom). It is "" for every
+// client-signed append.
+func (st *RoomBoardStore) appendLocked(roomID string, raw []byte, certDER []byte, caller RoomCaller, alias string) (RoomEntryView, error) {
 	e, err := room.ParseEntry(raw)
 	if err != nil {
 		return RoomEntryView{}, fmt.Errorf("%w: %v", ErrRoomInvalid, err)
@@ -299,9 +321,6 @@ func (st *RoomBoardStore) Append(roomID string, raw []byte, certDER []byte, call
 	} else if e.Room != roomID {
 		return RoomEntryView{}, fmt.Errorf("%w: entry names room %s, not %s", ErrRoomInvalid, e.Room, roomID)
 	}
-
-	st.mu.Lock()
-	defer st.mu.Unlock()
 
 	rec := st.rooms[roomID]
 	isNew := rec == nil
@@ -362,7 +381,7 @@ func (st *RoomBoardStore) Append(roomID string, raw []byte, certDER []byte, call
 
 	// Write-ahead: the ledger event lands before memory changes, so a crash
 	// between the two loses nothing (the replay reconstitutes the fold).
-	if err := st.appendRoomEntryLocked(roomID, e, id, certDER); err != nil {
+	if err := st.appendRoomEntryLocked(roomID, e, id, certDER, alias); err != nil {
 		return RoomEntryView{}, err
 	}
 
@@ -377,15 +396,36 @@ func (st *RoomBoardStore) Append(roomID string, raw []byte, certDER []byte, call
 	if e.Kind == room.KindGenesis {
 		rec.genesisLog = e.Log
 	}
+	if alias != "" {
+		rec.alias = alias
+		st.aliases[alias] = roomID
+	}
 	rec.board, rec.spec, rec.hash, rec.dirty = board, lastSpec(out), hash, false
+
+	// Keep this node's own appender for the room current: an accepted entry
+	// on its log advances seq/prev, any other log becomes a dep head. The
+	// appender is built from the stored entries the first time it is needed.
+	if st.key != nil && st.key.priv != nil {
+		if app := st.appenders[roomID]; app != nil {
+			_ = app.Observe(e)
+		} else {
+			app = room.NewAppender(roomID, st.key.deviceID, st.key.priv)
+			for _, x := range entries {
+				_ = app.Observe(x)
+			}
+			st.appenders[roomID] = app
+		}
+	}
 	return viewOfEntry(e, id), nil
 }
 
 // appendRoomEntryLocked writes the write-ahead ledger event for one accepted
 // entry. The event's data carries `room` and `actor` (the R10c board-event
 // fields the /v1/events filters match) plus the entry itself and, when known,
-// the cert DER so a restart can re-verify without the key.
-func (st *RoomBoardStore) appendRoomEntryLocked(roomID string, e *room.Entry, id string, certDER []byte) error {
+// the cert DER so a restart can re-verify without the key. alias, when
+// non-empty, is the client's label for a kernel-created room, restored by the
+// rebuild.
+func (st *RoomBoardStore) appendRoomEntryLocked(roomID string, e *room.Entry, id string, certDER []byte, alias string) error {
 	if st.workspaceRoot == "" {
 		return nil
 	}
@@ -406,6 +446,9 @@ func (st *RoomBoardStore) appendRoomEntryLocked(roomID string, e *room.Entry, id
 		"id":    id,
 		"spec":  e.Spec,
 		"entry": entryMap,
+	}
+	if alias != "" {
+		data["alias"] = alias
 	}
 	if len(certDER) > 0 {
 		// A public certificate, never key material.
@@ -431,6 +474,208 @@ func viewOfEntry(e *room.Entry, id string) RoomEntryView {
 		ID: id, Room: e.Room, Log: e.Log, Seq: e.Seq,
 		Kind: string(e.Kind), Actor: e.Actor.String(), HLC: e.HLC, Spec: e.Spec,
 	}
+}
+
+// ─── kernel-authored writes (POST /v1/rooms, POST /v1/rooms/{room}/ops) ──────
+//
+// A trusted local client holding a kernel grant never signs anything itself:
+// the kernel authors a room's genesis and every item op on its own BEP device
+// log (the key ConfigureNodeKey loaded) and appends them through the same
+// admission path Append uses. One Appender per room tracks this node's log
+// position; it is rebuilt from the stored entries, so a restarted node
+// continues the log (seq/prev/deps) instead of colliding with it.
+
+// roomOpKinds maps the {"op": ...} values of POST /v1/rooms/{room}/ops onto
+// the board entry kinds it builds.
+var roomOpKinds = map[string]room.Kind{
+	"create":  room.KindItemCreate,
+	"set":     room.KindItemSet,
+	"append":  room.KindItemAppend,
+	"archive": room.KindItemArchive,
+}
+
+// hlc stamps a kernel-authored entry. The counter is 0: entries written in one
+// millisecond still order by (log, seq), which is their causal order.
+func (st *RoomBoardStore) hlc() string {
+	return st.now().UTC().Format("2006-01-02T15:04:05.000Z") + "/0"
+}
+
+// nodeName is this node's name in a room spec's nodes map. It is derived from
+// the device key's own short form rather than any operator-supplied machine
+// name, and is stable for the life of the key.
+func (k *NodeDeviceKey) nodeName() string {
+	name, err := room.LogShort(k.deviceID)
+	if err != nil {
+		return k.deviceID
+	}
+	return name
+}
+
+// genesisBody builds the gen-1 spec a kernel-created room starts from: the
+// caller's grant actor as the sole owner member, homed on this node. title, if
+// non-empty, is the spec's display name.
+func (k *NodeDeviceKey) genesisBody(owner, title string) map[string]any {
+	name := k.nodeName()
+	body := map[string]any{
+		"gen":   1,
+		"owner": owner,
+		"nodes": map[string]any{name: k.deviceID},
+		"members": map[string]any{
+			owner: map[string]any{
+				"type":  room.TypePerson,
+				"role":  room.RoleOwner,
+				"homes": []any{name},
+			},
+		},
+	}
+	if title != "" {
+		body["name"] = title
+	}
+	return body
+}
+
+// CreateRoom creates a room: a genesis entry (the gen-1 spec) signed on this
+// node's log, with caller's grant actor as the owner member. When alias is
+// given and a room already carries it, that room is returned unchanged
+// (created false); otherwise created is true.
+func (st *RoomBoardStore) CreateRoom(alias, title string, caller RoomCaller) (roomID string, created bool, err error) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.key == nil || st.key.priv == nil {
+		return "", false, ErrRoomUnavailable
+	}
+	if alias != "" {
+		if id, ok := st.aliases[alias]; ok {
+			if _, live := st.rooms[id]; live {
+				return id, false, nil
+			}
+		}
+	}
+	owner := caller.Actor
+	if owner == "" {
+		// The owner must be a person member, so a grant that names nobody
+		// cannot own a new room.
+		return "", false, fmt.Errorf("%w: a grant actor is required to own a new room", ErrRoomInvalid)
+	}
+	app := room.NewAppender("", st.key.deviceID, st.key.priv)
+	g, err := app.Genesis(room.Actor{Person: owner}, st.key.genesisBody(owner, title), st.hlc())
+	if err != nil {
+		return "", false, fmt.Errorf("%w: %v", ErrRoomInvalid, err)
+	}
+	id, err := g.ID()
+	if err != nil {
+		return "", false, fmt.Errorf("%w: %v", ErrRoomInvalid, err)
+	}
+	raw, err := json.Marshal(g)
+	if err != nil {
+		return "", false, fmt.Errorf("%w: %v", ErrRoomInvalid, err)
+	}
+	if _, err := st.appendLocked(id, raw, nil, caller, alias); err != nil {
+		return "", false, err
+	}
+	return id, true, nil
+}
+
+// ApplyOp builds one board item entry for op, signs it on this node's log for
+// the room, and appends it through the same admission path Append uses. It
+// returns the stored entry and the folded item after the write. item is the
+// target item id; create derives its own id (<log short>-<seq> of the entry
+// being written) and ignores any supplied value.
+func (st *RoomBoardStore) ApplyOp(roomID, op, item string, fields map[string]any, caller RoomCaller) (RoomEntryView, *room.Item, error) {
+	kind, ok := roomOpKinds[op]
+	if !ok {
+		return RoomEntryView{}, nil, fmt.Errorf("%w: unknown op %q", ErrRoomInvalid, op)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.key == nil || st.key.priv == nil {
+		return RoomEntryView{}, nil, ErrRoomUnavailable
+	}
+	rec := st.rooms[roomID]
+	if rec == nil {
+		return RoomEntryView{}, nil, fmt.Errorf("%w: %s", ErrRoomNotFound, roomID)
+	}
+	st.ensureFoldedLocked(rec)
+	if !caller.Admin && !rec.isMember(caller.Actor) {
+		return RoomEntryView{}, nil, fmt.Errorf("%w: actor %q", ErrRoomNotMember, caller.Actor)
+	}
+	if rec.spec == nil {
+		return RoomEntryView{}, nil, fmt.Errorf("%w: room %s has no spec", ErrRoomInvalid, roomID)
+	}
+	member := caller.Actor
+	if caller.Admin && !rec.isMember(member) {
+		// Node admin with no member identity of its own acts as the owner.
+		member = rec.spec.Owner
+	}
+	actor, err := roomActorFor(rec, member)
+	if err != nil {
+		return RoomEntryView{}, nil, err
+	}
+
+	app := st.appenderLocked(rec)
+	body := make(map[string]any, len(fields)+1)
+	for k, v := range fields {
+		body[k] = v
+	}
+	if op == "create" {
+		id, err := room.ItemID(st.key.deviceID, app.NextSeq())
+		if err != nil {
+			return RoomEntryView{}, nil, fmt.Errorf("%w: %v", ErrRoomInvalid, err)
+		}
+		body["id"] = id
+		item = id
+	} else {
+		if item == "" {
+			return RoomEntryView{}, nil, fmt.Errorf("%w: item is required for op %q", ErrRoomInvalid, op)
+		}
+		body["item"] = item
+	}
+
+	e, err := app.Next(kind, actor, rec.spec.ID, body, st.hlc())
+	if err != nil {
+		st.appenders[roomID] = nil
+		return RoomEntryView{}, nil, fmt.Errorf("%w: %v", ErrRoomInvalid, err)
+	}
+	raw, err := json.Marshal(e)
+	if err != nil {
+		st.appenders[roomID] = nil
+		return RoomEntryView{}, nil, fmt.Errorf("%w: %v", ErrRoomInvalid, err)
+	}
+	view, err := st.appendLocked(roomID, raw, nil, caller, "")
+	if err != nil {
+		// The appender advanced for an entry that was never stored: drop it
+		// so the next op rebuilds its position from the entries that landed.
+		st.appenders[roomID] = nil
+		return RoomEntryView{}, nil, err
+	}
+	return view, rec.board.Items[item], nil
+}
+
+// roomActorFor names the actor of a kernel-authored entry from a member id.
+// The room's spec says whether that id is a person or an agent.
+func roomActorFor(rec *roomRec, memberID string) (room.Actor, error) {
+	m, ok := rec.spec.Members[memberID]
+	if !ok {
+		return room.Actor{}, fmt.Errorf("%w: actor %q", ErrRoomNotMember, memberID)
+	}
+	if m.Type == room.TypeAgent {
+		return room.Actor{Agent: memberID}, nil
+	}
+	return room.Actor{Person: memberID}, nil
+}
+
+// appenderLocked returns this node's appender for a room, building it from the
+// stored entries the first time. Caller holds st.mu and st.key is set.
+func (st *RoomBoardStore) appenderLocked(rec *roomRec) *room.Appender {
+	if app := st.appenders[rec.id]; app != nil {
+		return app
+	}
+	app := room.NewAppender(rec.id, st.key.deviceID, st.key.priv)
+	for _, e := range rec.entries {
+		_ = app.Observe(e)
+	}
+	st.appenders[rec.id] = app
+	return app
 }
 
 // isMember reports whether actor names a member of the room's latest spec.
@@ -547,7 +792,7 @@ func (st *RoomBoardStore) List(caller RoomCaller) []RoomSummary {
 		if !caller.Admin && !rec.isMember(caller.Actor) {
 			continue
 		}
-		sum := RoomSummary{ID: roomID, Entries: len(rec.entries)}
+		sum := RoomSummary{ID: roomID, Alias: rec.alias, Entries: len(rec.entries)}
 		if rec.spec != nil {
 			sum.Owner = rec.spec.Owner
 			sum.Gen = rec.spec.Gen
@@ -589,6 +834,7 @@ func RebuildRoomBoardStoreFromLedger(workspaceRoot string) (*RoomBoardStore, err
 		entries    []*room.Entry
 		certs      [][]byte
 		genesisLog string
+		alias      string
 	}
 	recs := map[string]*pending{}
 	var order []string
@@ -627,6 +873,9 @@ func RebuildRoomBoardStoreFromLedger(workspaceRoot string) (*RoomBoardStore, err
 		if e.Kind == room.KindGenesis {
 			p.genesisLog = e.Log
 		}
+		if alias, _ := d["alias"].(string); alias != "" {
+			p.alias = alias
+		}
 		if s, _ := d["cert"].(string); s != "" {
 			if der, derr := base64.StdEncoding.DecodeString(s); derr == nil && !hasCertDER(p.certs, der) {
 				p.certs = append(p.certs, der)
@@ -645,12 +894,16 @@ func RebuildRoomBoardStoreFromLedger(workspaceRoot string) (*RoomBoardStore, err
 		}
 		st.rooms[roomID] = &roomRec{
 			id:         roomID,
+			alias:      p.alias,
 			entries:    p.entries,
 			certs:      p.certs,
 			genesisLog: p.genesisLog,
 			spec:       lastSpec(out),
 			board:      board,
 			hash:       hash,
+		}
+		if p.alias != "" {
+			st.aliases[p.alias] = roomID
 		}
 		st.order = append(st.order, roomID)
 	}
