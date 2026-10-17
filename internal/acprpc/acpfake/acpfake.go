@@ -11,7 +11,14 @@
 //	"ignore_cancel ." → streams one update, then parks the turn forever and never
 //	                   honours session/cancel (an agent that drops the notification)
 //	"crash ..."      → the process exits with status 3 (subprocess mode only)
+//	"modelinfo ..."  → reports the model and the count of set_model requests this
+//	                   session has received (what the agent held when the prompt
+//	                   reached it, in one chunk)
+//	"huge ..."       → streams agent text well past the kernel's 1 MiB report cap
 //	anything else    → one agent_message_chunk echoing the text, stopReason "end_turn"
+//
+// A session/set_model naming a model id with the "reject" prefix is refused with
+// an error, so a caller's model-application failure path is reachable.
 //
 // Tests run it in-process (Serve over pipes) or as a subprocess by
 // re-executing the test binary with ACPFAKE_AGENT=1 (see MaybeRunMain).
@@ -48,17 +55,19 @@ type agent struct {
 	conn       *acprpc.Conn
 	subprocess bool
 
-	mu      sync.Mutex
-	next    int
-	modes   map[string]string
-	models  map[string]string
-	cancels map[string]chan struct{}
+	mu        sync.Mutex
+	next      int
+	modes     map[string]string
+	models    map[string]string
+	modelSets map[string]int // session id -> set_model requests received
+	cancels   map[string]chan struct{}
 }
 
 // Serve runs the fake agent over r/w. The returned channel closes when r
 // ends. subprocess enables the "crash" behaviour (os.Exit).
 func Serve(r io.Reader, w io.Writer, subprocess bool) <-chan struct{} {
-	a := &agent{subprocess: subprocess, modes: map[string]string{}, models: map[string]string{}, cancels: map[string]chan struct{}{}}
+	a := &agent{subprocess: subprocess, modes: map[string]string{}, models: map[string]string{},
+		modelSets: map[string]int{}, cancels: map[string]chan struct{}{}}
 	a.conn = acprpc.NewConn(r, w, a)
 	return a.conn.Done()
 }
@@ -86,6 +95,13 @@ func (a *agent) newID(prefix string) string {
 func (a *agent) update(sid string, update map[string]any) {
 	_ = a.conn.Notify("session/update", map[string]any{"sessionId": sid, "update": update})
 }
+
+// hugeChunks/hugeChunkBytes size the "huge ..." turn's agent text: 160 chunks
+// of 8 KiB, comfortably past the kernel's 1 MiB report cap.
+const (
+	hugeChunks     = 160
+	hugeChunkBytes = 8 << 10
+)
 
 func chunk(text string) map[string]any {
 	return map[string]any{
@@ -141,6 +157,12 @@ func (a *agent) HandleRequest(method string, params json.RawMessage) (any, error
 			return nil, &acprpc.Error{Code: -32602, Message: "set_model needs modelId"}
 		}
 		a.mu.Lock()
+		a.modelSets[p.SessionID]++ // every request the agent received, refused ones included
+		a.mu.Unlock()
+		if strings.HasPrefix(p.ModelID, "reject") {
+			return nil, &acprpc.Error{Code: -32602, Message: "set_model refused " + p.ModelID}
+		}
+		a.mu.Lock()
 		a.models[p.SessionID] = p.ModelID
 		a.mu.Unlock()
 		return map[string]any{}, nil
@@ -192,6 +214,22 @@ func (a *agent) prompt(p sessionParams) (any, error) {
 			return nil, err
 		}
 		a.update(p.SessionID, chunk("permission:"+res.Outcome.Outcome+":"+res.Outcome.OptionID))
+		return map[string]any{"stopReason": "end_turn"}, nil
+	case strings.HasPrefix(text, "modelinfo"):
+		// Reports what THIS agent process holds for the session, and how many
+		// set_model requests it has received: a caller that applies a model
+		// before the prompt shows both here.
+		a.mu.Lock()
+		model, calls := a.models[p.SessionID], a.modelSets[p.SessionID]
+		a.mu.Unlock()
+		a.update(p.SessionID, chunk(fmt.Sprintf("modelinfo:model=%s:set_model_calls=%d", model, calls)))
+		return map[string]any{"stopReason": "end_turn"}, nil
+	case strings.HasPrefix(text, "huge"):
+		// Agent text far past the kernel's report cap (hugeChunks *
+		// hugeChunkBytes = 1.25 MiB), in chunks the size of a real update.
+		for i := 0; i < hugeChunks; i++ {
+			a.update(p.SessionID, chunk(strings.Repeat("x", hugeChunkBytes)))
+		}
 		return map[string]any{"stopReason": "end_turn"}, nil
 	case strings.HasPrefix(text, "settings"):
 		// Reports what THIS agent process holds for the session (a fresh

@@ -9,7 +9,12 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +38,42 @@ func openHermesRun(t *testing.T, st *RunBoardStore, title, brief string) *Run {
 		t.Fatalf("open hermes-fork run: %v", err)
 	}
 	return r
+}
+
+// openHermesRunWithModel is openHermesRun plus the run's model (RunOpen.Model,
+// run_board.go): the executor must apply it to the session before the prompt.
+func openHermesRunWithModel(t *testing.T, st *RunBoardStore, title, brief, model string) *Run {
+	t.Helper()
+	r, err := st.OpenKernelRun(RunOpen{
+		Title:    title,
+		Brief:    brief,
+		Owner:    "cog",
+		Executor: RunExecutor{Kind: RunExecutorHermesFork},
+		Model:    model,
+		Origin:   RunOrigin{By: "node-a"},
+	}, "node:node-a")
+	if err != nil {
+		t.Fatalf("open hermes-fork run: %v", err)
+	}
+	return r
+}
+
+// rootedRunBoard returns a run board over a real workspace root, so the
+// kernel's per-run artifacts under <root>/.cog/run/ are actually written. The
+// ledger's process-global last-event cache is keyed by bucket, not root, so it
+// is cleared around the test the way run_board_restart_test.go does.
+func rootedRunBoard(t *testing.T) (*RunBoardStore, string) {
+	t.Helper()
+	root := t.TempDir()
+	t.Cleanup(resetLedgerCacheForTest)
+	resetLedgerCacheForTest()
+	return NewRunBoardStore(root), root
+}
+
+// reportPathFor is where the kernel writes a run's report: the per-run state
+// directory (.cog/run) its other artifacts live under (turns/, bus/, ...).
+func reportPathFor(root, runID string) string {
+	return filepath.Join(root, ".cog", "run", "runs", runID, "report.md")
 }
 
 // getRun returns the run or fails the test.
@@ -103,6 +144,36 @@ func turnEnds(t *testing.T, s *HermesACPSession) []ManagedSessionEvent {
 		}
 	}
 	return out
+}
+
+// ringAgentText joins every agent_message_chunk text retained on the
+// session's ring, in seq order: the same ACP session/update events the run's
+// report is built from, read test-side. It is the evidence of what the agent
+// said, without depending on the report path at all.
+func ringAgentText(t *testing.T, s *HermesACPSession) string {
+	t.Helper()
+	evs, gap := s.Events().Since(0)
+	if gap {
+		t.Fatal("event ring reported a gap")
+	}
+	var b strings.Builder
+	for _, ev := range evs {
+		if ev.Kind != MSEventSessionUpdate {
+			continue
+		}
+		var u struct {
+			Kind    string `json:"sessionUpdate"`
+			Content struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(ev.Data, &u) != nil || u.Kind != "agent_message_chunk" {
+			continue
+		}
+		b.WriteString(u.Content.Text)
+	}
+	return b.String()
 }
 
 // testRunExecutor builds the executor with short cancel bounds. The grace and
@@ -599,5 +670,332 @@ func TestRunHermesReconcileClosesVanishedSession(t *testing.T) {
 	}
 	if st := e.Health(); !strings.Contains(st.Message, "runs=1") || st.Health != reconcile.HealthHealthy {
 		t.Fatalf("health = %+v, want one run reported healthy", st)
+	}
+}
+
+// ─── the run's model (gap 1) ───────────────────────────────────────────────
+//
+// RunOpen/Run carry a Model (run_board.go); Start must apply it to the session
+// before the first prompt, or every run silently runs on the profile default.
+// The fake agent reports, in the turn's own agent text, the model it holds and
+// how many set_model requests it has received — so the assertion is made
+// through the protocol, in the order the prompt sees it.
+
+// TestRunHermesAppliesModelBeforePrompt: a run opened with a model has it
+// applied to the session before the first prompt, exactly once. The agent's
+// own report of what it held when the prompt reached it is the evidence.
+func TestRunHermesAppliesModelBeforePrompt(t *testing.T) {
+	const model = "custom:cogos:sentinel-model-777"
+	board := NewRunBoardStore("")
+	d, session := captureHermesSession(t)
+	e := NewHermesRunExecutor(board, d)
+	run := openHermesRunWithModel(t, board, "model run", "modelinfo for node-a", model)
+
+	if err := e.Start(runCtx(t), run.ID, HermesACPOpts{Profile: "cog", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if end := runEndOf(t, board, run.ID); end.Outcome != RunOutcomeOK {
+		t.Fatalf("run.end outcome = %q (%q); want ok", end.Outcome, end.Reason)
+	}
+	sess := session()
+	if sess == nil {
+		t.Fatal("the executor created no session")
+	}
+	want := "modelinfo:model=" + model + ":set_model_calls=1"
+	if got := ringAgentText(t, sess); !strings.Contains(got, want) {
+		t.Fatalf("agent text = %q; want it to contain %q: the run's model must be applied to the session before the first prompt", got, want)
+	}
+	if got := sess.Info().Model; got != model {
+		t.Fatalf("session model = %q, want the run's %q", got, model)
+	}
+	if n := endEntries(t, board, run.ID); n != 1 {
+		t.Fatalf("run.end entries = %d, want exactly 1", n)
+	}
+}
+
+// TestRunHermesSetModelFailureEndsRunFail: a set_model the agent refuses ends
+// the run exactly once, fail, with a reason naming the model error, and the
+// session it was created in is closed. No turn is ever sent.
+func TestRunHermesSetModelFailureEndsRunFail(t *testing.T) {
+	const model = "reject:this-model"
+	board := NewRunBoardStore("")
+	d, session := captureHermesSession(t)
+	e := NewHermesRunExecutor(board, d)
+	run := openHermesRunWithModel(t, board, "model refused", "modelinfo for node-a", model)
+
+	err := e.Start(runCtx(t), run.ID, HermesACPOpts{Profile: "cog", Cwd: t.TempDir()})
+	if err == nil {
+		t.Fatal("start returned nil: a refused set_model must end the run, not leave it running")
+	}
+	end := runEndOf(t, board, run.ID)
+	if end.Outcome != RunOutcomeFail {
+		t.Fatalf("run.end outcome = %q (%q); want fail", end.Outcome, end.Reason)
+	}
+	if !strings.Contains(end.Reason, model) {
+		t.Fatalf("run.end reason = %q; want it to name the model error (the refused model id %q)", end.Reason, model)
+	}
+	if n := endEntries(t, board, run.ID); n != 1 {
+		t.Fatalf("run.end entries = %d, want exactly 1", n)
+	}
+	sess := session()
+	if sess == nil {
+		t.Fatal("the executor created no session")
+	}
+	if sess.State() != StateDetached || d.Get(sess.ID()) != nil {
+		t.Fatalf("session state = %s, registered = %v; want it closed with the run",
+			sess.State(), d.Get(sess.ID()) != nil)
+	}
+	// The prompt never went out: the agent said nothing, so there is no turn
+	// to fold and no text to report.
+	if got := ringAgentText(t, sess); got != "" {
+		t.Fatalf("agent text = %q; want none (no turn may start after a refused model)", got)
+	}
+}
+
+// TestRunHermesNoModelNoSetModelCall: a run with no model behaves exactly as
+// before — the executor sends no set_model at all, and the agent holds none.
+func TestRunHermesNoModelNoSetModelCall(t *testing.T) {
+	board := NewRunBoardStore("")
+	d, session := captureHermesSession(t)
+	e := NewHermesRunExecutor(board, d)
+	run := openHermesRun(t, board, "no model", "modelinfo for node-a") // RunOpen.Model left empty
+
+	if err := e.Start(runCtx(t), run.ID, HermesACPOpts{Profile: "cog", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if end := runEndOf(t, board, run.ID); end.Outcome != RunOutcomeOK {
+		t.Fatalf("run.end outcome = %q (%q); want ok", end.Outcome, end.Reason)
+	}
+	sess := session()
+	if sess == nil {
+		t.Fatal("the executor created no session")
+	}
+	want := "modelinfo:model=:set_model_calls=0"
+	if got := ringAgentText(t, sess); !strings.Contains(got, want) {
+		t.Fatalf("agent text = %q; want it to contain %q: a run with no model must send no set_model", got, want)
+	}
+}
+
+// ─── the run's report (gap 2) ──────────────────────────────────────────────
+//
+// run.end carries no report text, and the session is deleted right after it, so
+// a client cannot read what the agent said. A run that ends with a turn writes
+// this turn's agent text to <root>/.cog/run/runs/<run id>/report.md and points
+// RunEnd.Report at it (sha256 of the file bytes).
+
+// TestRunHermesWritesReportWithMatchingSHA: a run ending with a turn writes its
+// agent text to the per-run report file, and RunEnd.Report carries that path
+// and the sha256 of exactly those bytes.
+func TestRunHermesWritesReportWithMatchingSHA(t *testing.T) {
+	board, root := rootedRunBoard(t)
+	d := fakeHermesDriver(t, nil)
+	e := NewHermesRunExecutor(board, d)
+	run := openHermesRun(t, board, "report", "hello from node-a")
+
+	if err := e.Start(runCtx(t), run.ID, HermesACPOpts{Profile: "cog", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	end := runEndOf(t, board, run.ID)
+	if end.Outcome != RunOutcomeOK {
+		t.Fatalf("run.end outcome = %q (%q); want ok", end.Outcome, end.Reason)
+	}
+	if end.Report == nil {
+		t.Fatal("run.end carries no report: the session is deleted with the run, so the client has nothing to read")
+	}
+	if want := reportPathFor(root, run.ID); end.Report.Path != want {
+		t.Fatalf("report path = %q, want %q", end.Report.Path, want)
+	}
+	body, err := os.ReadFile(end.Report.Path)
+	if err != nil {
+		t.Fatalf("read report %s: %v", end.Report.Path, err)
+	}
+	if got := string(body); got != "echo:hello from node-a" {
+		t.Fatalf("report = %q, want this turn's agent text alone", got)
+	}
+	sum := sha256.Sum256(body)
+	if want := hex.EncodeToString(sum[:]); end.Report.SHA256 != want {
+		t.Fatalf("report sha256 = %q, want %q (of the file's bytes)", end.Report.SHA256, want)
+	}
+	// The per-run state directory is the kernel's own (0700), not world-writable.
+	info, err := os.Stat(filepath.Dir(end.Report.Path))
+	if err != nil {
+		t.Fatalf("stat report dir: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("report dir mode = %o, want 700", got)
+	}
+	if n := endEntries(t, board, run.ID); n != 1 {
+		t.Fatalf("run.end entries = %d, want exactly 1", n)
+	}
+}
+
+// TestRunHermesReportKeepsOnlyThisTurn: a resumed session's ring may still hold
+// an earlier turn's agent text. The report is this turn's text, not the ring's.
+func TestRunHermesReportKeepsOnlyThisTurn(t *testing.T) {
+	board, _ := rootedRunBoard(t)
+	d := fakeHermesDriver(t, func(c *HermesACPDriverConfig) {
+		c.afterCreateCall = func(p *hermesProcess) {
+			// Before Start takes its baseline: an earlier turn's agent text,
+			// exactly the shape the driver stores for session/update.
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			for _, s := range p.sessions {
+				s.Events().Append(MSEventSessionUpdate, map[string]any{
+					"sessionUpdate": "agent_message_chunk",
+					"content":       map[string]any{"type": "text", "text": "earlier turn text"},
+				})
+			}
+		}
+	})
+	e := NewHermesRunExecutor(board, d)
+	run := openHermesRun(t, board, "resumed ring", "hello from node-a")
+
+	if err := e.Start(runCtx(t), run.ID, HermesACPOpts{Profile: "cog", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	end := runEndOf(t, board, run.ID)
+	if end.Report == nil {
+		t.Fatal("run.end carries no report")
+	}
+	body, err := os.ReadFile(end.Report.Path)
+	if err != nil {
+		t.Fatalf("read report %s: %v", end.Report.Path, err)
+	}
+	got := string(body)
+	if strings.Contains(got, "earlier turn text") {
+		t.Fatalf("report = %q; it contains an earlier turn's text, not just this turn's", got)
+	}
+	if got != "echo:hello from node-a" {
+		t.Fatalf("report = %q, want this turn's agent text alone", got)
+	}
+	sum := sha256.Sum256(body)
+	if want := hex.EncodeToString(sum[:]); end.Report.SHA256 != want {
+		t.Fatalf("report sha256 = %q, want %q", end.Report.SHA256, want)
+	}
+}
+
+// TestRunHermesReportTruncatesAtCap: a turn whose agent text runs past 1 MiB is
+// capped, and the cap is marked rather than silently swallowing the tail.
+func TestRunHermesReportTruncatesAtCap(t *testing.T) {
+	board, _ := rootedRunBoard(t)
+	d := fakeHermesDriver(t, nil)
+	e := NewHermesRunExecutor(board, d)
+	run := openHermesRun(t, board, "huge report", "huge work for node-a")
+
+	if err := e.Start(runCtx(t), run.ID, HermesACPOpts{Profile: "cog", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	end := runEndOf(t, board, run.ID)
+	if end.Outcome != RunOutcomeOK {
+		t.Fatalf("run.end outcome = %q (%q); want ok", end.Outcome, end.Reason)
+	}
+	if end.Report == nil {
+		t.Fatal("run.end carries no report for a turn that produced agent text")
+	}
+	body, err := os.ReadFile(end.Report.Path)
+	if err != nil {
+		t.Fatalf("read report %s: %v", end.Report.Path, err)
+	}
+	const cap = 1 << 20
+	if len(body) < cap {
+		t.Fatalf("report = %d bytes; the agent's >1 MiB turn was not written up to the cap", len(body))
+	}
+	if len(body) == cap {
+		t.Fatal("report stopped exactly at the cap with no truncation marker")
+	}
+	if len(body) > cap+512 {
+		t.Fatalf("report = %d bytes, over the 1 MiB cap by more than a marker", len(body))
+	}
+	for i := 0; i < cap; i++ {
+		if body[i] != 'x' {
+			t.Fatalf("report byte %d = %q, want the agent's text ('x') up to the cap", i, body[i])
+		}
+	}
+	sum := sha256.Sum256(body)
+	if want := hex.EncodeToString(sum[:]); end.Report.SHA256 != want {
+		t.Fatalf("report sha256 = %q, want %q (of the truncated file's bytes)", end.Report.SHA256, want)
+	}
+}
+
+// TestRunHermesKilledCancelKeepsReport: a cancel that has to force the stop
+// (the agent never answers it) can close the session's ring before the turn_end
+// lands, so no turn_end is observed — but there was a turn, and the text it
+// streamed is still this run's report: the run ends killed, with the text.
+func TestRunHermesKilledCancelKeepsReport(t *testing.T) {
+	board, _ := rootedRunBoard(t)
+	d := fakeHermesDriver(t, nil)
+	e := testRunExecutor(t, board, d)
+	run := openHermesRun(t, board, "killed with report", "ignore_cancel work for node-b")
+
+	started := startRun(t, e, run.ID, HermesACPOpts{Cwd: t.TempDir()})
+	waitAgentTurn(t, board, e, run.ID)
+	cancelled := make(chan error, 1)
+	go func() { cancelled <- e.Cancel(run.ID, "cancelled by node-b", "node:node-b") }()
+	select {
+	case err := <-cancelled:
+		if err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("cancel did not return: the grace did not end the turn")
+	}
+	if err := <-started; err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	end := runEndOf(t, board, run.ID)
+	if end.Outcome != RunOutcomeKilled {
+		t.Fatalf("run.end outcome = %q (%q); want killed", end.Outcome, end.Reason)
+	}
+	if end.Report == nil {
+		t.Fatal("a killed run whose turn streamed text carries no report")
+	}
+	body, err := os.ReadFile(end.Report.Path)
+	if err != nil {
+		t.Fatalf("read report %s: %v", end.Report.Path, err)
+	}
+	if got := string(body); got != "working..." {
+		t.Fatalf("report = %q, want the text the cancelled turn streamed", got)
+	}
+	sum := sha256.Sum256(body)
+	if want := hex.EncodeToString(sum[:]); end.Report.SHA256 != want {
+		t.Fatalf("report sha256 = %q, want %q", end.Report.SHA256, want)
+	}
+}
+
+// TestRunHermesReportWriteFailureStillEndsRun: a report that cannot be written
+// never costs the run its run.end — it is written without a report instead.
+func TestRunHermesReportWriteFailureStillEndsRun(t *testing.T) {
+	root := t.TempDir()
+	t.Cleanup(resetLedgerCacheForTest)
+	resetLedgerCacheForTest()
+	// A regular file where the report's parent chain must be a directory:
+	// MkdirAll(<root>/.cog/run/runs/<run id>) cannot succeed, so the report
+	// write fails after the turn ended. The ledger (under .cog/ledger/) is
+	// unaffected.
+	if err := os.MkdirAll(filepath.Join(root, ".cog"), 0o755); err != nil {
+		t.Fatalf("mkdir .cog: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".cog", "run"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("seed blocking file: %v", err)
+	}
+
+	board := NewRunBoardStore(root)
+	d := fakeHermesDriver(t, nil)
+	e := NewHermesRunExecutor(board, d)
+	run := openHermesRun(t, board, "report write fails", "hello from node-a")
+
+	if err := e.Start(runCtx(t), run.ID, HermesACPOpts{Profile: "cog", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	end := runEndOf(t, board, run.ID)
+	if end.Outcome != RunOutcomeOK {
+		t.Fatalf("run.end outcome = %q (%q); want ok: a report write failure must never prevent run.end", end.Outcome, end.Reason)
+	}
+	if end.Report != nil {
+		t.Fatalf("run.end report = %+v; want none (the write could not succeed)", end.Report)
+	}
+	if n := endEntries(t, board, run.ID); n != 1 {
+		t.Fatalf("run.end entries = %d, want exactly 1", n)
 	}
 }

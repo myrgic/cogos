@@ -1598,6 +1598,42 @@
       "raw": "RunsLedgerBucket"
     },
     {
+      "file": "internal/engine/run_exec_hermes.go",
+      "line": 584,
+      "column": 12,
+      "primitive": "os.MkdirAll",
+      "func": "writeRunReport",
+      "pattern": "dirname(\u003cWorkspaceRoot\u003e/.cog/run/runs/{runID}/report.md)",
+      "category": "cog",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "dir"
+    },
+    {
+      "file": "internal/engine/run_exec_hermes.go",
+      "line": 591,
+      "column": 14,
+      "primitive": "os.CreateTemp",
+      "func": "writeRunReport",
+      "pattern": "dirname(\u003cWorkspaceRoot\u003e/.cog/run/runs/{runID}/report.md)",
+      "category": "cog",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "dir"
+    },
+    {
+      "file": "internal/engine/run_exec_hermes.go",
+      "line": 604,
+      "column": 12,
+      "primitive": "os.Rename",
+      "func": "writeRunReport",
+      "pattern": "\u003cWorkspaceRoot\u003e/.cog/run/runs/{runID}/report.md",
+      "category": "cog",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "path"
+    },
+    {
       "file": "internal/engine/serve.go",
       "line": 1540,
       "column": 19,
@@ -2943,8 +2979,8 @@
     }
   ],
   "summary": {
-    "total": 245,
-    "cog": 104,
+    "total": 248,
+    "cog": 107,
     "home": 2,
     "elsewhere": 13,
     "unanchored": 85,
@@ -2953,11 +2989,11 @@
       "engine.AppendEvent(bucket)": 9,
       "io.Copy": 7,
       "os.Create": 6,
-      "os.CreateTemp": 8,
-      "os.MkdirAll": 77,
+      "os.CreateTemp": 9,
+      "os.MkdirAll": 78,
       "os.MkdirTemp": 2,
       "os.OpenFile": 27,
-      "os.Rename": 34,
+      "os.Rename": 35,
       "os.Symlink": 1,
       "os.WriteFile": 66,
       "sql.Open(sqlite3)": 8
