@@ -1599,7 +1599,7 @@
     },
     {
       "file": "internal/engine/serve.go",
-      "line": 1536,
+      "line": 1540,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",
