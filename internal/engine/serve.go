@@ -70,10 +70,13 @@ type Server struct {
 	reaperMu   sync.Mutex
 	reaperStop context.CancelFunc
 	// Stage UI listener (serve_stage_ui.go); nil unless stage_ui.addr is set.
-	stageUIMu       sync.Mutex
-	stageUISrv      *http.Server
-	stageUIGuard    *stageGuard
-	stageUIAddr     string
+	stageUIMu    sync.Mutex
+	stageUISrv   *http.Server
+	stageUIGuard *stageGuard
+	stageUIAddr  string
+	// stageUISup is the Stage upstream supervisor (stage_ui_supervisor.go);
+	// nil unless stage_ui.supervise is configured.
+	stageUISup      *stageUISupervisor
 	debug           debugStore      // captures last request pipeline state
 	attentionLog    *attentionLog   // per-server log (avoids global write race)
 	agentController AgentController // nil until SetAgentController is called

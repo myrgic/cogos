@@ -1599,7 +1599,7 @@
     },
     {
       "file": "internal/engine/serve.go",
-      "line": 1480,
+      "line": 1483,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",
@@ -1728,6 +1728,54 @@
       "resolved": true,
       "subsystem": "internal:engine",
       "raw": "shareLinksLedgerSession"
+    },
+    {
+      "file": "internal/engine/stage_ui_supervisor.go",
+      "line": 512,
+      "column": 13,
+      "primitive": "os.MkdirAll",
+      "func": "(*stageUISupervisor).startChild",
+      "pattern": "dirname({s.LogFile})",
+      "category": "unanchored",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "dir"
+    },
+    {
+      "file": "internal/engine/stage_ui_supervisor.go",
+      "line": 516,
+      "column": 15,
+      "primitive": "os.OpenFile",
+      "func": "(*stageUISupervisor).startChild",
+      "pattern": "{s.LogFile}",
+      "category": "unanchored",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "s.logFile"
+    },
+    {
+      "file": "internal/engine/stage_ui_supervisor.go",
+      "line": 844,
+      "column": 13,
+      "primitive": "os.MkdirAll",
+      "func": "writePidFile",
+      "pattern": "dirname({s.PidFile})",
+      "category": "unanchored",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "dir"
+    },
+    {
+      "file": "internal/engine/stage_ui_supervisor.go",
+      "line": 848,
+      "column": 12,
+      "primitive": "os.WriteFile",
+      "func": "writePidFile",
+      "pattern": "{s.PidFile}",
+      "category": "unanchored",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "path"
     },
     {
       "file": "internal/engine/turn_storage.go",
@@ -2943,23 +2991,23 @@
     }
   ],
   "summary": {
-    "total": 245,
+    "total": 249,
     "cog": 104,
     "home": 2,
     "elsewhere": 13,
-    "unanchored": 85,
+    "unanchored": 89,
     "dynamic": 41,
     "by_primitive": {
       "engine.AppendEvent(bucket)": 9,
       "io.Copy": 7,
       "os.Create": 6,
       "os.CreateTemp": 8,
-      "os.MkdirAll": 77,
+      "os.MkdirAll": 79,
       "os.MkdirTemp": 2,
-      "os.OpenFile": 27,
+      "os.OpenFile": 28,
       "os.Rename": 34,
       "os.Symlink": 1,
-      "os.WriteFile": 66,
+      "os.WriteFile": 67,
       "sql.Open(sqlite3)": 8
     }
   },
@@ -3541,6 +3589,36 @@
       "func": "homeDir",
       "subsystem": "internal:engine",
       "raw": "exec.Command(\"sh\", \"-c\", \"echo $HOME\")",
+      "dir": "",
+      "dir_known": false
+    },
+    {
+      "file": "internal/engine/stage_ui_supervisor.go",
+      "line": 522,
+      "column": 9,
+      "func": "(*stageUISupervisor).startChild",
+      "subsystem": "internal:engine",
+      "raw": "exec.Command(s.cmd[0], s.cmd[1:]...)",
+      "dir": "{s.Cwd}",
+      "dir_known": true
+    },
+    {
+      "file": "internal/engine/stage_ui_supervisor_windows.go",
+      "line": 40,
+      "column": 9,
+      "func": "terminateProcess",
+      "subsystem": "internal:engine",
+      "raw": "exec.Command(\"taskkill\", \"/PID\", strconv.Itoa(pid))",
+      "dir": "",
+      "dir_known": false
+    },
+    {
+      "file": "internal/engine/stage_ui_supervisor_windows.go",
+      "line": 49,
+      "column": 12,
+      "func": "killProcess",
+      "subsystem": "internal:engine",
+      "raw": "exec.Command(\"taskkill\", \"/F\", \"/PID\", strconv.Itoa(pid))",
       "dir": "",
       "dir_known": false
     },
