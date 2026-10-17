@@ -656,11 +656,18 @@ func (s *stageUISupervisor) mayTerminate(pid int) bool {
 // inStartGrace reports whether pid is still inside the start grace: time
 // measured from the moment this kernel started that child, or from the moment
 // it first saw a pidfile pid it did not start. A failed health check inside
-// that window is a boot, not a strike.
+// that window is a boot, not a strike. A pid that has answered health once has
+// no grace left (cog-review on #700: an adopted upstream that wedged was given a
+// fresh 120 s, re-armed on every flap).
 func (s *stageUISupervisor) inStartGrace(now time.Time, pid int) bool {
 	s.mu.Lock()
-	anchor := time.Time{}
+	var anchor time.Time
 	switch {
+	case pid > 0 && pid == s.healthyPid:
+		// It has answered health already: it booted. Going unhealthy now is a
+		// failure, counted from the first strike, never a second boot.
+		s.mu.Unlock()
+		return false
 	case pid > 0 && pid == s.startedPid:
 		anchor = s.lastStart
 	case pid > 0 && pid == s.observedPid:
@@ -683,7 +690,7 @@ func (s *stageUISupervisor) inStartGrace(now time.Time, pid int) bool {
 func (s *stageUISupervisor) noteObserved(now time.Time, pid int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if pid <= 0 || pid == s.startedPid || pid == s.observedPid {
+	if pid <= 0 || pid == s.startedPid || pid == s.observedPid || pid == s.healthyPid {
 		return
 	}
 	s.observedPid, s.observedSince, s.warnedPid = pid, now, 0

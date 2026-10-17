@@ -631,6 +631,49 @@ func TestStageUISupervisor_UnhealthyAliveIsReplaced(t *testing.T) {
 	}
 }
 
+// An adopted upstream that later wedges (alive, no health answer) is replaced
+// after the strike limit, with the default start grace in force: it booted
+// long ago, so it gets no boot grace (cog-review on #700).
+func TestStageUISupervisor_AdoptedThenUnhealthyGetsNoStartGrace(t *testing.T) {
+	child := newStubChild(t, stubChildParams{})
+	cfg := child.supervisorConfig(t)
+	// The "launchd-kept" upstream. Reaped here as launchd would, so once the
+	// supervisor ends it the pid is really gone (stubSpawn reaps only at cleanup).
+	cmd := exec.Command(child.argv[0], child.argv[1:]...)
+	cmd.Dir = child.dir
+	cmd.Env = append(os.Environ(), child.envLines...)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn stub: %v", err)
+	}
+	go func() { _ = cmd.Wait() }()
+	pid := cmd.Process.Pid
+	if err := os.WriteFile(cfg.PidFile, []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("write pidfile: %v", err)
+	}
+	t.Cleanup(func() { killAndWait(t, pid) })
+	sup, _ := testSupervisor(t, cfg)
+	requireDefaultStartGrace(t, sup)
+	sup.healthURL = child.healthURL(t, pid)
+
+	sup.check(t) // adopt
+	if st := sup.status(); !st.Healthy || !st.Adopted || st.PID != pid {
+		t.Fatalf("status on adoption: %+v", st)
+	}
+
+	sup.healthURL = "http://127.0.0.1:1/healthz" // the upstream wedges: alive, no answer
+	for i := 1; i < StageUISupervisorUnhealthyChecks; i++ {
+		sup.check(t)
+		if !processAlive(pid) {
+			t.Fatalf("adopted %d killed at strike %d, want %d strikes", pid, i, StageUISupervisorUnhealthyChecks)
+		}
+	}
+	sup.check(t) // the strike limit, well inside what would have been a fresh start grace
+	waitDead(t, pid)
+	if st := sup.status(); st.Restarts != 1 {
+		t.Fatalf("status after replacing the wedged adopted upstream: %+v", st)
+	}
+}
+
 func TestStageUISupervisor_UnhealthyIgnoringSigtermIsKilled(t *testing.T) {
 	child := newStubChild(t, stubChildParams{unhealthyFirst: true, ignoreSigterm: true})
 	sup, advance := testSupervisor(t, child.supervisorConfig(t))
