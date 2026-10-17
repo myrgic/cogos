@@ -53,6 +53,10 @@ const (
 	stageGuardLockS   = 3600
 )
 
+// stageLocalAuthReason is the refusal reason for a /local request that does
+// not carry the grant. It names no token value and no actor.
+const stageLocalAuthReason = "a live grant with scope " + ScopeStageLocal + " acting for the Stage operator is required for /local"
+
 var stageGuardLoopbackHosts = map[string]bool{"localhost": true, "127.0.0.1": true, "[::1]": true}
 
 var (
@@ -76,6 +80,16 @@ type stageGuard struct {
 	// when off. See serve_stage_ui_keys.go.
 	keysMode string
 	shadow   *keyShadow
+
+	// localAuthEnforce is stage_ui.local_auth=enforce: every /local request
+	// must present a live grant with scope stage:local naming localActor
+	// (see localGrantOK) naming localActor. grants supplies the registry it is verified against;
+	// nil means no grant can verify, so /local is refused (fail closed).
+	localAuthEnforce bool
+	grants           func() *IdentityGrantRegistry
+	// localActor is stage_ui.local_actor: the actor a /local grant must name
+	// (the Stage host's operator). Empty under enforce refuses every request.
+	localActor string
 
 	mu     sync.Mutex
 	fails  map[string][]time.Time
@@ -245,13 +259,55 @@ func stageGuardLogPath(p string) string {
 	return p
 }
 
+// localGrantOK reports whether r presents a live grant that may act on the
+// Stage UI's /local routes: scope "stage:local" naming the configured actor.
+// It reuses the kernel's own grant plumbing — grantTokenFromRequest (the
+// X-Cogos-Grant / Authorization: Bearer carrier) and VerifyAny/grantHasScope
+// (serve_grant_auth.go) — rather than parsing or hashing a token here, and it
+// never logs the token. A missing registry is a refusal, not a pass.
+func (g *stageGuard) localGrantOK(r *http.Request) bool {
+	if g.grants == nil {
+		return false
+	}
+	reg := g.grants()
+	if reg == nil {
+		return false
+	}
+	token := grantTokenFromRequest(r)
+	if token == "" {
+		return false
+	}
+	grant, ok := reg.VerifyAny(token)
+	if !ok {
+		return false
+	}
+	return g.localActor != "" && grant.Actor == g.localActor && grantHasScope(grant, ScopeStageLocal)
+}
+
 // check returns a refusal (status, reason) or (0, "") to let the request on.
 // It is guard.check, in the same order.
 func (g *stageGuard) check(r *http.Request, info stageReqInfo) (int, string) {
 	p := r.URL.Path
 	isLocalRaw := strings.HasPrefix(p, "/local")
-	if !info.self && g.isLocked(info.ip) && !isLocalRaw {
+	// isLocal covers the raw spelling and the cleaned-path spellings the
+	// /local rules below already normalise (//local/x, /./local/x). isLocalRaw
+	// stays the raw path: the lockout exemption is decided on it, as guard.py
+	// does.
+	isLocal := isLocalRaw || strings.HasPrefix(path.Clean(p), "/local")
+	// local_auth=enforce: the one credential this guard verifies. Computed
+	// once and shared by the lockout exemption and the gate below; the token
+	// itself is never logged.
+	localGranted := isLocal && g.localAuthEnforce && g.localGrantOK(r)
+	// The /local lockout exemption ("the owner's own door is never locked
+	// out") applies only to a request that may act on /local: always when
+	// local_auth is off, and otherwise only with a valid grant.
+	if !info.self && g.isLocked(info.ip) && !(isLocalRaw && (!g.localAuthEnforce || localGranted)) {
 		return http.StatusTooManyRequests, "locked out"
+	}
+	// A /local request without the grant is refused by the kernel here, before
+	// host/origin/content checks and before anything is proxied.
+	if isLocal && g.localAuthEnforce && !localGranted {
+		return http.StatusUnauthorized, stageLocalAuthReason
 	}
 	if !g.allowedHost(r.Host) {
 		return http.StatusMisdirectedRequest, "unknown host"
@@ -260,7 +316,7 @@ func (g *stageGuard) check(r *http.Request, info stageReqInfo) (int, string) {
 	if info.ws && origin != "" && !g.originAllowed(origin) {
 		return http.StatusForbidden, "foreign origin"
 	}
-	if isLocalRaw || strings.HasPrefix(path.Clean(p), "/local") {
+	if isLocal {
 		if stageHasHeader(r, "Cf-Connecting-Ip") || !stageGuardLoopbackHosts[stageGuardHostOnly(r.Host)] {
 			return http.StatusNotFound, "not local"
 		}
@@ -314,11 +370,15 @@ func stageIsKeyedPath(p string) bool {
 	return false
 }
 
-// refuse writes the refusal: JSON for http, a bare 403 for websocket.
+// refuse writes the refusal: JSON for http, a bare 403 for websocket. The one
+// exception is 401, the kernel's own local_auth=enforce answer — an
+// authentication challenge the caller must be able to read, so it is written
+// as a normal JSON response even on a websocket upgrade rather than collapsed
+// to the Stage's close-4403 bare 403.
 func (g *stageGuard) refuse(w http.ResponseWriter, r *http.Request, info stageReqInfo, code int, why string) {
 	slog.Warn("stage-ui: guard-refused", "why", why, "code", code, "path", stageGuardLogPath(r.URL.Path),
 		"ip", info.ip, "host", truncate80(r.Host))
-	if info.ws {
+	if info.ws && code != http.StatusUnauthorized {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
