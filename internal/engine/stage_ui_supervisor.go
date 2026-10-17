@@ -199,6 +199,7 @@ type stageUISupervisor struct {
 	attempts     int           // consecutive failures feeding the doubling
 	nextAttempt  time.Time     // when the armed backoff elapses
 	unhealthy    int           // consecutive failed checks of a live upstream
+	strikePid    int           // the pid those strikes were counted against
 	healthySince time.Time     // start of the current healthy window
 	hadUpstream  bool          // an upstream has been seen alive at least once
 
@@ -358,7 +359,7 @@ func (s *stageUISupervisor) runOnce(ctx context.Context) {
 				"pid", pid, "grace", s.startGrace.String(), "health_url", s.healthURL)
 			return
 		}
-		strikes := s.noteUnhealthyCheck()
+		strikes := s.noteUnhealthyCheck(pid)
 		s.setState(false, pid, prevPid != 0 && pid != prevPid)
 		if strikes < s.unhealthyLimit {
 			s.warnUnhealthy(pid, strikes)
@@ -533,6 +534,9 @@ func (s *stageUISupervisor) startChild() (int, error) {
 		// "nothing running" and start a second upstream beside it. Fail the
 		// start instead of leaving an invisible process behind.
 		_ = killProcess(pid)
+		// Reap it too: a killed child nobody waits on stays a zombie for the
+		// kernel's lifetime (cog-review on #700).
+		go func() { _ = cmd.Wait() }()
 		return 0, err
 	}
 	// Reap in the background: the child must not become a zombie while the
@@ -725,10 +729,15 @@ func (s *stageUISupervisor) forgetTrust(pid int) {
 	}
 }
 
-// noteUnhealthyCheck counts one failed check of a live upstream.
-func (s *stageUISupervisor) noteUnhealthyCheck() int {
+// noteUnhealthyCheck counts one failed check of a live upstream. Strikes
+// belong to one pid: a pidfile that now names a different process starts its
+// count again (cog-review on #700: a new pid inherited an old one's strikes).
+func (s *stageUISupervisor) noteUnhealthyCheck(pid int) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if pid != s.strikePid {
+		s.unhealthy, s.strikePid = 0, pid
+	}
 	s.unhealthy++
 	s.healthySince = time.Time{}
 	return s.unhealthy

@@ -1731,7 +1731,7 @@
     },
     {
       "file": "internal/engine/stage_ui_supervisor.go",
-      "line": 512,
+      "line": 513,
       "column": 13,
       "primitive": "os.MkdirAll",
       "func": "(*stageUISupervisor).startChild",
@@ -1743,7 +1743,7 @@
     },
     {
       "file": "internal/engine/stage_ui_supervisor.go",
-      "line": 516,
+      "line": 517,
       "column": 15,
       "primitive": "os.OpenFile",
       "func": "(*stageUISupervisor).startChild",
@@ -1755,7 +1755,7 @@
     },
     {
       "file": "internal/engine/stage_ui_supervisor.go",
-      "line": 853,
+      "line": 862,
       "column": 13,
       "primitive": "os.MkdirAll",
       "func": "writePidFile",
@@ -1767,7 +1767,7 @@
     },
     {
       "file": "internal/engine/stage_ui_supervisor.go",
-      "line": 857,
+      "line": 866,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "writePidFile",
@@ -3594,7 +3594,7 @@
     },
     {
       "file": "internal/engine/stage_ui_supervisor.go",
-      "line": 522,
+      "line": 523,
       "column": 9,
       "func": "(*stageUISupervisor).startChild",
       "subsystem": "internal:engine",

@@ -1263,3 +1263,19 @@ func TestStageUISupervisor_IncompleteBlockIsAConfigError(t *testing.T) {
 		t.Fatal("an absent block reads as enabled")
 	}
 }
+
+// Strikes belong to one pid: when the pidfile starts naming a different
+// process, its count starts again (cog-review on #700).
+func TestStageUISupervisor_StrikesResetWhenThePidChanges(t *testing.T) {
+	child := newStubChild(t, stubChildParams{})
+	sup, _ := testSupervisor(t, child.supervisorConfig(t))
+	if got := sup.noteUnhealthyCheck(101); got != 1 {
+		t.Fatalf("first strike on 101 = %d", got)
+	}
+	if got := sup.noteUnhealthyCheck(101); got != 2 {
+		t.Fatalf("second strike on 101 = %d", got)
+	}
+	if got := sup.noteUnhealthyCheck(202); got != 1 {
+		t.Fatalf("first strike on a new pid 202 = %d; want 1 (no inherited strikes)", got)
+	}
+}
