@@ -155,6 +155,22 @@ func (s *Server) handleRunOpen(w http.ResponseWriter, r *http.Request) {
 		opts = *in.Hermes // copy: the request body is not retained by the host loop
 	}
 	opts.Actor = actorFromRequest(r)
+	// The session options carry no authority the grant lacks (cog-review on
+	// #701). A run is a fresh session: it never attaches to or forks an
+	// existing one, and its class goes through the same grant authority the
+	// managed-sessions surface applies. Both are checked before the open, so a
+	// refusal leaves no run behind.
+	if opts.Load != "" || opts.ForkOf != "" {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request", "a run starts a new session: hermes.load and hermes.fork_of are not accepted")
+		return
+	}
+	opts.AllowClass = managedSessionClassAuthority(r)
+	if opts.AllowClass != nil && !opts.AllowClass(opts.Class) {
+		// Create applies the same check (a classless session included), so a
+		// run it would refuse is refused here, before anything is opened.
+		writeJSONError(w, http.StatusForbidden, "forbidden", "this grant may not start runtime class "+strconv.Quote(opts.Class))
+		return
+	}
 
 	run, err := st.OpenKernelRun(in.RunOpen, actor)
 	if err != nil {

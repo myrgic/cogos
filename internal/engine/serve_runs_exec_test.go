@@ -67,7 +67,10 @@ func startRunAPI(t *testing.T) *runAPIHarness {
 	}
 	h.board = h.srv.runBoard
 	h.ts = httptest.NewServer(h.srv.Handler())
-	h.token = mintActorScopedTestGrant(t, h.srv, "run-api", "chaz", ScopeRunsWrite)
+	// A hermes-fork run starts a managed session, so its caller needs the
+	// session authority a managed-sessions caller needs (the Stage's grant has
+	// it), plus runs:write.
+	h.token = mintActorScopedTestGrant(t, h.srv, "run-api", "chaz", ScopeRunsWrite, ScopeManagedSessions)
 	t.Cleanup(func() {
 		cancel()
 		reconcile.UnregisterProvider(RunReconcileType)
@@ -451,5 +454,35 @@ func TestRunAPI_ShutdownEndsHostedRunBounded(t *testing.T) {
 	}
 	if n := endEntries(t, h.board, id); n != 1 {
 		t.Fatalf("run.end entries = %d, want exactly 1", n)
+	}
+}
+
+// TestRunAPI_HermesOptsCarryNoAuthorityTheGrantLacks (cog-review on #701): a
+// grant with only runs:write may not pick a runtime class it has no authority
+// for, and a run never attaches to or forks an existing session. Both are
+// refused before anything is opened.
+func TestRunAPI_HermesOptsCarryNoAuthorityTheGrantLacks(t *testing.T) {
+	h := startRunAPI(t)
+	runsOnly := mintActorScopedTestGrant(t, h.srv, "run-api-runs-only", "chaz", ScopeRunsWrite)
+	guestOnly := mintActorScopedTestGrant(t, h.srv, "run-api-guest", "chaz", ScopeRunsWrite,
+		ScopeManagedSessionsClassPrefix+"guest")
+	cases := []struct {
+		name, token, hermes string
+		want                int
+	}{
+		{"runs:write alone, no class", runsOnly, `{"profile":"cog"}`, http.StatusForbidden},
+		{"class beyond the grant", guestOnly, `{"class":"owner"}`, http.StatusForbidden},
+		{"load an existing session", h.token, `{"profile":"cog","load":"sess-someone-else"}`, http.StatusBadRequest},
+		{"fork an existing session", h.token, `{"profile":"cog","fork_of":"sess-someone-else"}`, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		body := fmt.Sprintf(`{"title":"t","brief":"b","owner":"cog","executor":{"kind":"hermes-fork"},`+
+			`"origin":{"by":"node-a"},"hermes":%s}`, tc.hermes)
+		if code, run := runsPost(t, h.ts.URL+"/v1/runs", tc.token, body); code != tc.want {
+			t.Errorf("%s = %d (%v); want %d", tc.name, code, run, tc.want)
+		}
+	}
+	if got := h.board.List(RunFilter{}); len(got) != 0 {
+		t.Fatalf("a refused open still recorded a run: %+v", got)
 	}
 }
