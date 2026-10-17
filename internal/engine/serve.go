@@ -676,6 +676,10 @@ func (s *Server) startRunExecutor(ctx context.Context) *HermesRunExecutor {
 // startRunExecutorLocked is startRunExecutor with reaperMu held.
 func (s *Server) startRunExecutorLocked(ctx context.Context) *HermesRunExecutor {
 	if s.runExecutor != nil {
+		// A restart after Shutdown hands in a fresh serving context: host loops
+		// must run on it, not on the cancelled one (cog-review on #701). The boot
+		// sweep stays once per executor.
+		s.runCtx = ctx
 		return s.runExecutor
 	}
 	if s.runBoard == nil || s.managedSessions == nil {

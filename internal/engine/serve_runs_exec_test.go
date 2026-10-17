@@ -486,3 +486,23 @@ func TestRunAPI_HermesOptsCarryNoAuthorityTheGrantLacks(t *testing.T) {
 		t.Fatalf("a refused open still recorded a run: %+v", got)
 	}
 }
+
+// TestRunAPI_RestartRebindsTheServingContext (cog-review on #701): after the
+// serving context is cancelled (Shutdown) and the executor is started again
+// with a fresh one, runs host on the fresh context instead of crashing at once.
+func TestRunAPI_RestartRebindsTheServingContext(t *testing.T) {
+	h := startRunAPI(t)
+	h.stop() // Shutdown: the first serving context ends
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	t.Cleanup(cancel2)
+	if e := h.srv.startRunExecutor(ctx2); e != h.exec {
+		t.Fatalf("restart built a new executor (%p, want %p)", e, h.exec)
+	}
+	if _, ctx := h.srv.runExecutorFor(); ctx != ctx2 {
+		t.Fatal("restart kept the cancelled serving context")
+	}
+	id := h.open(t, "after restart")
+	if end := waitRunEnd(t, h.board, id); end.Outcome != RunOutcomeOK {
+		t.Fatalf("run after restart ended %q; want ok", end.Outcome)
+	}
+}
