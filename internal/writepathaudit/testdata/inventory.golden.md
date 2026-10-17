@@ -74,7 +74,7 @@ Total sites: 245  (cog: 104, home: 2, elsewhere: 13, unanchored: 85, dynamic: 41
 | `dirname(<WorkspaceRoot>/.cog/run/proprioceptive.jsonl)` | NewProprioceptiveLogger (`os.MkdirAll`) | internal/engine/proprioceptive.go:54 | internal:engine |
 | `<WorkspaceRoot>/.cog/run/proprioceptive.jsonl` | (*ProprioceptiveLogger).Log (`os.OpenFile`) | internal/engine/proprioceptive.go:72 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/rooms/events.jsonl` | (*RoomBoardStore).appendRoomEntryLocked (`engine.AppendEvent(bucket)`) | internal/engine/room_board.go:466 | internal:engine |
-| `<WorkspaceRoot>/.cog/ledger/runs/events.jsonl` | (*RunBoardStore).commitLocked (`engine.AppendEvent(bucket)`) | internal/engine/run_board.go:364 | internal:engine |
+| `<WorkspaceRoot>/.cog/ledger/runs/events.jsonl` | (*RunBoardStore).commitLocked (`engine.AppendEvent(bucket)`) | internal/engine/run_board.go:373 | internal:engine |
 | `<WorkspaceRoot>/.cog/run` | newAttentionLog (`os.MkdirAll`) | internal/engine/serve_attention.go:46 | internal:engine |
 | `<WorkspaceRoot>/.cog/run/attention.jsonl` | (*attentionLog).append (`os.OpenFile`) | internal/engine/serve_attention.go:53 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/identity-grants/events.jsonl` | (*IdentityGrantRegistry).appendExtendEventLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_identity_grants.go:744 | internal:engine |
@@ -145,7 +145,7 @@ Total sites: 245  (cog: 104, home: 2, elsewhere: 13, unanchored: 85, dynamic: 41
 | `<TempDir>` | (*modalityProxy).playAudio (`os.CreateTemp`) | internal/engine/mcp_modality_proxy.go:853 | internal:engine |
 | `<TempDir>` | streamFetch (`os.CreateTemp`) | internal/engine/remote_hydrate_spike.go:195 | internal:engine |
 | `<TempDir>` | streamFetch (`io.Copy`) | internal/engine/remote_hydrate_spike.go:204 | internal:engine |
-| `<TempDir>` | (*Server).handleChat (`os.MkdirTemp`) | internal/engine/serve.go:1480 | internal:engine |
+| `<TempDir>` | (*Server).handleChat (`os.MkdirTemp`) | internal/engine/serve.go:1540 | internal:engine |
 | `<TempDir>` | (*Server).handleBlockPut (`os.CreateTemp`) | internal/engine/serve_blocks.go:184 | internal:engine |
 | `<TempDir>` | (*Server).handleBlockPut (`io.Copy`) | internal/engine/serve_blocks.go:195 | internal:engine |
 | `<TempDir>` | writeTempMCPConfig (`os.CreateTemp`) | internal/engine/serve_claude_code.go:460 | internal:engine |

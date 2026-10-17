@@ -130,6 +130,14 @@ func (e *HermesRunExecutor) Start(ctx context.Context, runID string, opts Hermes
 
 	sess, err := e.driver.Create(ctx, opts)
 	if err != nil {
+		// The run is open on the board and nothing will ever host it, so it
+		// ends here: a run that cannot start must not stay open, uncancellable,
+		// until the next boot sweep (cog-review on #701). A concurrent end is
+		// fine (the conflict means someone already closed it).
+		if _, endErr := e.board.End(runID, RunEnd{Outcome: RunOutcomeFail, Reason: "create session: " + err.Error(),
+			ObservedBy: runExecObservedBy}, runExecActor); endErr != nil && !errors.Is(endErr, ErrRunConflict) {
+			return fmt.Errorf("run %s: create session: %w (and ending the run: %v)", runID, err, endErr)
+		}
 		return fmt.Errorf("run %s: create session: %w", runID, err)
 	}
 

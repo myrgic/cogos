@@ -1,6 +1,6 @@
 // run_board_kernel.go - the two run-board writers the kernel itself needs for
 // the executor slices (W2): opening a run for an executor kind the kernel
-// hosts (POST /v1/runs accepts manual only in W1), and recording a run's
+// hosts (POST /v1/runs routes hermes-fork here), and recording a run's
 // liveness.
 //
 // Both are thin writers over the same fold as run_board.go: they append one
