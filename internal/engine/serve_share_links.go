@@ -24,8 +24,10 @@
 // BEFORE touching memory (write-ahead), the ledger holds the sha256 hash and
 // never the raw token, and RebuildShareLinkStoreFromLedger replays the ledger
 // at boot. Links import by hash (the Stage's existing keys are already stored
-// hashed or can be hashed there), so nobody re-pairs. Links do not expire by
-// default; revoking one is how it ends.
+// hashed or can be hashed there), so nobody re-pairs. The store can also mint
+// a link: POST /v1/stage/keys/mint generates the value with crypto/rand, keeps
+// only its hash, and returns the value to the caller once. Links do not expire
+// by default; revoking one is how it ends.
 package engine
 
 import (
@@ -65,6 +67,11 @@ const maxShareLinks = 10000
 // maxShareLinkImportBatch bounds one import request.
 const maxShareLinkImportBatch = 2000
 
+// shareLinkTokenBytes is the entropy behind a kernel-minted link value: 32
+// bytes encode to 43 url-safe base64 characters, the same shape and length the
+// pairing flow issues for a link token (pairingTokenBytes, serve_pairing.go).
+const shareLinkTokenBytes = pairingTokenBytes
+
 // Link kinds. "share" is a room/home key, "device" a trusted-device cookie.
 const (
 	ShareLinkKindShare  = "share"
@@ -78,6 +85,8 @@ var (
 	ErrShareLinkNotFound = errors.New("no live share link with that id")
 	// ErrShareLinkLedgerAppendFailed maps to 503; memory is untouched.
 	ErrShareLinkLedgerAppendFailed = errors.New("identity-share-links ledger append failed")
+	// ErrShareLinkEntropyUnavailable maps to 500; nothing was written.
+	ErrShareLinkEntropyUnavailable = errors.New("share-link entropy unavailable")
 )
 
 var (
@@ -246,6 +255,34 @@ func (st *ShareLinkStore) Import(in ShareLinkImport, parent string) (*ShareLink,
 	}
 	st.insertLocked(link)
 	return link, nil
+}
+
+// Mint issues a new link: the kernel generates the raw value with crypto/rand,
+// stores only its sha256 hash, and returns the value to the caller exactly
+// once. It is Import's issuing counterpart and runs the identical path, so
+// validation, capacity and the supersede rules behave the same. Any
+// IntegrityHash already set on in is ignored — the kernel, not the caller,
+// chooses the secret — and the value is never written to the ledger, which
+// records only the record and its hash.
+func (st *ShareLinkStore) Mint(in ShareLinkImport, parent string) (*ShareLink, string, error) {
+	value, err := newShareLinkToken()
+	if err != nil {
+		return nil, "", fmt.Errorf("%w: %w", ErrShareLinkEntropyUnavailable, err)
+	}
+	in.IntegrityHash = sha256Hex(value)
+	link, err := st.Import(in, parent)
+	if err != nil {
+		return nil, "", err
+	}
+	return link, value, nil
+}
+
+// newShareLinkToken mints the raw value of a kernel-issued link: 32 random
+// bytes as url-safe base64 without padding (43 characters), the same shape the
+// pairing flow issues for a link token and the length the import fixtures
+// carry. crypto/rand only; the value is not retained here.
+func newShareLinkToken() (string, error) {
+	return randomURLToken(shareLinkTokenBytes)
 }
 
 // Resolve returns the live link whose token hashes to sha256Hex(token).
@@ -488,10 +525,12 @@ func (st *ShareLinkStore) applyLedgerEvent(env *EventEnvelope) {
 //
 // Every route is POST (the list too), carries a body, and sits under
 // /v1/stage/keys, which requiredScopeForRequest maps to ScopeStageKeys on all
-// methods. Responses never contain a token or a hash.
+// methods. Responses never contain a token or a hash — except the mint route,
+// which returns the raw value exactly once, at issue.
 
 func (s *Server) registerShareLinkRoutes(mux *http.ServeMux) {
 	s.route(mux, "POST /v1/stage/keys/import", s.handleShareLinkImport)
+	s.route(mux, "POST /v1/stage/keys/mint", s.handleShareLinkMint)
 	s.route(mux, "POST /v1/stage/keys/resolve", s.handleShareLinkResolve)
 	s.route(mux, "POST /v1/stage/keys/list", s.handleShareLinkList)
 	s.route(mux, "POST /v1/stage/keys/{id}/revoke", s.handleShareLinkRevoke)
@@ -581,6 +620,52 @@ func (s *Server) handleShareLinkImport(w http.ResponseWriter, r *http.Request) {
 		out = append(out, viewOfShareLink(l))
 	}
 	writeJSONResp(w, http.StatusOK, map[string]any{"links": out})
+}
+
+// shareLinkMintResponse is the one response that carries a raw value: the
+// one-time secret plus the same record fields the import route returns. The
+// hash is never included, and the value is never stored or re-readable.
+type shareLinkMintResponse struct {
+	Value string `json:"value"`
+	shareLinkView
+}
+
+// handleShareLinkMint mints a link: the kernel is the issuer. The body is an
+// import record minus the hash — any hash a caller sends is ignored and
+// regenerated here. The value comes back once, with the same record fields
+// import returns; capacity and supersede errors map exactly as import's do.
+func (s *Server) handleShareLinkMint(w http.ResponseWriter, r *http.Request) {
+	st := s.shareLinkStoreOr503(w)
+	if st == nil {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var in ShareLinkImport
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request", "body must be JSON")
+		return
+	}
+	parent := ""
+	if g, ok := grantFromContext(r.Context()); ok {
+		parent = g.GrantID
+	}
+	link, value, err := st.Mint(in, parent)
+	if err != nil {
+		status, kind := http.StatusBadRequest, "invalid_request"
+		switch {
+		case errors.Is(err, ErrShareLinkEntropyUnavailable):
+			status, kind = http.StatusInternalServerError, "internal"
+		case errors.Is(err, ErrShareLinkStoreAtCapacity):
+			status, kind = http.StatusTooManyRequests, "capacity_exceeded"
+		case errors.Is(err, ErrShareLinkLedgerAppendFailed):
+			status, kind = http.StatusServiceUnavailable, "ledger_unavailable"
+		}
+		writeJSONError(w, status, kind, err.Error())
+		return
+	}
+	// The body carries a secret: no intermediary or browser may keep a copy.
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSONResp(w, http.StatusCreated, shareLinkMintResponse{Value: value, shareLinkView: viewOfShareLink(link)})
 }
 
 type shareLinkResolveRequest struct {

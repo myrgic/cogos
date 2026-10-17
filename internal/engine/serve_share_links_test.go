@@ -474,3 +474,228 @@ func TestShareLink_ExpiredHashReusedOnOtherSurfaceDropsPredecessor(t *testing.T)
 		t.Errorf("rebuilt store len = %d; want 1", re.Len())
 	}
 }
+
+// ─── mint (the kernel as issuer) ─────────────────────────────────────────────
+
+// shareMintBody is a valid mint body for a room-share link. It is an import
+// record minus the hash, which the kernel supplies.
+func shareMintBody(surface, room string) map[string]any {
+	return map[string]any{
+		"kind": ShareLinkKindShare, "surface": surface, "actor": "chaz",
+		"role": "owner", "room": room, "scope": []string{"stage:room:" + room},
+	}
+}
+
+// mintedView is what the mint route returns: the one-time value plus the same
+// record fields the import route returns. Hash is present only so a test can
+// assert it is ABSENT (responses never carry a hash).
+type mintedView struct {
+	Value   string   `json:"value"`
+	LinkID  string   `json:"link_id"`
+	Kind    string   `json:"kind"`
+	Surface string   `json:"surface"`
+	Actor   string   `json:"actor"`
+	Role    string   `json:"role"`
+	Room    string   `json:"room"`
+	Scope   []string `json:"scope"`
+	Parent  string   `json:"parent"`
+	Hash    string   `json:"integrity_hash"`
+}
+
+// Mint then resolve the returned value: it is a live link with the requested
+// role and room, and the response carries no hash.
+func TestShareLinkMint_IssuesResolvableLink(t *testing.T) {
+	resetLedgerCacheForTest()
+	t.Cleanup(resetLedgerCacheForTest)
+	srv := newGrantAuthTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	grant := mintScopedTestGrant(t, srv, "stage-studio", ScopeStageKeys)
+
+	resp := shareDo(t, ts, "POST", "/v1/stage/keys/mint", GrantHeaderName, grant, shareMintBody("stage/room/r1/owner", "r1"))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("mint status = %d; want 201", resp.StatusCode)
+	}
+	var got mintedView
+	identityDecodeBody(t, resp, &got)
+	if got.Value == "" || got.LinkID == "" {
+		t.Fatalf("mint response = %+v", got)
+	}
+	if len(got.Value) < 40 {
+		t.Errorf("minted value is %d chars; want the pairing-issued link token length (>= 40)", len(got.Value))
+	}
+	if got.Hash != "" {
+		t.Error("mint response leaked an integrity hash")
+	}
+	if l, ok := srv.shareLinks.Resolve(got.Value); !ok || l.LinkID != got.LinkID || l.Role != "owner" || l.Room != "r1" {
+		t.Fatalf("store resolve = %+v ok=%v", l, ok)
+	}
+	var res struct {
+		Valid bool          `json:"valid"`
+		Link  shareLinkView `json:"link"`
+	}
+	identityDecodeBody(t, shareDo(t, ts, "POST", "/v1/stage/keys/resolve", GrantHeaderName, grant, map[string]string{"token": got.Value}), &res)
+	if !res.Valid || res.Link.Role != "owner" || res.Link.Room != "r1" {
+		t.Fatalf("HTTP resolve = %+v", res)
+	}
+}
+
+// The minted value is returned once and never written anywhere durable: the
+// ledger holds the event and the hash, and no occurrence of the value.
+func TestShareLinkMint_LedgerHoldsHashOnly(t *testing.T) {
+	resetLedgerCacheForTest()
+	t.Cleanup(resetLedgerCacheForTest)
+	srv := newGrantAuthTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	grant := mintScopedTestGrant(t, srv, "stage-studio", ScopeStageKeys)
+
+	var got mintedView
+	identityDecodeBody(t, shareDo(t, ts, "POST", "/v1/stage/keys/mint", GrantHeaderName, grant, shareMintBody("stage/room/r2/owner", "r2")), &got)
+	if got.Value == "" {
+		t.Fatal("mint returned no value")
+	}
+	raw, err := os.ReadFile(filepath.Join(srv.cfg.WorkspaceRoot, ".cog", "ledger", shareLinksLedgerSession, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(got.Value)) {
+		t.Error("ledger contains the minted value")
+	}
+	if !bytes.Contains(raw, []byte(sha256Hex(got.Value))) {
+		t.Error("ledger does not contain the minted value's hash")
+	}
+	if !bytes.Contains(raw, []byte("identity.share.issued")) {
+		t.Error("mint did not write an identity.share.issued event")
+	}
+}
+
+// Two mints give different values, a caller-supplied hash is ignored, and a
+// second mint on a surface supersedes the first exactly as import does.
+func TestShareLinkMint_TwiceGivesDifferentValues(t *testing.T) {
+	t.Parallel()
+	st := NewShareLinkStoreWithLedger("")
+	_, first, err := st.Mint(shareImport("caller-hash-is-ignored", "stage/room/ra/owner"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, second, err := st.Mint(shareImport("caller-hash-is-ignored", "stage/room/ra/owner"), "") // supersedes first
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, other, err := st.Mint(shareImport("caller-hash-is-ignored", "stage/room/rb/owner"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || first == other || second == other {
+		t.Fatalf("mints reused a value: %q %q %q", first, second, other)
+	}
+	if _, ok := st.Resolve("caller-hash-is-ignored"); ok {
+		t.Error("a caller-supplied hash was honored instead of the generated value")
+	}
+	if _, ok := st.Resolve(first); ok {
+		t.Error("a superseded minted value still resolves")
+	}
+	if _, ok := st.Resolve(second); !ok {
+		t.Error("the superseding minted value does not resolve")
+	}
+	if _, ok := st.Resolve(other); !ok {
+		t.Error("the second surface's minted value does not resolve")
+	}
+	if st.Len() != 2 {
+		t.Errorf("store len = %d; want 2", st.Len())
+	}
+}
+
+func TestShareLinkMint_RequiresStageKeysScope(t *testing.T) {
+	t.Parallel()
+	srv := newGrantAuthTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	noScope := mintScopedTestGrant(t, srv, "plain", ScopeWrite, ScopeAdmin, ScopeManagedSessions)
+	if r := shareDo(t, ts, "POST", "/v1/stage/keys/mint", GrantHeaderName, noScope, shareMintBody("stage/room/r1/owner", "r1")); r.StatusCode != http.StatusForbidden {
+		t.Errorf("mint without stage:keys = %d; want 403", r.StatusCode)
+	}
+	if r := shareDo(t, ts, "POST", "/v1/stage/keys/mint", "", "", shareMintBody("stage/room/r1/owner", "r1")); r.StatusCode != http.StatusUnauthorized {
+		t.Errorf("mint without a grant = %d; want 401", r.StatusCode)
+	}
+}
+
+// A share link is refused on the mint route exactly as on the other
+// /v1/stage/keys routes, through each carrier.
+func TestShareLinkMint_RefusesShareLinkAsGrant(t *testing.T) {
+	t.Parallel()
+	srv := newGrantAuthTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	const tok = "mint-share-link-as-grant-secret"
+	if _, err := srv.shareLinks.Import(shareImport(tok, "stage/room/r1/owner"), ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []string{GrantHeaderName, "Authorization", "x-api-key"} {
+		v := tok
+		if c == "Authorization" {
+			v = "Bearer " + tok
+		}
+		r := shareDo(t, ts, "POST", "/v1/stage/keys/mint", c, v, shareMintBody("stage/room/r9/owner", "r9"))
+		r.Body.Close()
+		if r.StatusCode != http.StatusForbidden {
+			t.Errorf("mint with a share link via %s = %d; want 403", c, r.StatusCode)
+		}
+	}
+}
+
+func TestShareLinkMint_RevokeEndsIt(t *testing.T) {
+	resetLedgerCacheForTest()
+	t.Cleanup(resetLedgerCacheForTest)
+	srv := newGrantAuthTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	grant := mintScopedTestGrant(t, srv, "stage-studio", ScopeStageKeys)
+
+	var got mintedView
+	identityDecodeBody(t, shareDo(t, ts, "POST", "/v1/stage/keys/mint", GrantHeaderName, grant, shareMintBody("stage/room/r3/owner", "r3")), &got)
+	rv := shareDo(t, ts, "POST", "/v1/stage/keys/"+got.LinkID+"/revoke", GrantHeaderName, grant, map[string]any{})
+	rv.Body.Close()
+	if rv.StatusCode != http.StatusOK {
+		t.Fatalf("revoke = %d", rv.StatusCode)
+	}
+	if _, ok := srv.shareLinks.Resolve(got.Value); ok {
+		t.Error("revoked minted value still resolves in the store")
+	}
+	var res struct {
+		Valid bool `json:"valid"`
+	}
+	identityDecodeBody(t, shareDo(t, ts, "POST", "/v1/stage/keys/resolve", GrantHeaderName, grant, map[string]string{"token": got.Value}), &res)
+	if res.Valid {
+		t.Error("revoked minted value still resolves over HTTP")
+	}
+}
+
+// A minted link is durable: a rebuild from the ledger resolves the same value.
+func TestShareLinkMint_RebuildResolvesMintedValue(t *testing.T) {
+	root := t.TempDir()
+	resetLedgerCacheForTest()
+	t.Cleanup(resetLedgerCacheForTest)
+	st := NewShareLinkStoreWithLedger(root)
+	link, value, err := st.Mint(shareImport("caller-hash-is-ignored", "stage/room/r4/owner"), "grant-issuer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resetLedgerCacheForTest()
+	re, err := RebuildShareLinkStoreFromLedger(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := re.Resolve(value)
+	if !ok || got.LinkID != link.LinkID || got.Role != "owner" || got.Room != "r1" || got.Parent != "grant-issuer" {
+		t.Fatalf("rebuilt minted link = %+v ok=%v", got, ok)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, ".cog", "ledger", shareLinksLedgerSession, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(value)) {
+		t.Error("ledger contains the minted value")
+	}
+}

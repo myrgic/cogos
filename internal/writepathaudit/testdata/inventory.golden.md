@@ -81,7 +81,7 @@ Total sites: 245  (cog: 104, home: 2, elsewhere: 13, unanchored: 85, dynamic: 41
 | `<WorkspaceRoot>/.cog/ledger/identity-grants/events.jsonl` | (*IdentityGrantRegistry).appendGrantEventLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_identity_grants.go:802 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/identity-grants/events.jsonl` | (*IdentityGrantRegistry).appendSupersessionEventLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_identity_grants.go:846 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/identity-pairing/events.jsonl` | (*pairingStore).append (`engine.AppendEvent(bucket)`) | internal/engine/serve_pairing.go:147 | internal:engine |
-| `<WorkspaceRoot>/.cog/ledger/identity-share-links/events.jsonl` | (*ShareLinkStore).appendLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_share_links.go:393 | internal:engine |
+| `<WorkspaceRoot>/.cog/ledger/identity-share-links/events.jsonl` | (*ShareLinkStore).appendLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_share_links.go:430 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/worktree-reconciler/events.jsonl` | (*FilesystemLedgerWriter).EmitWorktreeEvent (`engine.AppendEvent(bucket)`) | internal/engine/worktree_spawn.go:273 | internal:engine |
 | `{p.root}/.cog/state` | writeDispatchTrigger (`os.MkdirAll`) | internal/eval/mcp_tools.go:375 | internal:eval |
 | `{p.root}/.cog/state` | writePinBaseline (`os.MkdirAll`) | internal/eval/mcp_tools.go:482 | internal:eval |
