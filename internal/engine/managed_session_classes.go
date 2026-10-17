@@ -27,6 +27,7 @@ package engine
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -34,6 +35,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // ManagedSessionsConfig is the `managedSessions:` section of kernel.yaml.
@@ -302,3 +304,27 @@ func (rc *ResolvedRuntimeClass) Receipt() *RuntimeClassReceipt {
 	}
 	return rec
 }
+
+// ManagedSessionClassStatus is the capability descriptor and readiness receipt
+// for one kernel-declared runtime class. It is produced by probing the class's
+// registry-declared argv/env/cwd with a bounded ACP initialize; it never
+// carries argv, env or any secret. "ready" means the probe initialized
+// successfully against a supported protocol version; "unavailable" means it did
+// not, with Reason explaining why.
+type ManagedSessionClassStatus struct {
+	Class             string               `json:"class"`
+	Status            string               `json:"status"`
+	ProbedAt          time.Time            `json:"probed_at"`
+	ProtocolVersion   int                  `json:"protocol_version,omitempty"`
+	AgentCapabilities json.RawMessage      `json:"agent_capabilities,omitempty"`
+	Reason            string               `json:"reason,omitempty"`
+	Receipt           *RuntimeClassReceipt `json:"receipt,omitempty"`
+}
+
+// API/ACP compatibility note: the class readiness probe speaks ACP protocol
+// version 1 only. A declared class is "ready" when its argv answers
+// initialize with protocolVersion 1; any other version (or timeout/failure)
+// is reported as "unavailable". The public descriptor never exposes argv or
+// env: it carries only class/status/probed_at/protocol_version/
+// agent_capabilities/reason/receipt, with the receipt binding it to the
+// declared RuntimeClass.

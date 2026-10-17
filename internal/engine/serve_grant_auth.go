@@ -679,6 +679,12 @@ func isGrantExemptRequest(r *http.Request) bool {
 	if r.URL.Path == runsRoutePrefix || strings.HasPrefix(r.URL.Path, runsRoutePrefix+"/") {
 		return false
 	}
+	// The managed-session class readiness list is gated on every method too:
+	// a GET must not bypass the grant gate (narrow carve-out; broader
+	// managed-session read changes live elsewhere).
+	if r.URL.Path == "/v1/managed-sessions/classes" {
+		return false
+	}
 	// The room board is gated on every method too, and a missing credential
 	// on it is 403 rather than 401 (see grantAuthMiddleware): the room API is
 	// member-only, not merely write-gated.

@@ -37,6 +37,7 @@ import (
 
 func (s *Server) registerManagedSessionRoutes(mux *http.ServeMux) {
 	s.route(mux, "GET /v1/managed-sessions", s.handleManagedSessionList)
+	s.route(mux, "GET /v1/managed-sessions/classes", s.handleManagedSessionClasses)
 	s.route(mux, "POST /v1/managed-sessions", s.handleManagedSessionCreate)
 	s.route(mux, "GET /v1/managed-sessions/{id}", s.handleManagedSessionGet)
 	s.route(mux, "DELETE /v1/managed-sessions/{id}", s.handleManagedSessionDelete)
@@ -113,6 +114,24 @@ func (s *Server) handleManagedSessionList(w http.ResponseWriter, r *http.Request
 		sessions = kept
 	}
 	writeJSONResp(w, http.StatusOK, map[string]any{"sessions": sessions})
+}
+
+func (s *Server) handleManagedSessionClasses(w http.ResponseWriter, r *http.Request) {
+	if s.managedSessions == nil {
+		writeJSONResp(w, http.StatusOK, map[string]any{"classes": []ManagedSessionClassStatus{}})
+		return
+	}
+	allow := managedSessionClassAuthority(r)
+	ctx := r.Context()
+	names := s.managedSessions.ClassNames()
+	out := make([]ManagedSessionClassStatus, 0, len(names))
+	for _, name := range names {
+		if allow != nil && !allow(name) {
+			continue
+		}
+		out = append(out, s.managedSessions.ClassStatus(ctx, name))
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"classes": out})
 }
 
 type managedSessionCreateRequest struct {
