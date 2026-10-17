@@ -52,8 +52,12 @@ func TestRunBoardHTTP_EndTwice409_Unknown404_ManualOnly(t *testing.T) {
 	if code, _ := runsPost(t, ts.URL+"/v1/runs/nope/end", token, end); code != http.StatusNotFound {
 		t.Fatalf("end on unknown run = %d; want 404", code)
 	}
+	// hermes-fork is no longer the refused kind here: POST /v1/runs accepts it
+	// and hands it to the run executor (503 when none is wired; see
+	// serve_runs_exec_test.go). cc-workflow is kernel-openable but not
+	// accepted through this door.
 	if code, _ := runsPost(t, ts.URL+"/v1/runs", token,
-		`{"title":"t","owner":"cog","executor":{"kind":"hermes-fork"},"origin":{"by":"chaz"}}`); code != http.StatusBadRequest {
+		`{"title":"t","owner":"cog","executor":{"kind":"cc-workflow"},"origin":{"by":"chaz"}}`); code != http.StatusBadRequest {
 		t.Fatalf("non-manual executor = %d; want 400", code)
 	}
 

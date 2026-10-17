@@ -1587,7 +1587,7 @@
     },
     {
       "file": "internal/engine/run_board.go",
-      "line": 364,
+      "line": 373,
       "column": 13,
       "primitive": "engine.AppendEvent(bucket)",
       "func": "(*RunBoardStore).commitLocked",
@@ -1599,7 +1599,7 @@
     },
     {
       "file": "internal/engine/serve.go",
-      "line": 1480,
+      "line": 1536,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",

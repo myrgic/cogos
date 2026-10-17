@@ -172,6 +172,15 @@ type Server struct {
 	// ADR-093 §7 /v1/managed-sessions surface (serve_managed_sessions.go).
 	// Processes start only when a client creates a session.
 	managedSessions *HermesACPDriver
+
+	// runExecutor hosts hermes-fork runs opened at POST /v1/runs
+	// (run_exec_hermes.go). Nil until startBackground wires it (a Server that
+	// is only constructed, as in most tests, has none: an open with executor
+	// hermes-fork then answers 503). runCtx is the serving-lifetime context
+	// its host loops run on — non-nil exactly when runExecutor is — so
+	// shutdown bounds them. Both are read through runExecutorFor.
+	runExecutor *HermesRunExecutor
+	runCtx      context.Context
 }
 
 // NewServer constructs a Server bound to the configured port.
@@ -617,16 +626,20 @@ func (s *Server) Start() error {
 }
 
 // Serve serves on an already-bound listener and runs the serving-lifetime
-// background loops (session reaper) until Shutdown. Every production entry
-// point must come through here or Start: Boot (`cogos serve`) binds its own
-// listener first, and calling srv.Serve directly skipped the reaper.
+// background loops (session reaper, run executor) until Shutdown. Every
+// production entry point must come through here or Start: Boot (`cogos serve`)
+// binds its own listener first, and calling srv.Serve directly skipped the
+// reaper.
 func (s *Server) Serve(ln net.Listener) error {
 	s.startBackground()
 	s.startStageUI()
 	return s.srv.Serve(ln)
 }
 
-// Shutdown gracefully drains the server and stops its background reaper.
+// Shutdown gracefully drains the server and stops its background loops. The
+// run executor runs on the same serving-lifetime context the reaper does, so
+// cancelling it there ends the host loop of every run in flight (bounded: the
+// loop stops waiting for a turn and closes the run).
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.stopBackground()
 	s.stopStageUI()
@@ -646,6 +659,47 @@ func (s *Server) startBackground() {
 	ctx, stop := context.WithCancel(context.Background())
 	s.reaperStop = stop
 	s.startSessionReaper(ctx, defaultSessionReapTTL, defaultSessionReapInterval)
+	s.startRunExecutorLocked(ctx)
+}
+
+// startRunExecutor wires the Hermes-fork run executor (idempotent): once
+// BootSweep has closed the previous kernel's leftovers, repeated calls leave
+// the same executor in place rather than sweeping or rebuilding it. It returns
+// nil when there is nothing to host runs with — no run board, or no agent
+// driver — which leaves POST /v1/runs answering 503 for executor hermes-fork.
+func (s *Server) startRunExecutor(ctx context.Context) *HermesRunExecutor {
+	s.reaperMu.Lock()
+	defer s.reaperMu.Unlock()
+	return s.startRunExecutorLocked(ctx)
+}
+
+// startRunExecutorLocked is startRunExecutor with reaperMu held.
+func (s *Server) startRunExecutorLocked(ctx context.Context) *HermesRunExecutor {
+	if s.runExecutor != nil {
+		return s.runExecutor
+	}
+	if s.runBoard == nil || s.managedSessions == nil {
+		return nil
+	}
+	e := RegisterHermesRunExecutor(s.runBoard, s.managedSessions)
+	if closed, err := e.BootSweep(ctx); err != nil {
+		slog.Error("serve: run executor boot sweep failed", "err", err)
+	} else if len(closed) > 0 {
+		slog.Warn("serve: closed leftover hermes-fork runs at boot", "count", len(closed))
+	}
+	s.runExecutor, s.runCtx = e, ctx
+	return e
+}
+
+// runExecutorFor returns the wired run executor and the serving-lifetime
+// context its host loops run on, or nil when the executor is off.
+func (s *Server) runExecutorFor() (*HermesRunExecutor, context.Context) {
+	s.reaperMu.Lock()
+	defer s.reaperMu.Unlock()
+	if s.runExecutor == nil || s.runCtx == nil {
+		return nil, nil
+	}
+	return s.runExecutor, s.runCtx
 }
 
 // backgroundRunning reports whether the serving-lifetime loops are running.
@@ -655,7 +709,9 @@ func (s *Server) backgroundRunning() bool {
 	return s.reaperStop != nil
 }
 
-// stopBackground stops what startBackground started (idempotent).
+// stopBackground stops what startBackground started (idempotent): cancelling
+// reaperStop ends the serving-lifetime context, so both the session reaper and
+// every run host loop stop.
 func (s *Server) stopBackground() {
 	s.reaperMu.Lock()
 	defer s.reaperMu.Unlock()

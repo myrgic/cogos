@@ -18,7 +18,8 @@ import (
 )
 
 // openHermesRun opens a hermes-fork run on the board through the kernel's own
-// open path (POST /v1/runs accepts manual only in W1).
+// open path (OpenKernelRun; the run API's own hermes-fork path is exercised by
+// serve_runs_exec_test.go).
 func openHermesRun(t *testing.T, st *RunBoardStore, title, brief string) *Run {
 	t.Helper()
 	r, err := st.OpenKernelRun(RunOpen{
