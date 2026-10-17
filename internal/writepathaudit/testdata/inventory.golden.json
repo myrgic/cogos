@@ -1755,7 +1755,7 @@
     },
     {
       "file": "internal/engine/stage_ui_supervisor.go",
-      "line": 851,
+      "line": 853,
       "column": 13,
       "primitive": "os.MkdirAll",
       "func": "writePidFile",
@@ -1767,7 +1767,7 @@
     },
     {
       "file": "internal/engine/stage_ui_supervisor.go",
-      "line": 855,
+      "line": 857,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "writePidFile",
