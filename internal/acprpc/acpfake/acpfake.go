@@ -30,8 +30,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/myrgic/cogos/internal/acprpc"
 )
@@ -129,8 +131,22 @@ func (a *agent) HandleRequest(method string, params json.RawMessage) (any, error
 	_ = json.Unmarshal(params, &p)
 	switch method {
 	case "initialize":
+		pv := 1
+		if v := os.Getenv("ACPFAKE_PROTOCOL_VERSION"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				pv = n
+			}
+		}
+		if os.Getenv("ACPFAKE_INIT_HANG") == "1" {
+			select {}
+		}
+		if v := os.Getenv("ACPFAKE_INIT_DELAY"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil {
+				time.Sleep(d)
+			}
+		}
 		return map[string]any{
-			"protocolVersion": 1,
+			"protocolVersion": pv,
 			"agentInfo":       map[string]any{"name": "acpfake", "version": "0"},
 			"agentCapabilities": map[string]any{
 				"loadSession": true,
