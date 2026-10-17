@@ -1719,7 +1719,7 @@
     },
     {
       "file": "internal/engine/serve_share_links.go",
-      "line": 393,
+      "line": 430,
       "column": 9,
       "primitive": "engine.AppendEvent(bucket)",
       "func": "(*ShareLinkStore).appendLocked",
