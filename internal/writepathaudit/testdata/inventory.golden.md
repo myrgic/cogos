@@ -206,10 +206,10 @@ These sites structurally resolved (the shape of the path is known) but the ROOT 
 | `{path}` | (*rotatingWriter).Write (`os.OpenFile`) | internal/engine/rotating_writer.go:89 | internal:engine |
 | `{path}.1` | (*rotatingWriter).rotateLocked (`os.Rename`) | internal/engine/rotating_writer.go:137 | internal:engine |
 | `{path}` | (*rotatingWriter).rotateLocked (`os.OpenFile`) | internal/engine/rotating_writer.go:141 | internal:engine |
-| `dirname({s.LogFile})` | (*stageUISupervisor).startChild (`os.MkdirAll`) | internal/engine/stage_ui_supervisor.go:513 | internal:engine |
-| `{s.LogFile}` | (*stageUISupervisor).startChild (`os.OpenFile`) | internal/engine/stage_ui_supervisor.go:517 | internal:engine |
-| `dirname({s.PidFile})` | writePidFile (`os.MkdirAll`) | internal/engine/stage_ui_supervisor.go:862 | internal:engine |
-| `{s.PidFile}` | writePidFile (`os.WriteFile`) | internal/engine/stage_ui_supervisor.go:866 | internal:engine |
+| `dirname({s.LogFile})` | (*stageUISupervisor).startChild (`os.MkdirAll`) | internal/engine/stage_ui_supervisor.go:548 | internal:engine |
+| `{s.LogFile}` | (*stageUISupervisor).startChild (`os.OpenFile`) | internal/engine/stage_ui_supervisor.go:552 | internal:engine |
+| `dirname({s.PidFile})` | writePidFile (`os.MkdirAll`) | internal/engine/stage_ui_supervisor.go:972 | internal:engine |
+| `{s.PidFile}` | writePidFile (`os.WriteFile`) | internal/engine/stage_ui_supervisor.go:976 | internal:engine |
 | `<call:turnSidecarPath>.tmp` | PatchTurnSpeculative (`os.Create`) | internal/engine/turn_storage.go:250 | internal:engine |
 | `<call:turnSidecarPath>` | PatchTurnSpeculative (`os.Rename`) | internal/engine/turn_storage.go:263 | internal:engine |
 | `dirname(<call:turnSidecarPath>)` | appendTurnSidecar (`os.MkdirAll`) | internal/engine/turn_storage.go:352 | internal:engine |
@@ -367,7 +367,7 @@ Total subprocess sites: 88
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "launchctl", args...)` | internal/engine/service_supervisor_launchctl.go:422 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("id", "-u")` | internal/engine/service_supervisor_launchctl.go:449 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("sh", "-c", "echo $HOME")` | internal/engine/service_supervisor_launchctl.go:459 | internal:engine |
-| `{s.Cwd}` | `exec.Command(s.cmd[0], s.cmd[1:]...)` | internal/engine/stage_ui_supervisor.go:523 | internal:engine |
+| `{s.Cwd}` | `exec.Command(s.cmd[0], s.cmd[1:]...)` | internal/engine/stage_ui_supervisor.go:558 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("taskkill", "/PID", strconv.Itoa(pid))` | internal/engine/stage_ui_supervisor_windows.go:40 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))` | internal/engine/stage_ui_supervisor_windows.go:49 | internal:engine |
 | `{workspace}` | `exec.CommandContext(ctx, "sh", "-c", h.Shell)` | internal/engine/transition_hooks.go:225 | internal:engine |
