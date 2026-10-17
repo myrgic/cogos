@@ -778,3 +778,63 @@ func TestRuntimeClass_HTTPColdDeleteGated(t *testing.T) {
 		t.Fatalf("owner cold delete = %d, want 204", code)
 	}
 }
+
+// A class's mcpServers policy decides whether a create request may supply the
+// session's MCP servers (the stage hands a room its per-session voice server
+// this way, so a kernel-launched seat can speak). "request" passes them
+// through and records them in the receipt; "none" (the default) and
+// "configured" keep today's behaviour: the request may not supply any, and
+// the session gets the kernel's own set (today: none).
+func TestRuntimeClass_McpServersPolicy(t *testing.T) {
+	cfg, _ := classTestConfig(t)
+	voice := cfg.RuntimeClasses["chat"]
+	voice.McpServers = RuntimeClassMcpRequest
+	kernel := cfg.RuntimeClasses["collab"]
+	kernel.McpServers = "configured"
+	cfg.RuntimeClasses["voice"] = voice
+	cfg.RuntimeClasses["kern"] = kernel
+	reg, err := NewRuntimeClassRegistry(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := fakeHermesDriver(t, func(c *HermesACPDriverConfig) {
+		c.Classes = reg
+		c.Env = append(os.Environ(), acpfake.EnvVar+"=1")
+	})
+	servers := []json.RawMessage{json.RawMessage(`{"name":"stage-voice","command":"stage-voice-mcp"}`)}
+
+	// "request": the request's servers travel with the session and are auditable.
+	s, err := d.Create(context.Background(), HermesACPOpts{Class: "voice", Cwd: t.TempDir(), McpServers: servers})
+	if err != nil {
+		t.Fatalf("request class with mcp_servers: %v", err)
+	}
+	if len(s.mcp) != 1 || string(s.mcp[0]) != string(servers[0]) {
+		t.Fatalf("request class mcp = %v, want the request's servers", s.mcp)
+	}
+	if rec := s.Info().Receipt; rec == nil || len(rec.McpServers) != 1 || string(rec.McpServers[0]) != string(servers[0]) {
+		t.Fatalf("receipt mcp = %+v, want the resolved servers", rec)
+	}
+	// ...and the same class with no servers supplied resolves to none.
+	bare, err := d.Create(context.Background(), HermesACPOpts{Class: "voice", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bare.mcp) != 0 || (bare.Info().Receipt != nil && len(bare.Info().Receipt.McpServers) != 0) {
+		t.Fatalf("request class with no servers = %v / %+v", bare.mcp, bare.Info().Receipt)
+	}
+
+	// "none" (default) and "configured": the request may not supply servers.
+	for _, class := range []string{"chat", "kern"} {
+		if _, err := d.Create(context.Background(), HermesACPOpts{Class: class, Cwd: t.TempDir(), McpServers: servers}); !errors.Is(err, ErrInvalidManagedSession) {
+			t.Fatalf("%s class accepted request mcp_servers: err = %v, want invalid", class, err)
+		}
+	}
+	// "configured" uses the kernel's own set (today: none), never the request's.
+	own, err := d.Create(context.Background(), HermesACPOpts{Class: "kern", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(own.mcp) != 0 {
+		t.Fatalf("configured class mcp = %v, want the kernel's own (none)", own.mcp)
+	}
+}

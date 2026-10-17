@@ -901,9 +901,6 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 			return nil, fmt.Errorf("%w: caller may not create runtime class %q", ErrManagedSessionForbidden, opts.Class)
 		}
 		if opts.Class != "" {
-			if opts.Profile != "" || len(opts.McpServers) > 0 {
-				return nil, fmt.Errorf("%w: profile and mcp_servers come from runtime class %q and may not be sent", ErrInvalidManagedSession, opts.Class)
-			}
 			base := d.cfg.Env
 			if base == nil {
 				base = os.Environ()
@@ -912,9 +909,22 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 			if class, err = d.cfg.Classes.Resolve(opts.Class, base, opts.Cwd); err != nil {
 				return nil, err
 			}
+			// The class owns the profile. It accepts the request's
+			// mcp_servers only when its policy says "request"; every other
+			// policy (none, configured) keeps the old refusal, so this is
+			// the same message such a request got before.
+			if opts.Profile != "" || (len(opts.McpServers) > 0 && class.McpServers != RuntimeClassMcpRequest) {
+				return nil, fmt.Errorf("%w: profile and mcp_servers come from runtime class %q and may not be sent", ErrInvalidManagedSession, opts.Class)
+			}
 			opts.Profile, opts.Cwd = class.Profile, class.Cwd
 			receipt = class.Receipt()
-			mcp = []json.RawMessage{}
+			if class.McpServers == RuntimeClassMcpRequest {
+				// The class accepts the request's servers: they travel with
+				// the session/new call and are recorded on the receipt.
+				receipt.McpServers = mcp
+			} else {
+				mcp = []json.RawMessage{}
+			}
 		}
 		proc = d.newProcess(opts.Profile, opts.Cwd, class)
 		if _, err := proc.start(ctx); err != nil {
