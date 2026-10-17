@@ -506,3 +506,21 @@ func TestRunAPI_RestartRebindsTheServingContext(t *testing.T) {
 		t.Fatalf("run after restart ended %q; want ok", end.Outcome)
 	}
 }
+
+// TestRunAPI_CreateFailureEndsTheRun (cog-review on #701): a hermes-fork open
+// whose session cannot be created still reaches exactly one run.end (fail),
+// instead of staying open and uncancellable until the next boot sweep.
+func TestRunAPI_CreateFailureEndsTheRun(t *testing.T) {
+	h := startRunAPI(t)
+	body := `{"title":"t","brief":"b","owner":"cog","executor":{"kind":"hermes-fork"},` +
+		`"origin":{"by":"node-a"},"hermes":{"profile":"cog","cwd":"/does/not/exist/run-api"}}`
+	code, run := runsPost(t, h.ts.URL+"/v1/runs", h.token, body)
+	if code != http.StatusCreated {
+		t.Fatalf("POST /v1/runs = %d (%v); want 201 (the open itself is valid)", code, run)
+	}
+	id, _ := run["id"].(string)
+	end := waitRunEnd(t, h.board, id)
+	if end.Outcome != RunOutcomeFail {
+		t.Fatalf("run whose session could not be created ended %q; want %q", end.Outcome, RunOutcomeFail)
+	}
+}
