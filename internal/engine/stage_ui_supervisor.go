@@ -22,9 +22,15 @@
 // One check runs at start and every 10 s (DefaultStageUISupervisorInterval):
 //
 //   - A pidfile process that is alive AND answers 2xx on health_url within 3 s
-//     is ADOPTED: the kernel does nothing to it at all and reports
-//     adopted=true. This is the launchd handover path — the upstream never
-//     blinks while the kernel takes responsibility for it.
+//     is ADOPTED: the kernel does nothing to it and reports adopted=true. This
+//     is the launchd handover path — the upstream never blinks while the
+//     kernel takes responsibility for it. An adopted upstream may be SIGNALLED
+//     only if its health answer NAMES the pidfile pid (a JSON body's integer
+//     pid field, or the X-Stage-Pid header): health_url is a GET to a fixed
+//     host:port, so a 2xx proves the port is served, not that the pidfile pid
+//     is the process serving it. An adopted upstream whose answer names no pid
+//     is adopted but watched, never signalled, and an unhealthy spell ends with
+//     the pidfile treated as stale.
 //   - A process still inside its START GRACE
 //     (DefaultStageUISupervisorStartGrace, 120 s) is booting, not broken: a
 //     failed health check there is not a strike. The grace runs from the
@@ -37,15 +43,16 @@
 //     but cannot answer /healthz is worse than no Stage, and only a restart
 //     clears it. The replacement feeds the restart backoff below, so a Stage
 //     that cannot come up is not replaced in a hot loop.
-//   - A pid the kernel cannot VOUCH FOR — one it did not start and has never
-//     seen answer health — is never signalled, whatever its health says. A
-//     stale pidfile can name a pid an unrelated process has since been given,
-//     and a SIGTERM or SIGKILL aimed at that is an outage the kernel caused.
-//     Such a pid is watched instead: after its grace and the same 3 checks the
-//     PIDFILE is treated as stale — removed, with a child of this kernel's own
-//     started in its place. If the old process really was a Stage holding the
-//     port, the new child fails, exits, and the ordinary crash backoff takes
-//     over from there (see mayTerminate, replaceStalePidFile).
+//   - A pid the kernel cannot VOUCH FOR — one it did not start, and whose
+//     health answers never named it (no pid field, no X-Stage-Pid header) — is
+//     never signalled, whatever its health says. A stale pidfile can name a pid
+//     an unrelated process has since been given, and a SIGTERM or SIGKILL aimed
+//     at that is an outage the kernel caused. Such a pid is watched instead:
+//     after its grace and the same 3 checks the PIDFILE is treated as stale —
+//     removed, with a child of this kernel's own started in its place. If the
+//     old process really was a Stage holding the port, the new child fails,
+//     exits, and the ordinary crash backoff takes over from there (see
+//     mayTerminate, replaceStalePidFile).
 //   - No live pidfile process means start one — nothing running yet, or the
 //     upstream crashed — subject to the restart backoff below.
 //
@@ -80,6 +87,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -137,6 +145,16 @@ const (
 	// stageUISupervisorPollInterval is how often the grace wait re-checks
 	// whether the signalled process is gone.
 	stageUISupervisorPollInterval = 50 * time.Millisecond
+
+	// stageUIHealthPidHeader is the response header a health answer MAY use to
+	// name the pid serving it (decimal). It takes precedence over the body: a
+	// header is cheap to read, and an upstream that sets it means it.
+	stageUIHealthPidHeader = "X-Stage-Pid"
+
+	// stageUIHealthBodyLimit bounds how much of a health body is buffered for
+	// the pid: a health endpoint answers a few bytes, and a supervisor must not
+	// read a careless upstream's whole response into memory.
+	stageUIHealthBodyLimit = 4 << 10
 )
 
 // stageUISupervisorStatus is the JSON body of GET /v1/stage-ui/supervisor.
@@ -205,13 +223,26 @@ type stageUISupervisor struct {
 
 	// pidTrust is what this kernel knows about the pid the pidfile names, and
 	// therefore about whether it may signal it at all (see mayTerminate):
-	// startedPid is a child this kernel started, healthyPid a pid it has seen
-	// answer health (an adopted upstream), observedPid a live pidfile pid it
-	// did neither for, first seen at observedSince — the anchor of that pid's
-	// own start grace. warnedPid is the not-ours-to-signal pid already warned
-	// about, so the warning is logged once per pid and not on every check.
+	//
+	//   - startedPid is a child this kernel started.
+	//   - bootedPid is a pid that has answered health at least once. A health
+	//     answer says the pid booted — it has no start grace left (inStartGrace)
+	//     and must not be re-anchored a fresh one (noteObserved) — but on its
+	//     own it is NOT a right to signal: health_url is a plain GET to a fixed
+	//     host:port, and the answer comes from whoever holds that port, not
+	//     necessarily from the process the pidfile names.
+	//   - vouchedPid is a pid a health answer NAMED (the pid field of a JSON
+	//     body, or the X-Stage-Pid header) while the pidfile named it: the
+	//     answer tied health to that pid, so an adopted upstream is signalable
+	//     only through this field.
+	//   - observedPid is a live pidfile pid this kernel did neither for, first
+	//     seen at observedSince — the anchor of that pid's own start grace.
+	//     warnedPid is the not-ours-to-signal pid already warned about, so that
+	//     warning is logged once per pid and not on every check (warnUnhealthy
+	//     and the adopted-but-unvouched note in noteHealthy share it).
 	startedPid    int
-	healthyPid    int
+	bootedPid     int
+	vouchedPid    int
 	observedPid   int
 	observedSince time.Time
 	warnedPid     int
@@ -334,14 +365,17 @@ func (s *stageUISupervisor) runOnce(ctx context.Context) {
 	now := s.now()
 	pid := readPidFile(s.pidFile)
 	alive := pid != 0 && processAlive(pid)
-	healthy := alive && s.probeHealth(ctx)
+	healthy, answeredPid := false, 0
+	if alive {
+		healthy, answeredPid = s.probeHealth(ctx)
+	}
 
 	s.mu.Lock()
 	prevPid, hadUpstream, wasAdopted := s.pid, s.hadUpstream, s.adopted
 	s.mu.Unlock()
 
 	if alive && healthy {
-		s.noteHealthy(now, pid, prevPid, wasAdopted)
+		s.noteHealthy(now, pid, prevPid, wasAdopted, answeredPid)
 		return
 	}
 
@@ -476,7 +510,8 @@ func (s *stageUISupervisor) spawn(now time.Time) error {
 	s.mu.Lock()
 	s.pid = pid
 	s.startedPid = pid // this pid is this kernel's to signal (mayTerminate)
-	s.healthyPid = 0
+	s.bootedPid = 0
+	s.vouchedPid = 0
 	s.observedPid = 0
 	s.observedSince = time.Time{}
 	s.warnedPid = 0
@@ -591,26 +626,64 @@ func (s *stageUISupervisor) waitExit(ctx context.Context, pid int, grace time.Du
 	}
 }
 
-// probeHealth reports whether health_url answers 2xx within the health timeout.
-func (s *stageUISupervisor) probeHealth(ctx context.Context) bool {
+// probeHealth reports whether health_url answers 2xx within the health timeout,
+// and which pid that answer NAMES (0 when it names none).
+//
+// Health is the port answering, which is not the same claim as "the process the
+// pidfile names is the Stage": health_url is a plain GET to a fixed host:port,
+// and whatever holds that port answers it. So the answer is read for a pid —
+// the X-Stage-Pid header when set, else a JSON object body's integer pid field —
+// and only an answer that names the pidfile pid is a voucher (noteHealthy). A
+// body like "ok\n" answers with no pid at all: health, but nothing to signal on.
+func (s *stageUISupervisor) probeHealth(ctx context.Context) (healthy bool, answeredPid int) {
 	cctx, cancel := context.WithTimeout(ctx, s.healthTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(cctx, http.MethodGet, s.healthURL, nil)
 	if err != nil {
-		return false
+		return false, 0
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return false
+		return false, 0
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body) // drain, so keep-alive can reuse the conn
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+	// Read a bounded prefix for the pid and drain the rest, so keep-alive can
+	// reuse the conn either way.
+	head, _ := io.ReadAll(io.LimitReader(resp.Body, stageUIHealthBodyLimit))
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, 0
+	}
+	return true, stageUIHealthAnsweredPid(resp.Header.Get(stageUIHealthPidHeader), head)
+}
+
+// stageUIHealthAnsweredPid is the pid a health answer names: the X-Stage-Pid
+// header when it is present (it is unambiguous, and an upstream that sets it
+// means it), else the integer pid field of a JSON object body. Any other answer
+// — "ok\n", HTML, JSON without a pid, a malformed header — names no pid, which
+// reads as 0: the answer vouches for nothing.
+func stageUIHealthAnsweredPid(header string, body []byte) int {
+	if h := strings.TrimSpace(header); h != "" {
+		pid, err := strconv.Atoi(h)
+		if err != nil || pid <= 0 {
+			return 0
+		}
+		return pid
+	}
+	var answer struct {
+		PID int `json:"pid"`
+	}
+	if err := json.Unmarshal(body, &answer); err != nil || answer.PID <= 0 {
+		return 0
+	}
+	return answer.PID
 }
 
 // noteHealthy records a healthy check: adopt what is there, and reset the
-// backoff once the upstream has been healthy long enough.
-func (s *stageUISupervisor) noteHealthy(now time.Time, pid, prevPid int, wasAdopted bool) {
+// backoff once the upstream has been healthy long enough. answeredPid is the
+// pid the health answer named (probeHealth), which is what decides whether this
+// pid has become this kernel's to signal.
+func (s *stageUISupervisor) noteHealthy(now time.Time, pid, prevPid int, wasAdopted bool, answeredPid int) {
 	s.mu.Lock()
 	// Adopted means "this kernel did not start it", whatever the checks before
 	// this one saw (cog-review on #700: a launchd upstream that booted slowly
@@ -619,10 +692,20 @@ func (s *stageUISupervisor) noteHealthy(now time.Time, pid, prevPid int, wasAdop
 	s.healthy = true
 	s.pid = pid
 	s.adopted = adopted
-	s.healthyPid = pid // a health answer is what identifies the pid as the Stage
+	// It answered health: it booted. That is all bootedPid ever means — no
+	// start grace left, no fresh one on the next flap.
+	s.bootedPid = pid
+	// Vouching is the strictly stronger claim, and it needs the answer to NAME
+	// this pid: a 2xx that says "healthy" without saying who is healthy (see
+	// probeHealth) may belong to an entirely different process behind the same
+	// port, and acting on it would put this kernel's SIGTERM on an innocent
+	// pid. Set only, never cleared here: once an answer named this pid, the pid
+	// is a Stage for as long as it is the pidfile's (see forgetTrust).
+	if answeredPid == pid {
+		s.vouchedPid = pid
+	}
 	s.observedPid = 0
 	s.observedSince = time.Time{}
-	s.warnedPid = 0
 	s.unhealthy = 0
 	s.hadUpstream = true
 	s.backoffArmed = false
@@ -635,10 +718,28 @@ func (s *stageUISupervisor) noteHealthy(now time.Time, pid, prevPid int, wasAdop
 		s.backoff = 0
 		s.attempts = 0
 	}
+	// An adopted upstream whose answer did not name it is healthy and adopted,
+	// and STILL not this kernel's to signal. Say so once per pid: the pid is
+	// watched from here, and an unhealthy spell ends with the pidfile treated
+	// as stale (replaceStalePidFile) rather than with a signal. Sharing
+	// warnedPid with warnUnhealthy keeps that one warning, not two.
+	unvouched := pid != s.startedPid && answeredPid != pid
+	warn := false
+	if unvouched {
+		if s.warnedPid != pid {
+			s.warnedPid, warn = pid, true
+		}
+	} else {
+		s.warnedPid = 0
+	}
 	s.mu.Unlock()
 
 	if adopted && !wasAdopted {
 		slog.Info("stage-ui: supervisor adopted the running upstream", "pid", pid, "health_url", s.healthURL)
+	}
+	if warn {
+		slog.Warn("stage-ui: supervisor adopted an upstream it cannot vouch for: not this kernel's to signal",
+			"pid", pid, "answered_pid", answeredPid, "health_url", s.healthURL)
 	}
 	if reset {
 		slog.Info("stage-ui: supervisor backoff reset after a healthy window",
@@ -647,16 +748,18 @@ func (s *stageUISupervisor) noteHealthy(now time.Time, pid, prevPid int, wasAdop
 }
 
 // mayTerminate reports whether this kernel may signal pid at all. It may signal
-// only a process it started itself (in this kernel's lifetime), or one it has
-// seen answer health at least once — an adopted upstream, which the health
-// answer identified as the Stage the pidfile claims it is. Any other
-// live-but-unhealthy pid is a NUMBER: the pidfile may be stale, and the number
-// may have been recycled by an unrelated process, so the kernel watches it and
-// never SIGTERMs or SIGKILLs it (see replaceStalePidFile).
+// only a process it started itself (in this kernel's lifetime), or one whose
+// health answer NAMED it (vouchedPid) — an adopted upstream, which the answer
+// tied to this pid, not merely to the port. Health alone is not enough: a
+// health_url is a GET to a fixed host:port, and a different process can answer
+// it, so "health_url is 2xx" is no reason to terminate the pid the pidfile names.
+// Any other live-but-unhealthy pid is a NUMBER: the pidfile may be stale, and
+// the number may have been recycled by an unrelated process, so the kernel
+// watches it and never SIGTERMs or SIGKILLs it (see replaceStalePidFile).
 func (s *stageUISupervisor) mayTerminate(pid int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return pid > 0 && (s.startedPid == pid || s.healthyPid == pid)
+	return pid > 0 && (s.startedPid == pid || s.vouchedPid == pid)
 }
 
 // inStartGrace reports whether pid is still inside the start grace: time
@@ -664,12 +767,14 @@ func (s *stageUISupervisor) mayTerminate(pid int) bool {
 // it first saw a pidfile pid it did not start. A failed health check inside
 // that window is a boot, not a strike. A pid that has answered health once has
 // no grace left (cog-review on #700: an adopted upstream that wedged was given a
-// fresh 120 s, re-armed on every flap).
+// fresh 120 s, re-armed on every flap). That is bootedPid, not vouchedPid: a
+// pidless "ok" that this kernel may never signal still proves the process
+// booted, so it still gets no second boot budget.
 func (s *stageUISupervisor) inStartGrace(now time.Time, pid int) bool {
 	s.mu.Lock()
 	var anchor time.Time
 	switch {
-	case pid > 0 && pid == s.healthyPid:
+	case pid > 0 && pid == s.bootedPid:
 		// It has answered health already: it booted. Going unhealthy now is a
 		// failure, counted from the first strike, never a second boot.
 		s.mu.Unlock()
@@ -692,11 +797,13 @@ func (s *stageUISupervisor) inStartGrace(now time.Time, pid int) bool {
 
 // noteObserved records the first time this kernel saw a live pidfile pid it did
 // not start. That instant is the anchor of the pid's own start grace
-// (inStartGrace) and the pid the not-ours-to-signal warning is about.
+// (inStartGrace) and the pid the not-ours-to-signal warning is about. A pid
+// that has answered health has already booted, so it is never re-anchored a
+// fresh grace.
 func (s *stageUISupervisor) noteObserved(now time.Time, pid int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if pid <= 0 || pid == s.startedPid || pid == s.observedPid || pid == s.healthyPid {
+	if pid <= 0 || pid == s.startedPid || pid == s.observedPid || pid == s.bootedPid {
 		return
 	}
 	s.observedPid, s.observedSince, s.warnedPid = pid, now, 0
@@ -717,8 +824,11 @@ func (s *stageUISupervisor) forgetTrust(pid int) {
 	if s.startedPid == pid {
 		s.startedPid = 0
 	}
-	if s.healthyPid == pid {
-		s.healthyPid = 0
+	if s.bootedPid == pid {
+		s.bootedPid = 0
+	}
+	if s.vouchedPid == pid {
+		s.vouchedPid = 0
 	}
 	if s.observedPid == pid {
 		s.observedPid = 0

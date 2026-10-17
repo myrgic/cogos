@@ -55,6 +55,10 @@ const (
 	// stubHealthDelayEnv is a millisecond "slow boot": the stub listens
 	// immediately but answers 503 on /healthz until that long after it started.
 	stubHealthDelayEnv = "STAGE_UI_STUB_HEALTH_DELAY_MS"
+	// stubNoPidEnv="1" makes the stub answer /healthz with the pidless "ok\n"
+	// instead of naming its own pid, so the supervisor is healthy but has
+	// nothing to vouch for (an adopted upstream it may never signal).
+	stubNoPidEnv = "STAGE_UI_STUB_NO_PID"
 )
 
 // TestStageUIStubChild is not a test in the ordinary sense: with
@@ -92,6 +96,8 @@ func TestStageUIStubChild(t *testing.T) {
 	if os.Getenv(stubUnhealthyEnv) == "1" && starts == 1 {
 		healthy = false
 	}
+	// The pidless health answer: healthy, but naming no pid (see stubNoPidEnv).
+	noPid := os.Getenv(stubNoPidEnv) == "1"
 	// A slow boot: up and listening, but answering 503 until this instant.
 	// Covering it is the supervisor's start grace (defect: a child killed after
 	// three failed checks never gets to serve).
@@ -105,7 +111,18 @@ func TestStageUIStubChild(t *testing.T) {
 			http.Error(w, "unhealthy", http.StatusServiceUnavailable)
 			return
 		}
-		_, _ = w.Write([]byte("ok\n"))
+		if noPid {
+			// The old, pidless answer: "something is healthy" and nothing about
+			// who said it. A supervisor may adopt on this and may never signal
+			// the pid on account of it.
+			_, _ = w.Write([]byte("ok\n"))
+			return
+		}
+		// Name our own pid, the way a Stage that knows what it is answers: the
+		// supervisor may signal the pidfile pid only when the health answer
+		// names it ({"pid": N} body or X-Stage-Pid header).
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, "{\"pid\": %d}\n", os.Getpid())
 	})
 	_ = (&http.Server{Handler: mux}).Serve(ln) // until the supervisor stops it
 }
@@ -137,6 +154,7 @@ type stubChildParams struct {
 	ignoreSigterm  bool     // survives SIGTERM (SIGKILL is required)
 	envDump        bool     // dump the child's environment to a file
 	healthDelayMS  int      // serves 503 for this long after starting (slow boot)
+	noPid          bool     // answers health without naming its pid
 	extraEnv       []string // extra env_file lines (markers, secrets)
 }
 
@@ -193,6 +211,9 @@ func newStubChild(t *testing.T, p stubChildParams) *stubChild {
 	}
 	if p.healthDelayMS > 0 {
 		c.envLines = append(c.envLines, stubHealthDelayEnv+"="+strconv.Itoa(p.healthDelayMS))
+	}
+	if p.noPid {
+		c.envLines = append(c.envLines, stubNoPidEnv+"=1")
 	}
 	c.envLines = append(c.envLines, p.extraEnv...)
 	return c
@@ -924,6 +945,149 @@ func TestStageUISupervisor_ForeignPidfileProcessIsNeverSignalled(t *testing.T) {
 	// "Never signal it" comes with one warning, not one per check.
 	if n := strings.Count(logs.String(), "not this kernel's to signal"); n != 1 {
 		t.Errorf("the not-ours-to-signal warning appears %d times, want 1:\n%s", n, logs.String())
+	}
+}
+
+// TestStageUISupervisor_HealthAnsweredByAnotherPidIsNeverVouched pins the hole
+// left in the "never signal a process the kernel cannot vouch for" guarantee: a
+// 2xx to health_url says nothing about WHICH process answered it. Here the
+// pidfile names a live process P while a different process Q answers health. P
+// is serving — Q is the Stage — so the upstream is healthy and adopted, but the
+// answer named Q, not P: the kernel has learned nothing that entitles it to
+// signal P. When the answers stop, the strike limit must end with the PIDFILE
+// treated as stale (P is left running), exactly as for a pid no answer ever
+// covered.
+func TestStageUISupervisor_HealthAnsweredByAnotherPidIsNeverVouched(t *testing.T) {
+	logs := captureStageLogs(t)
+
+	// P: a live process this kernel did not start (from the outside, a pidfile
+	// naming a recycled pid looks exactly like this). Its own /healthz is never
+	// consulted; the health URL below belongs to another process.
+	child := newStubChild(t, stubChildParams{mode: "unhealthy"})
+	stub := child.stubSpawn(t)
+	// The stub is this test's own doing, not the supervisor's, so the test ends
+	// it (stubSpawn's own cleanup reaps it, and only a reap makes the pid stop
+	// reading as alive).
+	t.Cleanup(func() { _ = killProcess(stub) })
+	if err := os.WriteFile(child.pidFile, []byte(strconv.Itoa(stub)+"\n"), 0o644); err != nil {
+		t.Fatalf("write pidfile: %v", err)
+	}
+
+	// Q: the process that actually answers health_url, naming its own pid (this
+	// test process's) — a pid the pidfile does not name.
+	answerer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, "{\"pid\": %d}\n", os.Getpid())
+	}))
+	t.Cleanup(answerer.Close)
+
+	sup, advance := testSupervisor(t, child.supervisorConfig(t))
+	// P answered health via Q, so it has no start grace left (that is what the
+	// answer buys it, and only that); this test is about the strike limit.
+	sup.startGrace = 0
+	sup.healthURL = answerer.URL
+
+	sup.check(t) // the pidfile pid is alive and health answered 2xx
+	st := sup.status()
+	if !st.Healthy || !st.Adopted || st.PID != stub {
+		t.Fatalf("status on the foreign health answer: %+v (stub %d)", st, stub)
+	}
+	if sup.mayTerminate(stub) {
+		t.Fatalf("the supervisor would signal pid %d on a health answer another process gave", stub)
+	}
+
+	answerer.Close() // health now fails: alive, and nothing answers for it
+
+	// The strikes, up to the deciding one: P is alive and unsignalled
+	// throughout, and the pidfile still names it.
+	walkToStrikeLimit(t, sup, advance, child, stub, 0)
+
+	// The strike limit: the pidfile is stale, so the pidfile goes and a child of
+	// the supervisor's own takes its place — P is left alone.
+	sup.check(t)
+	if !processAlive(stub) {
+		t.Fatalf("the supervisor signalled a pid only another process's health answer covered")
+	}
+	st = sup.status()
+	if st.Restarts != 1 || st.PID == 0 || st.PID == stub {
+		t.Fatalf("status after the stale pidfile: %+v (stub %d)", st, stub)
+	}
+	pid := child.waitPidFileChange(t, stub)
+	if pid != st.PID {
+		t.Fatalf("pidfile names %d, status pid %d", pid, st.PID)
+	}
+	waitAlive(t, pid)
+	t.Cleanup(func() { killAndWait(t, child.pidFromFile(t)) })
+	if !processAlive(stub) {
+		t.Fatalf("stub %d was signalled during the stale-pidfile replacement", stub)
+	}
+	if got := child.waitStarts(t, 2); got != 2 {
+		t.Fatalf("stubs started %d times, want the stub plus exactly one supervisor child", got)
+	}
+	// The unvouched-pid warning is logged once, and the strike warning that
+	// follows it does not repeat it.
+	if n := strings.Count(logs.String(), "not this kernel's to signal"); n != 1 {
+		t.Errorf("the not-ours-to-signal warning appears %d times, want 1:\n%s", n, logs.String())
+	}
+}
+
+// TestStageUISupervisor_HealthWithoutPidIsAdoptedButNeverSignalled is the other
+// half of the same rule: a 2xx answer that names no pid at all ("ok\n", an empty
+// 200) is health, not a voucher. The upstream IS serving, so it is adopted and
+// reported healthy — but the kernel never learned that the pidfile pid is a
+// Stage, so it may never signal it. When the answers stop, the pidfile is
+// treated as stale and the process is left running, as in the foreign-pid test.
+func TestStageUISupervisor_HealthWithoutPidIsAdoptedButNeverSignalled(t *testing.T) {
+	child := newStubChild(t, stubChildParams{noPid: true})
+	cfg := child.supervisorConfig(t)
+
+	stub := child.stubSpawn(t)
+	t.Cleanup(func() { _ = killProcess(stub) })
+	if err := os.WriteFile(cfg.PidFile, []byte(strconv.Itoa(stub)+"\n"), 0o644); err != nil {
+		t.Fatalf("write pidfile: %v", err)
+	}
+	sup, advance := testSupervisor(t, cfg)
+	// It answered health, so it has no start grace left; this test is about the
+	// strike limit.
+	sup.startGrace = 0
+	sup.healthURL = child.healthURL(t, stub)
+
+	sup.check(t) // the stub is alive and answers a pidless "ok"
+	st := sup.status()
+	if !st.Healthy || !st.Adopted || st.PID != stub {
+		t.Fatalf("status on the pidless health answer: %+v (stub %d)", st, stub)
+	}
+	if sup.mayTerminate(stub) {
+		t.Fatalf("the supervisor would signal pid %d on a health answer that names no pid", stub)
+	}
+
+	// The answers stop: a server that is up for an instant and gone.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	sup.healthURL = deadURL
+
+	walkToStrikeLimit(t, sup, advance, child, stub, 0)
+
+	sup.check(t) // the strike limit: the pidfile is stale, the stub is not
+	if !processAlive(stub) {
+		t.Fatalf("the supervisor signalled a pid no health answer ever named")
+	}
+	st = sup.status()
+	if st.Restarts != 1 || st.PID == 0 || st.PID == stub {
+		t.Fatalf("status after the stale pidfile: %+v (stub %d)", st, stub)
+	}
+	pid := child.waitPidFileChange(t, stub)
+	if pid != st.PID {
+		t.Fatalf("pidfile names %d, status pid %d", pid, st.PID)
+	}
+	waitAlive(t, pid)
+	t.Cleanup(func() { killAndWait(t, child.pidFromFile(t)) })
+	if !processAlive(stub) {
+		t.Fatalf("stub %d was signalled during the stale-pidfile replacement", stub)
+	}
+	if got := child.waitStarts(t, 2); got != 2 {
+		t.Fatalf("stubs started %d times, want the stub plus exactly one supervisor child", got)
 	}
 }
 
