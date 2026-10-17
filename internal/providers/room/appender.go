@@ -68,12 +68,25 @@ func (a *Appender) Next(kind Kind, actor Actor, spec string, body map[string]any
 	return e, nil
 }
 
-// Observe records an entry from another log as accepted, so later entries
-// carry it in deps. Heads never regress.
+// NextSeq is the seq the next Next call will use. It lets a caller compute an
+// item.create id (ItemID(log, seq)) before handing the id to Next, which signs
+// the body as given.
+func (a *Appender) NextSeq() uint64 { return a.seq + 1 }
+
+// Observe records an entry as accepted, so later entries carry it in deps.
+// Heads never regress. An entry on this appender's OWN log also advances its
+// position (seq and prev), which is what lets a restarted node resume a log it
+// already wrote: Observe every stored entry and the next Next continues at the
+// stored head instead of re-signing — and so replacing — an existing entry.
+// Observing an entry already seen is a no-op.
 func (a *Appender) Observe(e *Entry) error {
 	id, err := e.ID()
 	if err != nil {
 		return err
+	}
+	if e.Log == a.Log && e.Seq > a.seq {
+		prev := id
+		a.seq, a.prev = e.Seq, prev
 	}
 	if cur, ok := a.heads[e.Log]; !ok || e.Seq > cur.Seq {
 		a.heads[e.Log] = Dep{Seq: e.Seq, ID: id}

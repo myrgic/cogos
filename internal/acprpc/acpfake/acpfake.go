@@ -8,6 +8,8 @@
 //
 //	"permission ..." → asks the client for permission, then reports the outcome
 //	"slow ..."       → streams nothing until session/cancel, then stopReason "cancelled"
+//	"ignore_cancel ." → streams one update, then parks the turn forever and never
+//	                   honours session/cancel (an agent that drops the notification)
 //	"crash ..."      → the process exits with status 3 (subprocess mode only)
 //	anything else    → one agent_message_chunk echoing the text, stopReason "end_turn"
 //
@@ -164,6 +166,13 @@ func (a *agent) prompt(p sessionParams) (any, error) {
 		a.update(p.SessionID, chunk("working..."))
 		<-ch
 		return map[string]any{"stopReason": "cancelled"}, nil
+	case strings.HasPrefix(text, "ignore_cancel"):
+		// An agent that never honours session/cancel: it reports that it is
+		// working, then parks the turn forever. The process still exits when
+		// its stdin closes (MaybeRunMain), so a client that gives up and
+		// stops the session still sees the turn end.
+		a.update(p.SessionID, chunk("working..."))
+		select {}
 	case strings.HasPrefix(text, "permission"):
 		var res struct {
 			Outcome struct {

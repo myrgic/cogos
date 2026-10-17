@@ -73,7 +73,7 @@ Total sites: 249  (cog: 104, home: 2, elsewhere: 13, unanchored: 89, dynamic: 41
 | `{root}/.cog/mem/semantic/lineage/projections` | (*ProjectionReconciler).LoadConfig (`os.MkdirAll`) | internal/engine/projection_reconciler.go:218 | internal:engine |
 | `dirname(<WorkspaceRoot>/.cog/run/proprioceptive.jsonl)` | NewProprioceptiveLogger (`os.MkdirAll`) | internal/engine/proprioceptive.go:54 | internal:engine |
 | `<WorkspaceRoot>/.cog/run/proprioceptive.jsonl` | (*ProprioceptiveLogger).Log (`os.OpenFile`) | internal/engine/proprioceptive.go:72 | internal:engine |
-| `<WorkspaceRoot>/.cog/ledger/rooms/events.jsonl` | (*RoomBoardStore).appendRoomEntryLocked (`engine.AppendEvent(bucket)`) | internal/engine/room_board.go:423 | internal:engine |
+| `<WorkspaceRoot>/.cog/ledger/rooms/events.jsonl` | (*RoomBoardStore).appendRoomEntryLocked (`engine.AppendEvent(bucket)`) | internal/engine/room_board.go:466 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/runs/events.jsonl` | (*RunBoardStore).commitLocked (`engine.AppendEvent(bucket)`) | internal/engine/run_board.go:364 | internal:engine |
 | `<WorkspaceRoot>/.cog/run` | newAttentionLog (`os.MkdirAll`) | internal/engine/serve_attention.go:46 | internal:engine |
 | `<WorkspaceRoot>/.cog/run/attention.jsonl` | (*attentionLog).append (`os.OpenFile`) | internal/engine/serve_attention.go:53 | internal:engine |
@@ -81,7 +81,7 @@ Total sites: 249  (cog: 104, home: 2, elsewhere: 13, unanchored: 89, dynamic: 41
 | `<WorkspaceRoot>/.cog/ledger/identity-grants/events.jsonl` | (*IdentityGrantRegistry).appendGrantEventLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_identity_grants.go:802 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/identity-grants/events.jsonl` | (*IdentityGrantRegistry).appendSupersessionEventLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_identity_grants.go:846 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/identity-pairing/events.jsonl` | (*pairingStore).append (`engine.AppendEvent(bucket)`) | internal/engine/serve_pairing.go:147 | internal:engine |
-| `<WorkspaceRoot>/.cog/ledger/identity-share-links/events.jsonl` | (*ShareLinkStore).appendLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_share_links.go:393 | internal:engine |
+| `<WorkspaceRoot>/.cog/ledger/identity-share-links/events.jsonl` | (*ShareLinkStore).appendLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_share_links.go:430 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/worktree-reconciler/events.jsonl` | (*FilesystemLedgerWriter).EmitWorktreeEvent (`engine.AppendEvent(bucket)`) | internal/engine/worktree_spawn.go:273 | internal:engine |
 | `{p.root}/.cog/state` | writeDispatchTrigger (`os.MkdirAll`) | internal/eval/mcp_tools.go:375 | internal:eval |
 | `{p.root}/.cog/state` | writePinBaseline (`os.MkdirAll`) | internal/eval/mcp_tools.go:482 | internal:eval |
