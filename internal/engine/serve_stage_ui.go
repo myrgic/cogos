@@ -15,8 +15,23 @@
 //	  owned_prefixes: [/v1/rooms]  # route groups the kernel owns (see below)
 //	  public_host: stage.myrgic.com  # extra Host the guard accepts (empty = loopback only)
 //	  keys: shadow                  # off (default) | shadow | enforce
-//	  local_auth: enforce           # off (default) | enforce
-//	  local_actor: <operator>       # the actor a /local grant must name (enforce)
+//	  supervise:                    # optional: keep the Python Stage upstream alive
+//	    cmd: [python3, -m, stage]   # argv; an absent block = the kernel just proxies
+//	    cwd: /srv/stage
+//	    env_file: /etc/cogos/stage.env        # KEY=VALUE lines (optional)
+//	    health_url: http://127.0.0.1:7872/healthz   # default: upstream + /healthz
+//	    pidfile: /run/cogos/stage.pid         # required with the block
+//	    log_file: /var/log/cogos/stage.log    # required with the block
+//
+// supervise (B4): with this block present the kernel starts and keeps the
+// upstream alive, adopting a healthy process launchd already runs. Off by
+// default, so the listener proxies to whatever is already there unchanged. The
+// full contract — adoption, the 10 s check, the 30 s unhealthy replacement, the
+// 2 s→60 s backoff, the Setsid detach, and the rule that env_file VALUES are
+// never logged — is in the file header of stage_ui_supervisor.go.
+//
+//	local_auth: enforce           # off (default) | enforce
+//	local_actor: <operator>       # the actor a /local grant must name (enforce)
 //
 // keys (P3b S4): "off" does nothing. "shadow" resolves the key segment of each
 // /r/ /k/ /h/ request against the share-link store and compares the kernel's
@@ -41,18 +56,21 @@
 //     A refused request never reaches static serving or the upstream.
 //  1. GET /v1/stage-ui/stats is answered by the listener itself (see below).
 //     It is never proxied and counts nothing.
-//  2. GET/HEAD whose path starts with one of static_prefixes AND resolves to a
+//  2. GET /v1/stage-ui/supervisor is answered by the listener itself, reporting
+//     the upstream supervisor's state (enabled=false when none is configured).
+//     Also never proxied; see stage_ui_supervisor.go.
+//  3. GET/HEAD whose path starts with one of static_prefixes AND resolves to a
 //     regular file under static_dir (full request path, os.Root-confined) is
 //     served from disk. The files live on disk, not in the binary, so a UI edit
 //     needs no kernel release.
-//  3. A cleaned path that matches an owned prefix (stage_ui.owned_prefixes) is
+//  4. A cleaned path that matches an owned prefix (stage_ui.owned_prefixes) is
 //     refused with 502 Bad Gateway instead of being proxied: a route group the
 //     kernel claims to own must never quietly fall through to the Python Stage,
 //     because that is what hides a migration gap. The match is on the cleaned
 //     path and on a path boundary: /v1/rooms owns /v1/rooms and /v1/rooms/a,
 //     never /v1/roomsx. An entry that is empty or lacks the leading slash is a
 //     config error, so the listener does not start with it.
-//  4. Everything else, including a static-prefix path with no such file, is
+//  5. Everything else, including a static-prefix path with no such file, is
 //     reverse-proxied to the upstream. Falling through on a miss means the
 //     static layer can only ever replace a response with a byte-for-byte file,
 //     never turn a Stage 404/200 into a different status.
@@ -144,26 +162,68 @@ type StageUIConfig struct {
 	LocalAuth      string   // /local grant mode: off (default) | enforce
 	LocalActor     string   // the actor a /local grant must name under enforce (empty refuses all)
 
+	// Supervise, when enabled, makes the kernel start and keep the Python
+	// Stage upstream alive (stage_ui_supervisor.go). An absent block leaves the
+	// listener proxying to whatever is already there, exactly as before.
+	Supervise StageUISupervisorConfig
+
 	// shareLinks supplies the share-link store for Keys=shadow. Set by
 	// startStageUI; nil in handler-only tests that do not use shadow mode.
 	shareLinks func() *ShareLinkStore
 
+	// supervisor supplies the running supervisor to the handler for the status
+	// route (GET /v1/stage-ui/supervisor). Set by startStageUI; nil in
+	// handler-only tests, where the route reports enabled=false.
+	supervisor func() *stageUISupervisor
 	// grants supplies the identity-grant registry for LocalAuth=enforce. Set
 	// by startStageUI; nil means no grant can verify (the guard fails closed).
 	grants func() *IdentityGrantRegistry
 }
 
+// StageUISupervisorConfig is the resolved stage_ui.supervise block: the command
+// that IS the Stage upstream, and where its pid, log and environment live. An
+// empty Cmd means the block was absent and the supervisor is off.
+type StageUISupervisorConfig struct {
+	Present   bool     // a supervise block appeared in kernel.yaml (even an incomplete one)
+	Cmd       []string // argv of the upstream process; empty = supervisor off
+	Cwd       string   // working directory for the child (optional)
+	EnvFile   string   // KEY=VALUE file layered over the parent environment (optional)
+	HealthURL string   // health probe; default: upstream + /healthz
+	PidFile   string   // where the running upstream's pid is recorded (required)
+	LogFile   string   // where the child's stdout/stderr append (required)
+}
+
+// enabled reports whether the supervise block is present (a command is set).
+// enabled reports whether a supervise block was written at all. A block that
+// is present but incomplete (no cmd, pidfile or log_file) still counts, so it
+// reaches newStageUISupervisor and is reported as a config error instead of
+// silently reading as "no block" (cog-review on #700).
+func (s StageUISupervisorConfig) enabled() bool { return s.Present || len(s.Cmd) > 0 }
+
 // stageUISection is the `stage_ui:` block of kernel.yaml.
 type stageUISection struct {
-	Addr           string   `yaml:"addr"`
-	Upstream       string   `yaml:"upstream"`
-	StaticDir      string   `yaml:"static_dir"`
-	StaticPrefixes []string `yaml:"static_prefixes"`
-	OwnedPrefixes  []string `yaml:"owned_prefixes"`
-	PublicHost     string   `yaml:"public_host"`
-	Keys           string   `yaml:"keys"`
-	LocalAuth      string   `yaml:"local_auth"`
-	LocalActor     string   `yaml:"local_actor"`
+	Addr           string                    `yaml:"addr"`
+	Upstream       string                    `yaml:"upstream"`
+	StaticDir      string                    `yaml:"static_dir"`
+	StaticPrefixes []string                  `yaml:"static_prefixes"`
+	OwnedPrefixes  []string                  `yaml:"owned_prefixes"`
+	PublicHost     string                    `yaml:"public_host"`
+	Keys           string                    `yaml:"keys"`
+	LocalAuth      string                    `yaml:"local_auth"`
+	LocalActor     string                    `yaml:"local_actor"`
+	Supervise      *stageUISupervisorSection `yaml:"supervise"`
+}
+
+// stageUISupervisorSection is the `stage_ui.supervise:` sub-block. It is a
+// pointer so "absent" and "present but empty" stay distinguishable: the former
+// leaves the supervisor off, the latter is a config error.
+type stageUISupervisorSection struct {
+	Cmd       []string `yaml:"cmd"`
+	Cwd       string   `yaml:"cwd"`
+	EnvFile   string   `yaml:"env_file"`
+	HealthURL string   `yaml:"health_url"`
+	PidFile   string   `yaml:"pidfile"`
+	LogFile   string   `yaml:"log_file"`
 }
 
 // applyStageUISection overlays a kernel.yaml stage_ui block onto cfg.
@@ -197,6 +257,30 @@ func applyStageUISection(cfg *Config, s *stageUISection) {
 	}
 	if len(s.OwnedPrefixes) > 0 {
 		cfg.StageUI.OwnedPrefixes = s.OwnedPrefixes
+	}
+	if sp := s.Supervise; sp != nil {
+		// Overlay rather than replace: a sub-block that names only some fields
+		// keeps the defaults for the rest. An absent block (sp == nil) leaves
+		// Supervise untouched, i.e. off.
+		cfg.StageUI.Supervise.Present = true
+		if len(sp.Cmd) > 0 {
+			cfg.StageUI.Supervise.Cmd = sp.Cmd
+		}
+		if sp.Cwd != "" {
+			cfg.StageUI.Supervise.Cwd = sp.Cwd
+		}
+		if sp.EnvFile != "" {
+			cfg.StageUI.Supervise.EnvFile = sp.EnvFile
+		}
+		if sp.HealthURL != "" {
+			cfg.StageUI.Supervise.HealthURL = sp.HealthURL
+		}
+		if sp.PidFile != "" {
+			cfg.StageUI.Supervise.PidFile = sp.PidFile
+		}
+		if sp.LogFile != "" {
+			cfg.StageUI.Supervise.LogFile = sp.LogFile
+		}
 	}
 }
 
@@ -354,6 +438,10 @@ func newStageUIHandlerG(c StageUIConfig) (http.Handler, *stageGuard, error) {
 			serveStageUIStats(w, r, tally)
 			return
 		}
+		if clean == stageUISupervisorPath {
+			serveStageUISupervisorStatus(w, r, stageUIInjectedSupervisor(c))
+			return
+		}
 		if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
 			c.StaticDir != "" && hasAnyPrefix(clean, prefixes) &&
 			serveStageUIStatic(w, r, c.StaticDir) {
@@ -459,6 +547,16 @@ func serveStageUIStats(w http.ResponseWriter, r *http.Request, t *stageUITally) 
 	writeJSONResp(w, http.StatusOK, t.snapshot())
 }
 
+// stageUIInjectedSupervisor returns the supervisor startStageUI wired into the
+// handler, or nil when no supervise block is running (including handler-only
+// tests). The status route reads it; it is never set by config parsing.
+func stageUIInjectedSupervisor(c StageUIConfig) *stageUISupervisor {
+	if c.supervisor == nil {
+		return nil
+	}
+	return c.supervisor()
+}
+
 // hasAnyPrefix reports whether the cleaned path p is under a prefix. The caller
 // cleans first: checking the raw path would let /app-icons/../x pass the prefix
 // test and then clean to /x.
@@ -504,10 +602,32 @@ func serveStageUIStatic(w http.ResponseWriter, r *http.Request, dir string) bool
 	return true
 }
 
-// startStageUI binds and serves the listener if configured. A bad config or a
-// bind failure is logged, never fatal: the kernel must come up either way.
+// startStageUI binds and serves the listener if configured, and starts the
+// upstream supervisor if one is configured. Either half may run without the
+// other: a supervise block with no addr keeps the Stage up while the listener
+// stays off. A bad config or a bind failure is logged, never fatal: the kernel
+// must come up either way.
 func (s *Server) startStageUI() {
 	c := s.cfg.StageUI
+	c.shareLinks = func() *ShareLinkStore { return s.shareLinks }
+
+	// The supervisor comes first: it is what keeps the upstream the listener
+	// proxies to alive, and it does not depend on the listener's addr.
+	if c.Supervise.enabled() {
+		sup, err := newStageUISupervisor(c)
+		if err != nil {
+			slog.Error("stage-ui: supervisor disabled", "err", err)
+		} else {
+			s.stageUIMu.Lock()
+			s.stageUISup = sup
+			s.stageUIMu.Unlock()
+			c.supervisor = s.stageUISupervisorRef
+			sup.start()
+			slog.Info("stage-ui: supervisor started", "cmd", c.Supervise.Cmd[0],
+				"pidfile", c.Supervise.PidFile, "log_file", c.Supervise.LogFile)
+		}
+	}
+
 	if c.Addr == "" {
 		return
 	}
@@ -515,7 +635,6 @@ func (s *Server) startStageUI() {
 		slog.Error("stage-ui: disabled", "err", err)
 		return
 	}
-	c.shareLinks = func() *ShareLinkStore { return s.shareLinks }
 	c.grants = func() *IdentityGrantRegistry { return s.identityGrants }
 	h, g, err := newStageUIHandlerG(c)
 	if err != nil {
@@ -543,15 +662,31 @@ func (s *Server) startStageUI() {
 	}()
 }
 
-// stopStageUI closes the listener (idempotent). Close, not graceful Shutdown:
-// hijacked WebSockets are not tracked by Shutdown and would block it.
+// stageUISupervisorRef returns the running supervisor for the listener's status
+// route, or nil when none is running.
+func (s *Server) stageUISupervisorRef() *stageUISupervisor {
+	s.stageUIMu.Lock()
+	defer s.stageUIMu.Unlock()
+	return s.stageUISup
+}
+
+// stopStageUI closes the listener and stops the supervisor's check loop
+// (idempotent). It never touches the supervised upstream: the Stage outlives
+// the kernel by design (Setsid), and stopping the kernel is not a reason to
+// take it down. Close, not graceful Shutdown: hijacked WebSockets are not
+// tracked by Shutdown and would block it.
 func (s *Server) stopStageUI() {
 	s.stageUIMu.Lock()
 	srv := s.stageUISrv
+	sup := s.stageUISup
 	s.stageUISrv = nil
 	s.stageUIGuard = nil
+	s.stageUISup = nil
 	s.stageUIMu.Unlock()
 	if srv != nil {
 		_ = srv.Close()
+	}
+	if sup != nil {
+		sup.stop() // stops the loop, never the child
 	}
 }
