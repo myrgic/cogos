@@ -63,8 +63,8 @@ func TestRunBoardAuth_PostWithoutRunsWrite_403(t *testing.T) {
 }
 
 // TestRunBoardAuth_PostWithRunsWrite_Passes_Gate pins that a grant carrying
-// runs:write gets past the gate on POST /v1/runs. The handler is still a W1
-// stub, so this currently fails with 501 from the stub, not from auth.
+// runs:write gets past the gate on POST /v1/runs and reaches the handler (a
+// manual open: 201).
 func TestRunBoardAuth_PostWithRunsWrite_Passes_Gate(t *testing.T) {
 	t.Parallel()
 	srv := newGrantAuthTestServer(t)
@@ -89,8 +89,7 @@ func TestRunBoardAuth_PostWithRunsWrite_Passes_Gate(t *testing.T) {
 		t.Fatalf("POST /v1/runs with runs:write = %d; the gate refused a scoped grant", resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusCreated {
-		t.Errorf("POST /v1/runs with runs:write = %d; want 201 (W1 body not landed: handler stub returns 501)",
-			resp.StatusCode)
+		t.Errorf("POST /v1/runs with runs:write = %d; want 201 (a manual open)", resp.StatusCode)
 	}
 }
 

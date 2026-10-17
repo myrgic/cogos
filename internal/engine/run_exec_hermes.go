@@ -17,10 +17,15 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -130,6 +135,14 @@ func (e *HermesRunExecutor) Start(ctx context.Context, runID string, opts Hermes
 
 	sess, err := e.driver.Create(ctx, opts)
 	if err != nil {
+		// The run is open on the board and nothing will ever host it, so it
+		// ends here: a run that cannot start must not stay open, uncancellable,
+		// until the next boot sweep (cog-review on #701). A concurrent end is
+		// fine (the conflict means someone already closed it).
+		if _, endErr := e.board.End(runID, RunEnd{Outcome: RunOutcomeFail, Reason: "create session: " + err.Error(),
+			ObservedBy: runExecObservedBy}, runExecActor); endErr != nil && !errors.Is(endErr, ErrRunConflict) {
+			return fmt.Errorf("run %s: create session: %w (and ending the run: %v)", runID, err, endErr)
+		}
 		return fmt.Errorf("run %s: create session: %w", runID, err)
 	}
 
@@ -153,6 +166,21 @@ func (e *HermesRunExecutor) Start(ctx context.Context, runID string, opts Hermes
 			Outcome: RunOutcomeFail, Reason: "record liveness: " + err.Error(), ObservedBy: runExecObservedBy,
 		})
 		return fmt.Errorf("run %s: record liveness: %w", runID, err)
+	}
+
+	// The run's model goes on the session before the brief does: the first
+	// prompt (and every turn after it) must run on the model the caller asked
+	// for, not the profile's default. A model the agent refuses leaves no turn
+	// to report, so it ends the run here, exactly as a failed liveness record
+	// does, rather than running on a model the caller did not ask for.
+	if run.Model != "" {
+		if err := sess.SetModel(ctx, run.Model); err != nil {
+			e.closeRun(runID, a, RunEnd{
+				Outcome: RunOutcomeFail, Reason: "set model " + run.Model + ": " + err.Error(),
+				ObservedBy: runExecObservedBy,
+			})
+			return fmt.Errorf("run %s: set model: %w", runID, err)
+		}
 	}
 
 	// Watch from the session's current tail: a resumed session's ring may
@@ -183,11 +211,20 @@ func (e *HermesRunExecutor) Start(ctx context.Context, runID string, opts Hermes
 		return fmt.Errorf("run %s: first prompt: %w", runID, err)
 	}
 
-	turn, seen := e.awaitTurnEnd(ctx, sess, sub, baseline)
+	turn, seen, text := e.awaitTurnEnd(ctx, sess, sub, baseline)
 	e.mu.Lock()
 	cancelled, reason := a.cancelled, a.reason
 	e.mu.Unlock()
-	e.closeRun(runID, a, runEndForTurn(cancelled, reason, turn, seen))
+	end := runEndForTurn(cancelled, reason, turn, seen)
+	if seen || cancelled {
+		// The run ended with a turn: either its turn_end was observed, or this
+		// kernel's own cancel ended it — a forced stop can close the ring
+		// before the turn_end lands, so the cancel itself is the evidence that
+		// there was a turn to report. The report is the only record of what
+		// the agent said left once the session goes with the run below.
+		e.attachReport(&end, runID, text)
+	}
+	e.closeRun(runID, a, end)
 	return nil
 }
 
@@ -351,13 +388,19 @@ type runTurnEnd struct {
 // subscription, and goes on until the turn_end arrives, the session is
 // confirmed gone (Start then ends the run crash, the session having no turn
 // to report), or ctx is done.
-func (e *HermesRunExecutor) awaitTurnEnd(ctx context.Context, sess *HermesACPSession, sub *RingSubscription, baseline uint64) (runTurnEnd, bool) {
+//
+// It also returns this turn's agent message text, folded from the same events
+// as they are read (runTurnWatch): the run's report (attachReport). The text
+// of a turn that never reported is "" — there is nothing to report on.
+func (e *HermesRunExecutor) awaitTurnEnd(ctx context.Context, sess *HermesACPSession, sub *RingSubscription, baseline uint64) (runTurnEnd, bool, string) {
+	watch := runTurnWatch{seq: baseline}
 	dropped := false
 	for {
 		// The subscription's snapshot and live tail, in seq order.
 		for _, ev := range sub.Replay {
+			watch.observe(ev)
 			if ev.Kind == MSEventTurnEnd {
-				return parseTurnEnd(ev), true
+				return parseTurnEnd(ev), true, watch.text.String()
 			}
 		}
 		for open := true; open; {
@@ -367,11 +410,15 @@ func (e *HermesRunExecutor) awaitTurnEnd(ctx context.Context, sess *HermesACPSes
 					open = false
 					continue
 				}
+				watch.observe(ev)
 				if ev.Kind == MSEventTurnEnd {
-					return parseTurnEnd(ev), true
+					return parseTurnEnd(ev), true, watch.text.String()
 				}
 			case <-ctx.Done():
-				return runTurnEnd{}, false
+				// No turn_end was observed, but the text read so far is still
+				// this turn's: a cancel is the caller's evidence that there was
+				// a turn (the caller decides what to do with it).
+				return runTurnEnd{}, false, watch.text.String()
 			}
 		}
 
@@ -379,15 +426,16 @@ func (e *HermesRunExecutor) awaitTurnEnd(ctx context.Context, sess *HermesACPSes
 		// dropped, so read what the ring retained before deciding anything.
 		evs, _ := sess.Events().Since(baseline)
 		for _, ev := range evs {
+			watch.observe(ev)
 			if ev.Kind == MSEventTurnEnd {
-				return parseTurnEnd(ev), true
+				return parseTurnEnd(ev), true, watch.text.String()
 			}
 		}
 		if e.sessionGone(sess) {
-			return runTurnEnd{}, false
+			return runTurnEnd{}, false, watch.text.String()
 		}
 		if ctx.Err() != nil {
-			return runTurnEnd{}, false
+			return runTurnEnd{}, false, watch.text.String()
 		}
 		if !dropped {
 			// A dropped subscriber is not a session that ended: say so once,
@@ -414,6 +462,43 @@ func (e *HermesRunExecutor) sessionGone(sess *HermesACPSession) bool {
 		return true
 	}
 	return sess.State() == StateDetached
+}
+
+// runTurnWatch folds the agent's message text out of the events a turn
+// produces while awaitTurnEnd reads them. seq is a watermark — the wait may
+// re-read events it has already seen when the subscription is dropped and
+// re-attached — and it starts at the run's baseline, so an earlier turn's text
+// still retained on a resumed session's ring is not folded into this turn's.
+type runTurnWatch struct {
+	text strings.Builder
+	seq  uint64
+}
+
+func (w *runTurnWatch) observe(ev ManagedSessionEvent) {
+	if ev.Seq <= w.seq {
+		return
+	}
+	w.seq = ev.Seq
+	if ev.Kind != MSEventSessionUpdate {
+		return
+	}
+	w.text.WriteString(agentMessageText(ev.Data))
+}
+
+// agentMessageText returns the text of an agent message chunk update, and ""
+// for any other session/update (a thought, a tool call, a mode or model
+// change). The ring carries the ACP update object verbatim (MSEventSessionUpdate).
+func agentMessageText(data json.RawMessage) string {
+	var u struct {
+		Kind    string `json:"sessionUpdate"`
+		Content struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(data, &u) != nil || u.Kind != "agent_message_chunk" {
+		return ""
+	}
+	return u.Content.Text
 }
 
 func parseTurnEnd(ev ManagedSessionEvent) runTurnEnd {
@@ -453,6 +538,74 @@ func runEndForTurn(cancelled bool, reason string, turn runTurnEnd, seen bool) Ru
 		}
 	}
 	return RunEnd{Outcome: RunOutcomeOK, ObservedBy: runExecObservedBy, StopReason: turn.StopReason}
+}
+
+// Report bounds. maxRunReportBytes caps a run's report file: a turn's agent
+// text is bounded by the session ring, but not usefully so, and a report is a
+// convenience artifact, not a ledger. Past the cap the file keeps the cap and
+// says so with the marker (runReportTruncated).
+const (
+	maxRunReportBytes  = 1 << 20
+	runReportTruncated = "\n[report truncated at 1 MiB]\n"
+)
+
+// runReportPath returns a run's report file: a per-run directory under the
+// kernel's run state (.cog/run), where its other run artifacts live (turns/,
+// bus/, managed-sessions/).
+func runReportPath(workspaceRoot, runID string) string {
+	return filepath.Join(workspaceRoot, ".cog", "run", "runs", runID, "report.md")
+}
+
+// attachReport writes the turn's agent text and points end at it. It is best
+// effort on purpose: the session goes with the run (release, closeRun), so the
+// report is the client's only copy of what the agent said — but a report that
+// cannot be written must not cost the run its run.end. The write error is
+// logged and the end is written without a report.
+func (e *HermesRunExecutor) attachReport(end *RunEnd, runID, text string) {
+	workspaceRoot := e.board.workspaceRoot
+	if workspaceRoot == "" {
+		return // in-memory board: there is nowhere to put it
+	}
+	report, err := writeRunReport(workspaceRoot, runID, text)
+	if err != nil {
+		slog.Error("run exec hermes: could not write run report", "run", runID, "error", err)
+		return
+	}
+	end.Report = &report
+}
+
+// writeRunReport writes text to the run's report file atomically (temp file in
+// the same directory, then rename) and returns its path and the sha256 of the
+// bytes written. The directory is created 0700: a run's report is the kernel's
+// own state, not something another user of the node should read.
+func writeRunReport(workspaceRoot, runID, text string) (RunReport, error) {
+	path := runReportPath(workspaceRoot, runID)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return RunReport{}, fmt.Errorf("create report dir: %w", err)
+	}
+	body := []byte(text)
+	if len(body) > maxRunReportBytes {
+		body = append(body[:maxRunReportBytes], runReportTruncated...)
+	}
+	tmp, err := os.CreateTemp(dir, ".report-*.tmp")
+	if err != nil {
+		return RunReport{}, fmt.Errorf("create report temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }() // no-op once the rename landed
+	if _, err := tmp.Write(body); err != nil {
+		tmp.Close()
+		return RunReport{}, fmt.Errorf("write report temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return RunReport{}, fmt.Errorf("close report temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return RunReport{}, fmt.Errorf("rename report: %w", err)
+	}
+	sum := sha256.Sum256(body)
+	return RunReport{Path: path, SHA256: hex.EncodeToString(sum[:])}, nil
 }
 
 // procInfo reports the session's agent process id and start time for the run's

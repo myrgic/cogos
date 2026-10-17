@@ -1587,7 +1587,7 @@
     },
     {
       "file": "internal/engine/run_board.go",
-      "line": 364,
+      "line": 373,
       "column": 13,
       "primitive": "engine.AppendEvent(bucket)",
       "func": "(*RunBoardStore).commitLocked",
@@ -1598,8 +1598,44 @@
       "raw": "RunsLedgerBucket"
     },
     {
+      "file": "internal/engine/run_exec_hermes.go",
+      "line": 584,
+      "column": 12,
+      "primitive": "os.MkdirAll",
+      "func": "writeRunReport",
+      "pattern": "dirname(\u003cWorkspaceRoot\u003e/.cog/run/runs/{runID}/report.md)",
+      "category": "cog",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "dir"
+    },
+    {
+      "file": "internal/engine/run_exec_hermes.go",
+      "line": 591,
+      "column": 14,
+      "primitive": "os.CreateTemp",
+      "func": "writeRunReport",
+      "pattern": "dirname(\u003cWorkspaceRoot\u003e/.cog/run/runs/{runID}/report.md)",
+      "category": "cog",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "dir"
+    },
+    {
+      "file": "internal/engine/run_exec_hermes.go",
+      "line": 604,
+      "column": 12,
+      "primitive": "os.Rename",
+      "func": "writeRunReport",
+      "pattern": "\u003cWorkspaceRoot\u003e/.cog/run/runs/{runID}/report.md",
+      "category": "cog",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "path"
+    },
+    {
       "file": "internal/engine/serve.go",
-      "line": 1483,
+      "line": 1543,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",
@@ -2991,8 +3027,8 @@
     }
   ],
   "summary": {
-    "total": 249,
-    "cog": 104,
+    "total": 252,
+    "cog": 107,
     "home": 2,
     "elsewhere": 13,
     "unanchored": 89,
@@ -3001,11 +3037,11 @@
       "engine.AppendEvent(bucket)": 9,
       "io.Copy": 7,
       "os.Create": 6,
-      "os.CreateTemp": 8,
-      "os.MkdirAll": 79,
+      "os.CreateTemp": 9,
+      "os.MkdirAll": 80,
       "os.MkdirTemp": 2,
       "os.OpenFile": 28,
-      "os.Rename": 34,
+      "os.Rename": 35,
       "os.Symlink": 1,
       "os.WriteFile": 67,
       "sql.Open(sqlite3)": 8

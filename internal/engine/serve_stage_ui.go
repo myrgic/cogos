@@ -30,6 +30,9 @@
 // 2 s→60 s backoff, the Setsid detach, and the rule that env_file VALUES are
 // never logged — is in the file header of stage_ui_supervisor.go.
 //
+//	local_auth: enforce           # off (default) | enforce
+//	local_actor: <operator>       # the actor a /local grant must name (enforce)
+//
 // keys (P3b S4): "off" does nothing. "shadow" resolves the key segment of each
 // /r/ /k/ /h/ request against the share-link store and compares the kernel's
 // verdict with the Stage's, logging "stage-ui: key-disagree" and counting
@@ -37,6 +40,14 @@
 // never changes a response; the Python Stage stays authoritative. "enforce" is
 // S5 and is not implemented: it is accepted, logged once, and runs as shadow.
 // An unrecognised value runs as off. See serve_stage_ui_keys.go.
+//
+// local_auth: "off" (default) trusts the guard's /local rules, exactly as
+// before this config existed. "enforce" additionally requires every /local
+// request — the raw spelling, the cleaned spellings the guard normalises, and
+// websocket upgrades — to present a live grant with scope stage:local naming
+// actor "chaz" (X-Cogos-Grant or Authorization: Bearer); otherwise the kernel
+// answers 401 itself and nothing is proxied. An unrecognised value runs as
+// off. See serve_stage_ui_guard.go (localGrantOK).
 //
 // Request routing, in order:
 //
@@ -148,6 +159,8 @@ type StageUIConfig struct {
 	OwnedPrefixes  []string // route groups the kernel owns: never proxied (502 instead)
 	PublicHost     string   // public hostname (e.g. stage.myrgic.com) the guard accepts besides loopback; empty = loopback only
 	Keys           string   // key resolution mode: off (default) | shadow | enforce (S5; treated as shadow here)
+	LocalAuth      string   // /local grant mode: off (default) | enforce
+	LocalActor     string   // the actor a /local grant must name under enforce (empty refuses all)
 
 	// Supervise, when enabled, makes the kernel start and keep the Python
 	// Stage upstream alive (stage_ui_supervisor.go). An absent block leaves the
@@ -162,6 +175,9 @@ type StageUIConfig struct {
 	// route (GET /v1/stage-ui/supervisor). Set by startStageUI; nil in
 	// handler-only tests, where the route reports enabled=false.
 	supervisor func() *stageUISupervisor
+	// grants supplies the identity-grant registry for LocalAuth=enforce. Set
+	// by startStageUI; nil means no grant can verify (the guard fails closed).
+	grants func() *IdentityGrantRegistry
 }
 
 // StageUISupervisorConfig is the resolved stage_ui.supervise block: the command
@@ -193,6 +209,8 @@ type stageUISection struct {
 	OwnedPrefixes  []string                  `yaml:"owned_prefixes"`
 	PublicHost     string                    `yaml:"public_host"`
 	Keys           string                    `yaml:"keys"`
+	LocalAuth      string                    `yaml:"local_auth"`
+	LocalActor     string                    `yaml:"local_actor"`
 	Supervise      *stageUISupervisorSection `yaml:"supervise"`
 }
 
@@ -227,6 +245,12 @@ func applyStageUISection(cfg *Config, s *stageUISection) {
 	}
 	if s.Keys != "" {
 		cfg.StageUI.Keys = s.Keys
+	}
+	if s.LocalAuth != "" {
+		cfg.StageUI.LocalAuth = s.LocalAuth
+	}
+	if s.LocalActor != "" {
+		cfg.StageUI.LocalActor = s.LocalActor
 	}
 	if len(s.StaticPrefixes) > 0 {
 		cfg.StageUI.StaticPrefixes = s.StaticPrefixes
@@ -306,6 +330,30 @@ func validateStageUIAddr(addr string) error {
 	return nil
 }
 
+// Stage UI /local grant modes (stage_ui.local_auth).
+const (
+	// StageUILocalAuthOff trusts the loopback rule alone: any request the
+	// guard already accepts may reach /local. This is the default and exactly
+	// the pre-local_auth behaviour.
+	StageUILocalAuthOff = "off"
+	// StageUILocalAuthEnforce additionally requires every /local request to
+	// present a live grant with scope stage:local naming stage_ui.local_actor.
+	StageUILocalAuthEnforce = "enforce"
+)
+
+// normalizeStageUILocalAuthMode maps the config value to the effective mode.
+// ok=false means the value was unrecognised (effective mode is off), matching
+// normalizeStageUIKeysMode.
+func normalizeStageUILocalAuthMode(v string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", StageUILocalAuthOff:
+		return StageUILocalAuthOff, true
+	case StageUILocalAuthEnforce:
+		return StageUILocalAuthEnforce, true
+	}
+	return StageUILocalAuthOff, false
+}
+
 // newStageUIHandler builds the static-then-proxy handler.
 func newStageUIHandler(c StageUIConfig) (http.Handler, error) {
 	h, _, err := newStageUIHandlerG(c)
@@ -339,6 +387,24 @@ func newStageUIHandlerG(c StageUIConfig) (http.Handler, *stageGuard, error) {
 		guard.shadow = newKeyShadow(c.shareLinks)
 	} else if mode == StageUIKeysShadow {
 		slog.Warn("stage-ui: keys=shadow without a share-link store, running as off")
+	}
+	localMode, localOK := normalizeStageUILocalAuthMode(c.LocalAuth)
+	if !localOK {
+		slog.Warn("stage-ui: unknown local_auth mode, running as off", "local_auth", c.LocalAuth)
+	}
+	// Unlike keys=shadow (which only observes and so can degrade to off), an
+	// authorization gate must never silently open: enforce stays on even with
+	// no registry, and localGrantOK then refuses every /local request.
+	if localMode == StageUILocalAuthEnforce {
+		guard.localAuthEnforce = true
+		guard.grants = c.grants
+		guard.localActor = strings.TrimSpace(c.LocalActor)
+		if guard.localActor == "" {
+			slog.Warn("stage-ui: local_auth=enforce without local_actor; every /local request will be refused")
+		}
+		if c.grants == nil {
+			slog.Warn("stage-ui: local_auth=enforce without a grant registry; every /local request will be refused")
+		}
 	}
 	prefixes := c.StaticPrefixes
 	if len(prefixes) == 0 {
@@ -569,6 +635,7 @@ func (s *Server) startStageUI() {
 		slog.Error("stage-ui: disabled", "err", err)
 		return
 	}
+	c.grants = func() *IdentityGrantRegistry { return s.identityGrants }
 	h, g, err := newStageUIHandlerG(c)
 	if err != nil {
 		slog.Error("stage-ui: disabled", "err", err)

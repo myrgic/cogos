@@ -257,6 +257,14 @@ const (
 	// (POST /v1/runs and its sub-routes). Reads need a live grant but no
 	// particular scope.
 	ScopeRunsWrite = "runs:write"
+
+	// ScopeStageLocal authorizes a caller to reach the Stage UI listener's
+	// /local routes when stage_ui.local_auth is "enforce"
+	// (serve_stage_ui_guard.go). Those routes act as the Stage host itself
+	// (owner reloads, guard unlock, room posts), so this is deliberately its
+	// own scope rather than a reuse of ScopeWrite; the guard also requires the
+	// grant to name the actor it acts for (stage_ui.local_actor).
+	ScopeStageLocal = "stage:local"
 )
 
 // ScopeStageKeys is declared in serve_share_links.go.
