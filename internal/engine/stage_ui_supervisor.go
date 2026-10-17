@@ -607,9 +607,11 @@ func (s *stageUISupervisor) probeHealth(ctx context.Context) bool {
 // noteHealthy records a healthy check: adopt what is there, and reset the
 // backoff once the upstream has been healthy long enough.
 func (s *stageUISupervisor) noteHealthy(now time.Time, pid, prevPid int, wasAdopted bool) {
-	adopted := prevPid == 0 || pid != prevPid
-
 	s.mu.Lock()
+	// Adopted means "this kernel did not start it", whatever the checks before
+	// this one saw (cog-review on #700: a launchd upstream that booted slowly
+	// was recorded as s.pid while unhealthy and then reported adopted=false).
+	adopted := pid != s.startedPid
 	s.healthy = true
 	s.pid = pid
 	s.adopted = adopted

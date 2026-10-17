@@ -674,6 +674,38 @@ func TestStageUISupervisor_AdoptedThenUnhealthyGetsNoStartGrace(t *testing.T) {
 	}
 }
 
+// A launchd upstream that is still booting at the first check and answers
+// health later is reported adopted (the kernel never started it).
+func TestStageUISupervisor_SlowBootingExternalUpstreamIsAdopted(t *testing.T) {
+	child := newStubChild(t, stubChildParams{})
+	cfg := child.supervisorConfig(t)
+	cmd := exec.Command(child.argv[0], child.argv[1:]...)
+	cmd.Dir = child.dir
+	cmd.Env = append(os.Environ(), child.envLines...)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn stub: %v", err)
+	}
+	go func() { _ = cmd.Wait() }()
+	pid := cmd.Process.Pid
+	if err := os.WriteFile(cfg.PidFile, []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("write pidfile: %v", err)
+	}
+	t.Cleanup(func() { killAndWait(t, pid) })
+	sup, _ := testSupervisor(t, cfg)
+	requireDefaultStartGrace(t, sup)
+
+	sup.healthURL = "http://127.0.0.1:1/healthz" // still booting: alive, no answer yet
+	sup.check(t)
+	if st := sup.status(); st.Healthy {
+		t.Fatalf("healthy while booting: %+v", st)
+	}
+	sup.healthURL = child.healthURL(t, pid) // booted
+	sup.check(t)
+	if st := sup.status(); !st.Healthy || !st.Adopted || st.PID != pid || st.Restarts != 0 {
+		t.Fatalf("slow-booting external upstream not reported adopted: %+v", st)
+	}
+}
+
 func TestStageUISupervisor_UnhealthyIgnoringSigtermIsKilled(t *testing.T) {
 	child := newStubChild(t, stubChildParams{unhealthyFirst: true, ignoreSigterm: true})
 	sup, advance := testSupervisor(t, child.supervisorConfig(t))
