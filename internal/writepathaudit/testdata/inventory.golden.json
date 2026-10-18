@@ -1766,6 +1766,30 @@
       "raw": "shareLinksLedgerSession"
     },
     {
+      "file": "internal/engine/session_journal.go",
+      "line": 137,
+      "column": 12,
+      "primitive": "os.MkdirAll",
+      "func": "NewSessionJournal",
+      "pattern": "\u003ccall:DefaultSessionJournalDir\u003e",
+      "category": "unanchored",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "dir"
+    },
+    {
+      "file": "internal/engine/session_journal.go",
+      "line": 140,
+      "column": 12,
+      "primitive": "os.OpenFile",
+      "func": "NewSessionJournal",
+      "pattern": "\u003ccall:DefaultSessionJournalDir\u003e/\u003ccall:journalFileName\u003e.jsonl",
+      "category": "unanchored",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "filepath.Join(dir, journalFileName(sessionID)+\".jsonl\")"
+    },
+    {
       "file": "internal/engine/turn_storage.go",
       "line": 250,
       "column": 14,
@@ -2979,20 +3003,20 @@
     }
   ],
   "summary": {
-    "total": 248,
+    "total": 250,
     "cog": 107,
     "home": 2,
     "elsewhere": 13,
-    "unanchored": 85,
+    "unanchored": 87,
     "dynamic": 41,
     "by_primitive": {
       "engine.AppendEvent(bucket)": 9,
       "io.Copy": 7,
       "os.Create": 6,
       "os.CreateTemp": 9,
-      "os.MkdirAll": 78,
+      "os.MkdirAll": 79,
       "os.MkdirTemp": 2,
-      "os.OpenFile": 27,
+      "os.OpenFile": 28,
       "os.Rename": 35,
       "os.Symlink": 1,
       "os.WriteFile": 66,
@@ -3282,7 +3306,7 @@
     },
     {
       "file": "internal/engine/managed_session_hermes.go",
-      "line": 224,
+      "line": 235,
       "column": 9,
       "func": "(*hermesProcess).start",
       "subsystem": "internal:engine",
@@ -3292,7 +3316,7 @@
     },
     {
       "file": "internal/engine/managed_session_hermes.go",
-      "line": 1258,
+      "line": 1309,
       "column": 9,
       "func": "(*HermesACPDriver).runClassProbe",
       "subsystem": "internal:engine",

@@ -15,8 +15,10 @@
 //
 // A request that names no class gets today's behavior unchanged (the driver's
 // Command/Env, the request's profile): the built-in default class. A request
-// that names a class may not also carry profile or mcp_servers: those come
-// from the class, and a rejected field is visible where an override is not.
+// that names a class may not also carry profile: the class owns it. The
+// request's mcp_servers are refused too unless the class's mcpServers policy
+// is "request", which lets the class accept them; a rejected field is visible
+// where a silent override is not.
 //
 // Authorization: whoever may create a class is decided by the HTTP layer from
 // the caller's grant (see managedSessionAuthority); the driver receives the
@@ -63,8 +65,17 @@ type RuntimeClass struct {
 	// falls back to Cwd; "fixed" always uses Cwd and refuses a different one.
 	Cwd       string `yaml:"cwd,omitempty"`
 	CwdPolicy string `yaml:"cwdPolicy,omitempty"`
-	// McpServers is "none" (default) or "configured"; either way a request
-	// may not supply mcp_servers for a class.
+	// McpServers is the class's MCP-server policy:
+	//   "none" (default) — no MCP servers; a request may not supply any.
+	//   "configured"     — the kernel's own servers for this class (today:
+	//                      none); a request may not supply any.
+	//   "request"        — the class ACCEPTS the mcp_servers the create
+	//                      request carries, so a kernel-launched seat (e.g.
+	//                      the stage's per-room voice server) can be handed
+	//                      its tools per session. The word matches CwdPolicy,
+	//                      which already means "take the request's value";
+	//                      the resolved set is reported in the receipt.
+	// Only "request" lets request-supplied servers reach the session.
 	McpServers string `yaml:"mcpServers,omitempty"`
 	// Toolset is the label of the toolset the program pins (receipt/audit
 	// metadata; the program, not the kernel, enforces it).
@@ -79,6 +90,9 @@ type ResolvedRuntimeClass struct {
 	Profile string
 	Cwd     string // "" = request supplied none and the class has none
 	Toolset string
+	// McpServers is the class's mcpServers policy ("", "none", "configured"
+	// or "request"); "request" means the create request's servers are used.
+	McpServers string
 }
 
 // RuntimeClassReceipt records what a session was actually started with, so a
@@ -89,7 +103,15 @@ type RuntimeClassReceipt struct {
 	Profile       string `json:"profile,omitempty"`
 	Toolset       string `json:"toolset,omitempty"`
 	WrapperSHA256 string `json:"wrapper_sha256,omitempty"` // content hash of the first regular-file argv element after argv[0]
+	// McpServers is the server list the session was actually given (only
+	// non-empty when the class's policy is "request"), so a session's tools
+	// are auditable from its receipt.
+	McpServers []json.RawMessage `json:"mcp_servers,omitempty"`
 }
+
+// RuntimeClassMcpRequest is the mcpServers policy under which a class accepts
+// the MCP servers its create request carries (RuntimeClass.McpServers).
+const RuntimeClassMcpRequest = "request"
 
 // Errors for class handling. Unknown/invalid map to 400, forbidden to 403.
 var ErrUnknownRuntimeClass = fmt.Errorf("%w: unknown runtime class", ErrInvalidManagedSession)
@@ -147,9 +169,9 @@ func (r *RuntimeClassRegistry) validate(name string, c RuntimeClass) error {
 		return fmt.Errorf("cwdPolicy %q (want request|fixed)", c.CwdPolicy)
 	}
 	switch c.McpServers {
-	case "", "none", "configured":
+	case "", "none", "configured", RuntimeClassMcpRequest:
 	default:
-		return fmt.Errorf("mcpServers %q (want none|configured)", c.McpServers)
+		return fmt.Errorf("mcpServers %q (want none|configured|request)", c.McpServers)
 	}
 	// Every placeholder must resolve against vars (+ the per-session {profile}).
 	var texts []string
@@ -210,7 +232,7 @@ func (r *RuntimeClassRegistry) Resolve(name string, baseEnv []string, reqCwd str
 	}
 	c := r.classes[name]
 	profile := r.expand(c.Profile, "")
-	out := &ResolvedRuntimeClass{Name: name, Profile: profile, Toolset: c.Toolset}
+	out := &ResolvedRuntimeClass{Name: name, Profile: profile, Toolset: c.Toolset, McpServers: c.McpServers}
 	for _, a := range c.Argv {
 		out.Argv = append(out.Argv, r.expand(a, profile))
 	}

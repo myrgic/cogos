@@ -778,3 +778,109 @@ func TestRuntimeClass_HTTPColdDeleteGated(t *testing.T) {
 		t.Fatalf("owner cold delete = %d, want 204", code)
 	}
 }
+
+// A class's mcpServers policy decides whether a create request may supply the
+// session's MCP servers (the stage hands a room its per-session voice server
+// this way, so a kernel-launched seat can speak). "request" passes them
+// through and records them in the receipt; "none" (the default) and
+// "configured" keep today's behaviour: the request may not supply any, and
+// the session gets the kernel's own set (today: none).
+func TestRuntimeClass_McpServersPolicy(t *testing.T) {
+	cfg, _ := classTestConfig(t)
+	voice := cfg.RuntimeClasses["chat"]
+	voice.McpServers = RuntimeClassMcpRequest
+	kernel := cfg.RuntimeClasses["collab"]
+	kernel.McpServers = "configured"
+	cfg.RuntimeClasses["voice"] = voice
+	cfg.RuntimeClasses["kern"] = kernel
+	reg, err := NewRuntimeClassRegistry(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := fakeHermesDriver(t, func(c *HermesACPDriverConfig) {
+		c.Classes = reg
+		c.Env = append(os.Environ(), acpfake.EnvVar+"=1")
+	})
+	servers := []json.RawMessage{json.RawMessage(`{"name":"stage-voice","command":"stage-voice-mcp"}`)}
+
+	// "request": the request's servers travel with the session and are auditable.
+	s, err := d.Create(context.Background(), HermesACPOpts{Class: "voice", Cwd: t.TempDir(), McpServers: servers})
+	if err != nil {
+		t.Fatalf("request class with mcp_servers: %v", err)
+	}
+	if len(s.mcp) != 1 || string(s.mcp[0]) != string(servers[0]) {
+		t.Fatalf("request class mcp = %v, want the request's servers", s.mcp)
+	}
+	if rec := s.Info().Receipt; rec == nil || len(rec.McpServers) != 1 || string(rec.McpServers[0]) != string(servers[0]) {
+		t.Fatalf("receipt mcp = %+v, want the resolved servers", rec)
+	}
+	// ...and the same class with no servers supplied resolves to none.
+	bare, err := d.Create(context.Background(), HermesACPOpts{Class: "voice", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bare.mcp) != 0 || (bare.Info().Receipt != nil && len(bare.Info().Receipt.McpServers) != 0) {
+		t.Fatalf("request class with no servers = %v / %+v", bare.mcp, bare.Info().Receipt)
+	}
+
+	// "none" (default) and "configured": the request may not supply servers.
+	for _, class := range []string{"chat", "kern"} {
+		if _, err := d.Create(context.Background(), HermesACPOpts{Class: class, Cwd: t.TempDir(), McpServers: servers}); !errors.Is(err, ErrInvalidManagedSession) {
+			t.Fatalf("%s class accepted request mcp_servers: err = %v, want invalid", class, err)
+		}
+	}
+	// "configured" uses the kernel's own set (today: none), never the request's.
+	own, err := d.Create(context.Background(), HermesACPOpts{Class: "kern", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(own.mcp) != 0 {
+		t.Fatalf("configured class mcp = %v, want the kernel's own (none)", own.mcp)
+	}
+}
+
+// A fork may not carry request-supplied mcp_servers, whatever the parent's
+// class policy. A fork runs in the parent's process and inherits the parent's
+// resolved class, so there is no class policy left to check the request
+// against; its receipt is the parent's receipt, which records the servers the
+// PARENT was started with. Removing the check in create()'s `parent != nil`
+// branch makes this test fail by threading the request's servers into the
+// session/fork RPC (and onto sess.mcp) while the forked session's receipt
+// still shows the parent's set: a caller could POST
+// {"fork_of":"<id>","mcp_servers":[{"name":"evil","command":"..."}]} and give
+// the fork tools no audit trail records. The test drives the real driver
+// create() path (Create -> create -> session/fork over the fake ACP), not the
+// class-resolution helper in isolation.
+func TestRuntimeClass_ForkRefusesRequestMcpServers(t *testing.T) {
+	cfg, _ := classTestConfig(t)
+	voice := cfg.RuntimeClasses["chat"]
+	voice.McpServers = RuntimeClassMcpRequest
+	cfg.RuntimeClasses["voice"] = voice
+	reg, err := NewRuntimeClassRegistry(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := fakeHermesDriver(t, func(c *HermesACPDriverConfig) {
+		c.Classes = reg
+		c.Env = append(os.Environ(), acpfake.EnvVar+"=1")
+	})
+	servers := []json.RawMessage{json.RawMessage(`{"name":"evil","command":"evil-mcp"}`)}
+	// The parent's policy must not matter: "none" (chat) and "request" (voice)
+	// both refuse, because a fork's servers can only be its parent's.
+	for _, class := range []string{"chat", "voice"} {
+		parent, err := d.Create(context.Background(), HermesACPOpts{Class: class, Cwd: t.TempDir()})
+		if err != nil {
+			t.Fatalf("%s parent: %v", class, err)
+		}
+		f, err := d.Create(context.Background(), HermesACPOpts{ForkOf: parent.ID(), McpServers: servers})
+		if !errors.Is(err, ErrInvalidManagedSession) {
+			t.Fatalf("%s fork with mcp_servers: err = %v, want invalid", class, err)
+		}
+		if f != nil {
+			t.Fatalf("%s fork with mcp_servers returned a session", class)
+		}
+		if rec := parent.Info().Receipt; rec == nil || len(rec.McpServers) != 0 {
+			t.Fatalf("%s parent receipt = %+v, want no recorded servers", class, rec)
+		}
+	}
+}
