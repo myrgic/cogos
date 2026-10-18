@@ -161,3 +161,49 @@ func TestSessionJournal_OversizedPayloadIsBoundedAndRedacted(t *testing.T) {
 		}
 	}
 }
+
+// Class: an escaped quote INSIDE a quoted value. journalValueEnd ended a quoted
+// value at any backslash-run followed by a quote, so it could not tell the
+// value's own internal \" from the true terminator: the scan stopped at the
+// internal quote, redacted only the prefix, and copied the rest of the secret —
+// the tail — through verbatim. The terminator is now the quote whose escape
+// depth matches the opening quote's; a quote at any other depth is content, and
+// an unparsable value runs to the end of the string (redact more, never less).
+// Every case FAILS against the un-fixed file, naming the leaked tail. The depth
+// 1-3 cases come from json.Marshal, so they are real double-encoding (opening
+// depth 1, 3 and 7; internal 3, 7 and 15), not a hand-spelled toy.
+func TestSessionJournal_EscapedQuoteInQuotedValueIsContent(t *testing.T) {
+	type tc struct {
+		name string
+		in   string
+		leak string
+	}
+	cases := []tc{
+		{name: "plain/0", in: `{"api_key":"sk-a\"def-SECRETTAIL0"}`, leak: "SECRETTAIL0"},
+		// The value's own content starts AND ends with an escaped quote, so the
+		// internal quote sits at both edges of the value.
+		{name: "both-edges/0", in: `{"api_key":"\"sk-SECRETTAIL-EDGE\""}`, leak: "SECRETTAIL-EDGE"},
+	}
+	// depth 1, 2, 3: the plain shape marshalled one, two and three more times,
+	// the way a JSON string nested inside a JSON string really arrives.
+	cur := `{"api_key":"sk-a\"def-SECRETTAIL-DEEP"}`
+	for i := 0; i < 3; i++ {
+		b, err := json.Marshal(cur)
+		if err != nil {
+			t.Fatalf("marshal layer %d: %v", i+1, err)
+		}
+		cur = string(b)
+		cases = append(cases, tc{name: "depth/" + string(rune('1'+i)), in: cur, leak: "SECRETTAIL-DEEP"})
+	}
+	for _, c := range cases {
+		out := journalRedactAssignments(c.in)
+		if strings.Contains(out, c.leak) {
+			t.Errorf("%s: an internal escaped quote ended the value early, so the secret tail %q was copied through verbatim:\n in: %s\nout: %s",
+				c.name, c.leak, c.in, out)
+		}
+		if !strings.Contains(out, "[redacted]") {
+			t.Errorf("%s: the value was not redacted at all — no terminator at the opening depth was found:\n in: %s\nout: %s",
+				c.name, c.in, out)
+		}
+	}
+}

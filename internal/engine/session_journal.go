@@ -780,18 +780,34 @@ func journalValueStart(s string, i int) (int, bool) {
 	return i, false
 }
 
-// journalValueEnd ends the value. Quoted: at its closing quote (plain " or an
-// escaped \" at any escape depth) or at the end of the string, the latter being
-// the truncated \"key\":\"val shape with no close. Unquoted: at the first hard
-// delimiter — whitespace, a line break, a comma, a closing brace/bracket or a
-// semicolon — so a multi-token value is redacted whole rather than cut at its
+// journalValueEnd ends the value. Quoted: at the closing quote that carries the
+// SAME escape depth as the opening quote — a plain " when the opening quote was
+// plain, a \" when it was escaped once, a \\" when twice — because a quote at any
+// OTHER depth is the value's own content (an internal \"), not its terminator.
+// The key walk (journalKeyBefore) steps over a quote at any escape depth for the
+// same reason; the value walk needs the depth, not merely the presence of a
+// backslash run. When no quote at the opening depth is found, or the shape is
+// otherwise ambiguous, the value runs to the end of the string: over-redaction
+// is this file's policy and an unredacted secret is not. Unquoted: at the first
+// hard delimiter — whitespace, a line break, a comma, a closing brace/bracket or
+// a semicolon — so a multi-token value is redacted whole rather than cut at its
 // first word.
 func journalValueEnd(s string, i int, quoted bool) int {
+	depth := 0
+	if quoted {
+		for j := i - 1; j > 0 && s[j-1] == '\\'; j-- {
+			depth++
+		}
+	}
 	for i < len(s) {
 		c := s[i]
 		if quoted {
 			if c == '"' {
-				return i
+				if depth == 0 {
+					return i
+				}
+				i++ // a bare quote under an escaped opening quote is content
+				continue
 			}
 			if c == '\\' {
 				j := i
@@ -799,7 +815,11 @@ func journalValueEnd(s string, i int, quoted bool) int {
 					j++
 				}
 				if j < len(s) && s[j] == '"' {
-					return i
+					if j-i == depth {
+						return i
+					}
+					i = j + 1 // an escaped quote at another depth is content
+					continue
 				}
 				i = j
 				continue
