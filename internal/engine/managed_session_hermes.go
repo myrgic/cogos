@@ -123,6 +123,11 @@ type HermesACPDriverConfig struct {
 	// afterCreateCall is a test seam: called in Create after the agent's
 	// session/new|load|fork returned, before the session is registered Live.
 	afterCreateCall func(*hermesProcess)
+	// afterRingCreate is a test seam: called the moment a loaded session's
+	// event ring exists, before the session/load call that may fail. It lets a
+	// test hold the ring of a load that never goes live (Create returns nil on
+	// error, so the ring cannot be read off the result).
+	afterRingCreate func(*EventRing)
 }
 
 func (c *HermesACPDriverConfig) defaults() {
@@ -970,6 +975,12 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 	case opts.Load != "":
 		sid = opts.Load
 		sess.id, sess.ring = sid, NewEventRing(sid, d.cfg.RingSize)
+		// Both of these belong here, and the merge is the only place they meet: the test seam lets a test capture a
+		// ring that is created before the load can fail (so the close below is testable at all), and the journal is
+		// what 706 wires onto the same ring. The seam runs first, while the ring is still bare.
+		if hook := d.cfg.afterRingCreate; hook != nil {
+			hook(sess.ring)
+		}
 		if j := newSessionJournalForSession(sess, d.cfg.JournalDir); j != nil {
 			sess.ring.SetJournal(j)
 		}
@@ -992,6 +1003,13 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		delete(proc.sessions, sid)
 		empty := len(proc.sessions) == 0
 		proc.mu.Unlock()
+		// The session is leaving proc.sessions without ever going live, so
+		// nothing else will ever end its ring: close it here, exactly once.
+		// Only the opts.Load branch has created a ring before the call; the
+		// other branches leave sess.ring nil until after this point.
+		if sess.ring != nil {
+			sess.ring.Close()
+		}
 		if parent == nil && empty {
 			proc.stop()
 		}

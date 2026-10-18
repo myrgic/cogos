@@ -3306,7 +3306,7 @@
     },
     {
       "file": "internal/engine/managed_session_hermes.go",
-      "line": 224,
+      "line": 229,
       "column": 9,
       "func": "(*hermesProcess).start",
       "subsystem": "internal:engine",
