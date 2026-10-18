@@ -22,8 +22,9 @@
 // /r/ /k/ /h/ request against the share-link store and compares the kernel's
 // verdict with the Stage's, logging "stage-ui: key-disagree" and counting
 // agreements/disagreements (GET /v1/stage/keys/shadow, scope stage:keys). It
-// never changes a response; the Python Stage stays authoritative. "enforce" is
-// S5 and is not implemented: it is accepted, logged once, and runs as shadow.
+// never changes a response; the Python Stage stays authoritative. "enforce"
+// (S5) additionally answers unknown and revoked keys itself, without reaching
+// the Stage; see serve_stage_ui_keys.go.
 // An unrecognised value runs as off. See serve_stage_ui_keys.go.
 //
 // local_auth: "off" (default) trusts the guard's /local rules, exactly as
@@ -140,7 +141,7 @@ type StageUIConfig struct {
 	StaticPrefixes []string // URL path prefixes eligible for static serving
 	OwnedPrefixes  []string // route groups the kernel owns: never proxied (502 instead)
 	PublicHost     string   // public hostname (e.g. stage.myrgic.com) the guard accepts besides loopback; empty = loopback only
-	Keys           string   // key resolution mode: off (default) | shadow | enforce (S5; treated as shadow here)
+	Keys           string   // key resolution mode: off (default) | shadow | enforce (S5)
 	LocalAuth      string   // /local grant mode: off (default) | enforce
 	LocalActor     string   // the actor a /local grant must name under enforce (empty refuses all)
 
@@ -291,18 +292,15 @@ func newStageUIHandlerG(c StageUIConfig) (http.Handler, *stageGuard, error) {
 	}
 	guard := newStageGuard(c.PublicHost)
 	guard.keyKnown = probeKeyKnown(target)
-	mode, enforceAsked, ok := normalizeStageUIKeysMode(c.Keys)
+	mode, ok := normalizeStageUIKeysMode(c.Keys)
 	if !ok {
 		slog.Warn("stage-ui: unknown keys mode, running as off", "keys", c.Keys)
 	}
-	if enforceAsked {
-		slog.Warn("stage-ui: keys=enforce is not implemented (S5); running as shadow")
-	}
-	if mode == StageUIKeysShadow && c.shareLinks != nil {
+	if (mode == StageUIKeysShadow || mode == StageUIKeysEnforce) && c.shareLinks != nil {
 		guard.keysMode = mode
 		guard.shadow = newKeyShadow(c.shareLinks)
-	} else if mode == StageUIKeysShadow {
-		slog.Warn("stage-ui: keys=shadow without a share-link store, running as off")
+	} else if mode != StageUIKeysOff {
+		slog.Warn("stage-ui: keys mode without a share-link store, running as off", "keys", mode)
 	}
 	localMode, localOK := normalizeStageUILocalAuthMode(c.LocalAuth)
 	if !localOK {
@@ -348,6 +346,17 @@ func newStageUIHandlerG(c StageUIConfig) (http.Handler, *stageGuard, error) {
 		var ok bool
 		if r, ok = guard.handle(w, r); !ok {
 			return
+		}
+		if guard.keysMode == StageUIKeysEnforce && guard.shadow != nil {
+			if info, _ := r.Context().Value(stageReqKey{}).(*stageReqInfo); info != nil {
+				if refuse, count := guard.shadow.keyRefusal(info.path); refuse {
+					if count && !info.self {
+						guard.noteMiss(info.ip, info.path)
+					}
+					writeStageKeyRefusal(w, info.ws)
+					return
+				}
+			}
 		}
 		clean := path.Clean(r.URL.Path)
 		if clean == stageUIStatsPath {
