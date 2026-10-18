@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"testing"
@@ -178,4 +179,48 @@ func containsString(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// Review #704 round 1, finding 1: a cached readiness result must expire. A
+// transient first-probe failure may not mark a usable class unavailable for
+// the life of the kernel.
+func TestClassReadiness_CachedResultExpiresAfterTTL(t *testing.T) {
+	rc := RuntimeClass{Argv: []string{os.Args[0], "-test.run=^$"}}
+	rc.Env.Set = map[string]string{acpfake.EnvVar: "1"}
+	cfg := readinessClassConfig(t, "flaky", rc)
+	now := time.Now()
+	d := readinessDriver(t, cfg, func(c *HermesACPDriverConfig) {
+		c.ProbeCacheTTL = time.Minute
+		c.now = func() time.Time { return now }
+	})
+	// Seed what a transient first-probe failure leaves behind.
+	d.markClassUnavailable("flaky", errors.New("initialize timed out"))
+	if st := d.ClassStatus(context.Background(), "flaky"); st.Status != "unavailable" {
+		t.Fatalf("inside the TTL the cached result should be served, got %q", st.Status)
+	}
+	now = now.Add(2 * time.Minute)
+	if st := d.ClassStatus(context.Background(), "flaky"); st.Status != "ready" {
+		t.Fatalf("past the TTL the class must be re-probed: status = %q reason=%s", st.Status, st.Reason)
+	}
+}
+
+// Review #704 round 1, finding 2: when a class's process crashes out of its
+// restart budget the cached "ready" receipt is stale and must be dropped.
+func TestClassReadiness_CrashExhaustionInvalidatesCachedReady(t *testing.T) {
+	rc := RuntimeClass{Argv: []string{os.Args[0], "-test.run=^$"}}
+	rc.Env.Set = map[string]string{acpfake.EnvVar: "1"}
+	cfg := readinessClassConfig(t, "fake", rc)
+	d := readinessDriver(t, cfg, func(c *HermesACPDriverConfig) { c.ProbeCacheTTL = 24 * time.Hour })
+	s, err := d.Create(context.Background(), HermesACPOpts{Class: "fake", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, ok := d.getCachedClassReadiness("fake"); !ok || st.Status != "ready" {
+		t.Fatalf("create should cache ready, got %+v ok=%v", st, ok)
+	}
+	_, _ = s.Prompt(json.RawMessage(`"crash now"`)) // CrashWindow = 1h: terminal
+	waitState(t, s, StateCrashed)
+	if st, ok := d.getCachedClassReadiness("fake"); ok {
+		t.Fatalf("crash exhaustion left a cached readiness entry: %+v", st)
+	}
 }

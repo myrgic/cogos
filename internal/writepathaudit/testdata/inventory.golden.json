@@ -3306,7 +3306,7 @@
     },
     {
       "file": "internal/engine/managed_session_hermes.go",
-      "line": 235,
+      "line": 261,
       "column": 9,
       "func": "(*hermesProcess).start",
       "subsystem": "internal:engine",
@@ -3316,7 +3316,7 @@
     },
     {
       "file": "internal/engine/managed_session_hermes.go",
-      "line": 1309,
+      "line": 1348,
       "column": 9,
       "func": "(*HermesACPDriver).runClassProbe",
       "subsystem": "internal:engine",

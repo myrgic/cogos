@@ -117,6 +117,14 @@ type HermesACPDriverConfig struct {
 	MaxRestarts    int           // default 3
 	RestartBackoff time.Duration // default 1s, doubled per restart
 
+	// ProbeCacheTTL is how long a class readiness result (probed or recorded
+	// from a successful create) is served before the class is probed again.
+	// Default 60s.
+	ProbeCacheTTL time.Duration
+
+	// now is a test seam for the readiness cache clock; nil = time.Now.
+	now func() time.Time
+
 	// afterRestartLoad is a test seam: called after each restart's
 	// session/load returns, before its state write.
 	afterRestartLoad func(*HermesACPSession)
@@ -157,6 +165,9 @@ func (c *HermesACPDriverConfig) defaults() {
 	if c.RestartBackoff <= 0 {
 		c.RestartBackoff = time.Second
 	}
+	if c.ProbeCacheTTL <= 0 {
+		c.ProbeCacheTTL = 60 * time.Second
+	}
 }
 
 // HermesACPDriver owns Hermes ACP processes and the sessions inside them.
@@ -187,6 +198,21 @@ type loadClaim struct {
 func NewHermesACPDriver(cfg HermesACPDriverConfig) *HermesACPDriver {
 	cfg.defaults()
 	return &HermesACPDriver{cfg: cfg, sessions: map[string]*HermesACPSession{}, loads: map[string]*loadClaim{}, classProbeCache: map[string]ManagedSessionClassStatus{}, classProbeInflight: map[string]chan struct{}{}}
+}
+
+// invalidateClassReadiness drops a class's cached readiness entry.
+func (d *HermesACPDriver) invalidateClassReadiness(name string) {
+	d.classProbeMu.Lock()
+	delete(d.classProbeCache, name)
+	d.classProbeMu.Unlock()
+}
+
+// clockNow is the readiness cache clock (time.Now unless a test seam is set).
+func (d *HermesACPDriver) clockNow() time.Time {
+	if d.cfg.now != nil {
+		return d.cfg.now()
+	}
+	return time.Now()
 }
 
 // ── process ─────────────────────────────────────────────────────────────────
@@ -315,6 +341,12 @@ func (p *hermesProcess) watch(cmd *exec.Cmd, conn *acprpc.Conn) {
 		exitErr = errors.New("agent process exited")
 	}
 	if lived < p.d.cfg.CrashWindow || restarts >= p.d.cfg.MaxRestarts {
+		// The class's agent is down for good: its cached readiness is stale.
+		// Drop it so the next read re-probes (before the Crashed state is
+		// visible, so a reader that sees Crashed never sees the old receipt).
+		if p.class != nil {
+			p.d.invalidateClassReadiness(p.class.Name)
+		}
 		for _, s := range sessions {
 			s.setState(StateCrashed, exitErr)
 		}
@@ -333,6 +365,9 @@ func (p *hermesProcess) watch(cmd *exec.Cmd, conn *acprpc.Conn) {
 	p.mu.Unlock()
 	conn, err := p.start(context.Background())
 	if err != nil {
+		if p.class != nil {
+			p.d.invalidateClassReadiness(p.class.Name)
+		}
 		for _, s := range sessions {
 			s.setState(StateCrashed, err)
 		}
@@ -1177,7 +1212,7 @@ func (d *HermesACPDriver) recordClassReadinessFromProcess(class *ResolvedRuntime
 	st := ManagedSessionClassStatus{
 		Class:             name,
 		Status:            "ready",
-		ProbedAt:          time.Now().UTC(),
+		ProbedAt:          d.clockNow().UTC(),
 		ProtocolVersion:   pv,
 		AgentCapabilities: caps,
 		Receipt:           class.Receipt(),
@@ -1195,7 +1230,7 @@ func (d *HermesACPDriver) markClassUnavailable(name string, err error) {
 	st := ManagedSessionClassStatus{
 		Class:    name,
 		Status:   "unavailable",
-		ProbedAt: time.Now().UTC(),
+		ProbedAt: d.clockNow().UTC(),
 		Reason:   reason,
 	}
 	d.classProbeMu.Lock()
@@ -1256,15 +1291,19 @@ func (d *HermesACPDriver) ReadinessReceipts(ctx context.Context) []ManagedSessio
 func (d *HermesACPDriver) probeClass(ctx context.Context, name string) ManagedSessionClassStatus {
 	d.classProbeMu.Lock()
 	if cached, ok := d.classProbeCache[name]; ok {
-		d.classProbeMu.Unlock()
-		return cached
+		if d.clockNow().Sub(cached.ProbedAt) < d.cfg.ProbeCacheTTL {
+			d.classProbeMu.Unlock()
+			return cached
+		}
+		// Expired: drop it and re-probe (an inflight probe is joined below).
+		delete(d.classProbeCache, name)
 	}
 	if ch, ok := d.classProbeInflight[name]; ok {
 		d.classProbeMu.Unlock()
 		select {
 		case <-ch:
 		case <-ctx.Done():
-			return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: time.Now().UTC(), Reason: ctx.Err().Error()}
+			return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: d.clockNow().UTC(), Reason: ctx.Err().Error()}
 		}
 		d.classProbeMu.Lock()
 		cached := d.classProbeCache[name]
@@ -1289,7 +1328,7 @@ func (d *HermesACPDriver) probeClass(ctx context.Context, name string) ManagedSe
 }
 
 func (d *HermesACPDriver) runClassProbe(ctx context.Context, name string) ManagedSessionClassStatus {
-	ts := time.Now().UTC()
+	ts := d.clockNow().UTC()
 	if d.cfg.Classes == nil || !d.cfg.Classes.Has(name) {
 		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: ts, Reason: "unknown runtime class"}
 	}
@@ -1342,16 +1381,16 @@ func (d *HermesACPDriver) runClassProbe(ctx context.Context, name string) Manage
 	_ = cmd.Wait()
 
 	if callErr != nil {
-		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: time.Now().UTC(), Reason: callErr.Error()}
+		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: d.clockNow().UTC(), Reason: callErr.Error()}
 	}
 	if res.ProtocolVersion != 1 {
-		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: time.Now().UTC(), Reason: fmt.Sprintf("unsupported protocol version %d", res.ProtocolVersion)}
+		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: d.clockNow().UTC(), Reason: fmt.Sprintf("unsupported protocol version %d", res.ProtocolVersion)}
 	}
 	caps := res.AgentCapabilities
 	st := ManagedSessionClassStatus{
 		Class:             name,
 		Status:            "ready",
-		ProbedAt:          time.Now().UTC(),
+		ProbedAt:          d.clockNow().UTC(),
 		ProtocolVersion:   res.ProtocolVersion,
 		AgentCapabilities: caps,
 		Receipt:           rc.Receipt(),
