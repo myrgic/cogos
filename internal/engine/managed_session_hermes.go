@@ -98,6 +98,12 @@ type HermesACPDriverConfig struct {
 	// request's. "" = no durable records: every cold resume reads as the
 	// legacy default class.
 	RecordDir string
+	// JournalDir is where this driver's session journals are written —
+	// <workspace>/.cog/run/sessions for the kernel's own workspace. Per driver,
+	// never a process global: two kernels in one process each keep their own
+	// (internal/testkernel boots two; ADR-101's isolation discipline). "" = the
+	// standalone fallback in DefaultSessionJournalDir.
+	JournalDir string
 	// RingSize bounds each session's replay buffer.
 	RingSize int
 	// PermissionTimeout is how long a permission request waits in the kernel
@@ -117,6 +123,11 @@ type HermesACPDriverConfig struct {
 	// afterCreateCall is a test seam: called in Create after the agent's
 	// session/new|load|fork returned, before the session is registered Live.
 	afterCreateCall func(*hermesProcess)
+	// afterRingCreate is a test seam: called the moment a loaded session's
+	// event ring exists, before the session/load call that may fail. It lets a
+	// test hold the ring of a load that never goes live (Create returns nil on
+	// error, so the ring cannot be read off the result).
+	afterRingCreate func(*EventRing)
 }
 
 func (c *HermesACPDriverConfig) defaults() {
@@ -891,6 +902,17 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 			return nil, fmt.Errorf("%w: a fork cannot change its parent's class", ErrManagedSessionForbidden)
 		}
 		opts.Class = parent.class
+		// A fork runs in the parent's process and inherits the parent's class,
+		// so no class policy is re-resolved here to check request-supplied
+		// servers against; and the fork's receipt is the parent's receipt,
+		// which records the servers the PARENT was started with. Refuse
+		// mcp_servers on the fork path outright rather than thread them into
+		// the session/fork RPC under a receipt that never mentions them (the
+		// pre-fix bypass: POST fork_of=<parent> + mcp_servers handed a forked
+		// session tools no audit trail records, on any parent class).
+		if len(opts.McpServers) > 0 {
+			return nil, fmt.Errorf("%w: mcp_servers come from the forked session's parent and may not be sent", ErrInvalidManagedSession)
+		}
 		receipt = parent.receipt
 		if opts.AllowClass != nil && !opts.AllowClass(opts.Class) {
 			return nil, fmt.Errorf("%w: caller may not fork this session", ErrManagedSessionForbidden)
@@ -901,9 +923,6 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 			return nil, fmt.Errorf("%w: caller may not create runtime class %q", ErrManagedSessionForbidden, opts.Class)
 		}
 		if opts.Class != "" {
-			if opts.Profile != "" || len(opts.McpServers) > 0 {
-				return nil, fmt.Errorf("%w: profile and mcp_servers come from runtime class %q and may not be sent", ErrInvalidManagedSession, opts.Class)
-			}
 			base := d.cfg.Env
 			if base == nil {
 				base = os.Environ()
@@ -912,9 +931,22 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 			if class, err = d.cfg.Classes.Resolve(opts.Class, base, opts.Cwd); err != nil {
 				return nil, err
 			}
+			// The class owns the profile. It accepts the request's
+			// mcp_servers only when its policy says "request"; every other
+			// policy (none, configured) keeps the old refusal, so this is
+			// the same message such a request got before.
+			if opts.Profile != "" || (len(opts.McpServers) > 0 && class.McpServers != RuntimeClassMcpRequest) {
+				return nil, fmt.Errorf("%w: profile and mcp_servers come from runtime class %q and may not be sent", ErrInvalidManagedSession, opts.Class)
+			}
 			opts.Profile, opts.Cwd = class.Profile, class.Cwd
 			receipt = class.Receipt()
-			mcp = []json.RawMessage{}
+			if class.McpServers == RuntimeClassMcpRequest {
+				// The class accepts the request's servers: they travel with
+				// the session/new call and are recorded on the receipt.
+				receipt.McpServers = mcp
+			} else {
+				mcp = []json.RawMessage{}
+			}
 		}
 		proc = d.newProcess(opts.Profile, opts.Cwd, class)
 		if _, err := proc.start(ctx); err != nil {
@@ -943,6 +975,15 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 	case opts.Load != "":
 		sid = opts.Load
 		sess.id, sess.ring = sid, NewEventRing(sid, d.cfg.RingSize)
+		// Both of these belong here, and the merge is the only place they meet: the test seam lets a test capture a
+		// ring that is created before the load can fail (so the close below is testable at all), and the journal is
+		// what 706 wires onto the same ring. The seam runs first, while the ring is still bare.
+		if hook := d.cfg.afterRingCreate; hook != nil {
+			hook(sess.ring)
+		}
+		if j := newSessionJournalForSession(sess, d.cfg.JournalDir); j != nil {
+			sess.ring.SetJournal(j)
+		}
 		proc.mu.Lock()
 		proc.sessions[sid] = sess
 		proc.mu.Unlock()
@@ -962,6 +1003,13 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		delete(proc.sessions, sid)
 		empty := len(proc.sessions) == 0
 		proc.mu.Unlock()
+		// The session is leaving proc.sessions without ever going live, so
+		// nothing else will ever end its ring: close it here, exactly once.
+		// Only the opts.Load branch has created a ring before the call; the
+		// other branches leave sess.ring nil until after this point.
+		if sess.ring != nil {
+			sess.ring.Close()
+		}
 		if parent == nil && empty {
 			proc.stop()
 		}
@@ -969,6 +1017,9 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 	}
 	if sess.ring == nil {
 		sess.id, sess.ring = sid, NewEventRing(sid, d.cfg.RingSize)
+		if j := newSessionJournalForSession(sess, d.cfg.JournalDir); j != nil {
+			sess.ring.SetJournal(j)
+		}
 		proc.mu.Lock()
 		proc.sessions[sid] = sess
 		proc.mu.Unlock()

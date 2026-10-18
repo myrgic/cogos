@@ -449,15 +449,15 @@ func requireDefaultStartGrace(t *testing.T, sup *stageUISupervisor) {
 // walkToStrikeLimit runs one check per interval from the start of pid's start
 // grace up to — but not including — the strike that decides a replacement, and
 // asserts that nothing in that window touches pid. wantRestarts is the restart
-// count the window opens with: a replacement inside the grace is exactly what
+// count the window opens with (wantAdopted: the pid was adopted, not started by this kernel, and stays so while unhealthy): a replacement inside the grace is exactly what
 // defect 1 was, so any change to a pid there fails the test.
-func walkToStrikeLimit(t *testing.T, sup *stageUISupervisor, advance func(time.Duration), child *stubChild, pid, wantRestarts int) {
+func walkToStrikeLimit(t *testing.T, sup *stageUISupervisor, advance func(time.Duration), child *stubChild, pid, wantRestarts int, wantAdopted bool) {
 	t.Helper()
 	n := int(sup.startGrace/sup.interval) + sup.unhealthyLimit - 1
 	for i := 0; i < n; i++ {
 		sup.check(t)
 		st := sup.status()
-		if st.Restarts != wantRestarts || st.PID != pid || st.Healthy || st.Adopted {
+		if st.Restarts != wantRestarts || st.PID != pid || st.Healthy || st.Adopted != wantAdopted {
 			t.Fatalf("check %d of the grace window: %+v (want pid %d, restarts %d)", i+1, st, pid, wantRestarts)
 		}
 		if !processAlive(pid) {
@@ -727,6 +727,56 @@ func TestStageUISupervisor_SlowBootingExternalUpstreamIsAdopted(t *testing.T) {
 	}
 }
 
+// An adopted upstream that goes unhealthy stays reported adopted, both inside
+// a start grace and while accumulating strikes (cog-review on #700, round 7).
+func TestStageUISupervisor_AdoptedStaysAdoptedWhenUnhealthy(t *testing.T) {
+	child := newStubChild(t, stubChildParams{})
+	cfg := child.supervisorConfig(t)
+	cmd := exec.Command(child.argv[0], child.argv[1:]...)
+	cmd.Dir = child.dir
+	cmd.Env = append(os.Environ(), child.envLines...)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn stub: %v", err)
+	}
+	go func() { _ = cmd.Wait() }()
+	pid := cmd.Process.Pid
+	if err := os.WriteFile(cfg.PidFile, []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("write pidfile: %v", err)
+	}
+	t.Cleanup(func() { killAndWait(t, pid) })
+	sup, _ := testSupervisor(t, cfg)
+	sup.healthURL = child.healthURL(t, pid)
+
+	sup.check(t) // adopt
+	if st := sup.status(); !st.Healthy || !st.Adopted || st.PID != pid {
+		t.Fatalf("status on adoption: %+v", st)
+	}
+
+	sup.healthURL = "http://127.0.0.1:1/healthz" // wedges: alive, no answer
+
+	// Inside a start grace: force the grace state for this same pid.
+	sup.mu.Lock()
+	sup.bootedPid = 0
+	sup.observedPid, sup.observedSince = pid, sup.now()
+	sup.mu.Unlock()
+	sup.check(t)
+	if st := sup.status(); st.Healthy || !st.Adopted {
+		t.Fatalf("inside start grace: want unhealthy and still adopted, got %+v", st)
+	}
+
+	// Accumulating strikes (no grace; first strike is below the limit).
+	sup.mu.Lock()
+	sup.startGrace = 0
+	sup.mu.Unlock()
+	sup.check(t)
+	if st := sup.status(); st.Healthy || !st.Adopted {
+		t.Fatalf("while striking: want unhealthy and still adopted, got %+v", st)
+	}
+	if !processAlive(pid) {
+		t.Fatalf("pid %d killed before the strike limit", pid)
+	}
+}
+
 func TestStageUISupervisor_UnhealthyIgnoringSigtermIsKilled(t *testing.T) {
 	child := newStubChild(t, stubChildParams{unhealthyFirst: true, ignoreSigterm: true})
 	sup, advance := testSupervisor(t, child.supervisorConfig(t))
@@ -831,7 +881,7 @@ func TestStageUISupervisor_NeverHealthyIsReplacedOnlyAfterTheGrace(t *testing.T)
 	// The whole grace, and the strikes that follow it up to the deciding one:
 	// nothing here replaces the child. Without a grace the third check (30 s)
 	// would already have killed it.
-	walkToStrikeLimit(t, sup, advance, child, pid1, 0)
+	walkToStrikeLimit(t, sup, advance, child, pid1, 0, false)
 
 	// The strike limit past the grace: the child goes, and the replacement has
 	// to wait out the first backoff step.
@@ -865,7 +915,7 @@ func TestStageUISupervisor_NeverHealthyIsReplacedOnlyAfterTheGrace(t *testing.T)
 
 	// The second replacement is spaced twice as far out: same walk, same strike
 	// limit, and 4 s — not 2 — before the next child may start.
-	walkToStrikeLimit(t, sup, advance, child, pid2, 1)
+	walkToStrikeLimit(t, sup, advance, child, pid2, 1, false)
 	sup.check(t)
 	waitDead(t, pid2)
 	st = sup.status()
@@ -915,7 +965,7 @@ func TestStageUISupervisor_ForeignPidfileProcessIsNeverSignalled(t *testing.T) {
 
 	// Its own grace, then the strikes up to the deciding one: the stub is alive
 	// and unsignalled throughout, and the pidfile still names it.
-	walkToStrikeLimit(t, sup, advance, child, stub, 0)
+	walkToStrikeLimit(t, sup, advance, child, stub, 0, true)
 
 	// The strike limit: the pidfile is stale, so the pidfile goes and a child of
 	// the supervisor's own takes its place — the stub is left alone.
@@ -1000,7 +1050,7 @@ func TestStageUISupervisor_HealthAnsweredByAnotherPidIsNeverVouched(t *testing.T
 
 	// The strikes, up to the deciding one: P is alive and unsignalled
 	// throughout, and the pidfile still names it.
-	walkToStrikeLimit(t, sup, advance, child, stub, 0)
+	walkToStrikeLimit(t, sup, advance, child, stub, 0, true)
 
 	// The strike limit: the pidfile is stale, so the pidfile goes and a child of
 	// the supervisor's own takes its place — P is left alone.
@@ -1067,7 +1117,7 @@ func TestStageUISupervisor_HealthWithoutPidIsAdoptedButNeverSignalled(t *testing
 	dead.Close()
 	sup.healthURL = deadURL
 
-	walkToStrikeLimit(t, sup, advance, child, stub, 0)
+	walkToStrikeLimit(t, sup, advance, child, stub, 0, true)
 
 	sup.check(t) // the strike limit: the pidfile is stale, the stub is not
 	if !processAlive(stub) {

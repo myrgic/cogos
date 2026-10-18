@@ -53,6 +53,10 @@ type EventRing struct {
 	seq    uint64                // seq of the newest event (0 = none yet)
 	subs   map[chan ManagedSessionEvent]struct{}
 	closed bool
+
+	// journal, when set, receives a bounded copy of every appended event so
+	// the kernel records the session where it drives it (session_journal.go).
+	journal *SessionJournal
 }
 
 // NewEventRing returns an empty ring holding at most size events.
@@ -96,7 +100,19 @@ func (r *EventRing) Append(kind string, data any) ManagedSessionEvent {
 			close(ch)
 		}
 	}
+	if r.journal != nil {
+		r.journal.Write(ev)
+	}
 	return ev
+}
+
+// SetJournal attaches an append-only journal that mirrors every event appended
+// to the ring (nil detaches). The write path is non-blocking and never
+// propagates an error into the driven turn.
+func (r *EventRing) SetJournal(j *SessionJournal) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.journal = j
 }
 
 // LastSeq returns the newest event's seq (0 if none).
@@ -187,5 +203,8 @@ func (r *EventRing) Close() {
 	for ch := range r.subs {
 		delete(r.subs, ch)
 		close(ch)
+	}
+	if r.journal != nil {
+		r.journal.Close()
 	}
 }

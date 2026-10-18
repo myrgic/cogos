@@ -1766,6 +1766,30 @@
       "raw": "shareLinksLedgerSession"
     },
     {
+      "file": "internal/engine/session_journal.go",
+      "line": 137,
+      "column": 12,
+      "primitive": "os.MkdirAll",
+      "func": "NewSessionJournal",
+      "pattern": "\u003ccall:DefaultSessionJournalDir\u003e",
+      "category": "unanchored",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "dir"
+    },
+    {
+      "file": "internal/engine/session_journal.go",
+      "line": 140,
+      "column": 12,
+      "primitive": "os.OpenFile",
+      "func": "NewSessionJournal",
+      "pattern": "\u003ccall:DefaultSessionJournalDir\u003e/\u003ccall:journalFileName\u003e.jsonl",
+      "category": "unanchored",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "filepath.Join(dir, journalFileName(sessionID)+\".jsonl\")"
+    },
+    {
       "file": "internal/engine/stage_ui_supervisor.go",
       "line": 548,
       "column": 13,
@@ -1791,7 +1815,7 @@
     },
     {
       "file": "internal/engine/stage_ui_supervisor.go",
-      "line": 972,
+      "line": 981,
       "column": 13,
       "primitive": "os.MkdirAll",
       "func": "writePidFile",
@@ -1803,7 +1827,7 @@
     },
     {
       "file": "internal/engine/stage_ui_supervisor.go",
-      "line": 976,
+      "line": 985,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "writePidFile",
@@ -3027,20 +3051,20 @@
     }
   ],
   "summary": {
-    "total": 252,
+    "total": 254,
     "cog": 107,
     "home": 2,
     "elsewhere": 13,
-    "unanchored": 89,
+    "unanchored": 91,
     "dynamic": 41,
     "by_primitive": {
       "engine.AppendEvent(bucket)": 9,
       "io.Copy": 7,
       "os.Create": 6,
       "os.CreateTemp": 9,
-      "os.MkdirAll": 80,
+      "os.MkdirAll": 81,
       "os.MkdirTemp": 2,
-      "os.OpenFile": 28,
+      "os.OpenFile": 29,
       "os.Rename": 35,
       "os.Symlink": 1,
       "os.WriteFile": 67,
@@ -3330,7 +3354,7 @@
     },
     {
       "file": "internal/engine/managed_session_hermes.go",
-      "line": 218,
+      "line": 229,
       "column": 9,
       "func": "(*hermesProcess).start",
       "subsystem": "internal:engine",

@@ -388,13 +388,13 @@ func (s *stageUISupervisor) runOnce(ctx context.Context) {
 		if s.inStartGrace(now, pid) {
 			// Boot is not a strike. Counting these is how an upstream that
 			// needs 40 s to answer health gets killed every 30 s forever.
-			s.setState(false, pid, prevPid != 0 && pid != prevPid)
+			s.setState(false, pid, s.isAdoptedPid(pid))
 			slog.Debug("stage-ui: supervisor upstream unhealthy inside its start grace",
 				"pid", pid, "grace", s.startGrace.String(), "health_url", s.healthURL)
 			return
 		}
 		strikes := s.noteUnhealthyCheck(pid)
-		s.setState(false, pid, prevPid != 0 && pid != prevPid)
+		s.setState(false, pid, s.isAdoptedPid(pid))
 		if strikes < s.unhealthyLimit {
 			s.warnUnhealthy(pid, strikes)
 			return
@@ -688,7 +688,7 @@ func (s *stageUISupervisor) noteHealthy(now time.Time, pid, prevPid int, wasAdop
 	// Adopted means "this kernel did not start it", whatever the checks before
 	// this one saw (cog-review on #700: a launchd upstream that booted slowly
 	// was recorded as s.pid while unhealthy and then reported adopted=false).
-	adopted := pid != s.startedPid
+	adopted := pid != s.startedPid // same test as isAdoptedPid (lock already held)
 	s.healthy = true
 	s.pid = pid
 	s.adopted = adopted
@@ -894,6 +894,15 @@ func (s *stageUISupervisor) backoffWindow() (time.Duration, time.Time) {
 }
 
 // setState records the last check's verdict.
+// isAdoptedPid reports whether pid is an upstream this kernel did not start.
+// It is the one derivation of "adopted", shared by the healthy and unhealthy
+// paths so an adopted upstream does not flip to adopted=false when it wedges.
+func (s *stageUISupervisor) isAdoptedPid(pid int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return pid != s.startedPid
+}
+
 func (s *stageUISupervisor) setState(healthy bool, pid int, adopted bool) {
 	s.mu.Lock()
 	s.healthy, s.pid, s.adopted = healthy, pid, adopted
