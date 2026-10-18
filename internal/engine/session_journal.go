@@ -20,7 +20,7 @@
 // ACP session id is the natural key and the file is append-only. Override the
 // directory with COGOS_SESSION_JOURNAL_DIR.
 //
-// Line shape (bounded, secret-free):
+// Line shape (bounded, redacted to exactly the GUARANTEE below):
 //
 //	{"ts":"<RFC3339Nano>","session":"<id>","room":"<room, blank when unbound>",
 //	 "actor":"<who the event belongs to>","kind":"turn|message|tool|permission|plan|state|end|gap",
@@ -32,9 +32,20 @@
 // follows events dropped by a full queue carries a "gap" count, the way the
 // event ring reports its own eviction gap, so the incompleteness is visible.
 //
+// GUARANTEE — one sentence: Every string that reaches a journal line passes
+// through the single helper journalScrubText, which redacts secret-ish key
+// assignments in plain (api_key=sk-...) and JSON-escaped (\"api_key\":\"sk-...\")
+// form and decodes a string that is itself JSON up to depth 3 and redacts it by
+// key, so a secret is caught only when a secret-ish key name (journalSecretKey:
+// token, secret, password, pwd, passwd, authorization, auth, bearer, api_key,
+// apikey, credential, private_key, sessionkey, access_key, client_secret)
+// carries it — KNOWN LIMIT: a bare high-entropy string with no secret-ish key
+// name is NOT redacted, so no line is claimed secret-free without that bound.
+//
 // SAFETY: the write path is non-blocking (a bounded queue drained by one
 // goroutine) and failure-tolerant — a write error is logged and the session
-// continues. Long text is truncated; values under secret-ish keys are redacted.
+// continues. Long text is truncated; secret-ish key assignments and values are
+// redacted under the GUARANTEE above.
 package engine
 
 import (
@@ -51,6 +62,12 @@ import (
 const (
 	sessionJournalMaxText = 2000
 	sessionJournalQueue   = 1024
+
+	// journalTextScanDepth bounds how many times a string that is itself JSON
+	// is decoded and re-walked by the value walk before the text net is
+	// applied, so a double-encoded secret is redacted as JSON without
+	// unbounded work.
+	journalTextScanDepth = 3
 
 	// SessionJournalDirEnv overrides the default journal directory.
 	SessionJournalDirEnv = "COGOS_SESSION_JOURNAL_DIR"
@@ -264,6 +281,13 @@ func (j *SessionJournal) writeGap(dropped int) {
 }
 
 func (j *SessionJournal) writeRecord(rec map[string]any) {
+	// The single choke point of the package-doc GUARANTEE: every string that
+	// reaches a line — ts/session/room/actor included — passes through
+	// journalScrubValue → journalScrubText here, so a caller cannot add a
+	// field that reaches disk unscrubbed.
+	if scrubbed, ok := journalScrubValue(rec, 0).(map[string]any); ok {
+		rec = scrubbed
+	}
 	b, err := json.Marshal(rec)
 	if err != nil {
 		log.Printf("session journal: marshal failed (session continues): %v", err)
@@ -311,7 +335,9 @@ func newSessionJournalForSession(sess *HermesACPSession) *SessionJournal {
 //	gap        synthetic: N prior events were dropped by a full queue
 //
 // journalKindPayload maps a relayed ring event onto the bounded observatory
-// kind vocabulary and a bounded, secret-free payload.
+// kind vocabulary and a bounded payload redacted under the package-doc
+// GUARANTEE (key-name-driven: a bare high-entropy value under no secret-ish key
+// name is the documented limit, not scrubbed).
 func journalKindPayload(ev ManagedSessionEvent) (string, any) {
 	switch ev.Kind {
 	case MSEventTurnStart:
@@ -446,7 +472,53 @@ func journalFirstNonEmpty(vals ...string) string {
 	return ""
 }
 
-func journalTruncateText(s string) string {
+// journalTruncateText is the single entry point every text field routes
+// through: it redacts secret-ish assignments, decodes a string that is itself
+// JSON (bounded), and only then truncates — redaction before the bound, so a
+// redaction is never cut in half and a value cannot be truncated into
+// visibility. writeRecord scrubs the whole assembled record with
+// journalScrubValue for the same reason: a field added later cannot reach a
+// line by forgetting to scrub.
+func journalTruncateText(s string) string { return journalScrubText(s) }
+
+// journalScrubText is the ONE scrub helper (journalScrubTextDepth at depth 0).
+func journalScrubText(s string) string { return journalScrubTextDepth(s, 0) }
+
+func journalScrubTextDepth(s string, depth int) string {
+	if s == "" {
+		return s
+	}
+	if depth < journalTextScanDepth {
+		if v, ok := journalDecodeTextValue(s); ok {
+			if b, err := json.Marshal(journalScrubValue(v, depth+1)); err == nil {
+				s = string(b)
+			}
+		}
+	}
+	return journalTruncateRunes(journalRedactAssignments(s))
+}
+
+// journalDecodeTextValue reports whether s is itself a JSON object or array —
+// a double-encoded payload, the shape tool rawInput/rawOutput usually takes —
+// and returns the decoded value, so such a payload is redacted by the key walk
+// instead of being guessed at by the text net against escaped bytes.
+func journalDecodeTextValue(s string) (any, bool) {
+	t := strings.TrimSpace(s)
+	if len(t) < 2 || (t[0] != '{' && t[0] != '[') {
+		return nil, false
+	}
+	var v any
+	if err := json.Unmarshal([]byte(t), &v); err != nil {
+		return nil, false
+	}
+	switch v.(type) {
+	case map[string]any, []any:
+		return v, true
+	}
+	return nil, false
+}
+
+func journalTruncateRunes(s string) string {
 	r := []rune(s)
 	if len(r) <= sessionJournalMaxText {
 		return s
@@ -454,8 +526,53 @@ func journalTruncateText(s string) string {
 	return string(r[:sessionJournalMaxText]) + "…"
 }
 
-// journalBoundAny marshals v, truncates it to the text bound, redacts
-// secret-ish keys, and returns a JSON-safe value.
+// journalSecretKey reports whether a key name is secret-ish. Detection is
+// key-name-driven and this list is the whole net: the names the earlier cuts
+// missed (credential, private_key, auth, bearer, pwd, sessionkey) are in it,
+// plus passphrase and cookie, and substring matching is loose on purpose —
+// over-redaction is safe, an unredacted secret is not.
+//
+// The name is canonicalised by journalSecretName first, because one credential
+// is spelled with '-' in a header and '_' in a config. Lower-casing alone
+// matched api_key but not api-key, so x-api-key, api-key, private-key and
+// session-key all walked past the net — the miss this round's adversarial test
+// pins.
+func journalSecretKey(name string) bool {
+	n := journalSecretName(name)
+	for _, frag := range []string{
+		"token", "secret", "password", "passphrase", "pwd", "passwd",
+		"authorization", "auth", "bearer", "apikey", "credential",
+		"privatekey", "sessionkey", "accesskey", "clientsecret", "cookie",
+	} {
+		if strings.Contains(n, frag) {
+			return true
+		}
+	}
+	return false
+}
+
+// journalSecretName canonicalises a key name for matching: lowercase, with the
+// separators a name is spelled with (-, _, ., /, :, space) dropped, so
+// x-api-key, x_api_key and X-API-KEY all reduce to xapikey and reach the same
+// fragment. Dropping a separator can only widen the net, and over-redaction is
+// the safe direction.
+func journalSecretName(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range strings.ToLower(name) {
+		switch r {
+		case '-', '_', '.', '/', ':', ' ':
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// journalBoundAny marshals v, bounds it to the text bound, redacts secret-ish
+// keys, and returns a JSON-safe value. The bounded path is scrubbed like the
+// whole path: a cut that lands mid-JSON still yields a string the text net
+// inspects, so bounding never becomes a way past the net.
 func journalBoundAny(v any) any {
 	if v == nil {
 		return nil
@@ -468,39 +585,181 @@ func journalBoundAny(v any) any {
 		trimmed := string(b[:sessionJournalMaxText])
 		var out any
 		if err := json.Unmarshal([]byte(trimmed), &out); err != nil {
-			return trimmed + "…"
+			return journalTruncateText(trimmed) + "…"
 		}
-		return journalScrubSecrets(out)
+		return journalScrubValue(out, 0)
 	}
 	var out any
 	if err := json.Unmarshal(b, &out); err != nil {
-		return string(b)
+		return journalTruncateText(string(b))
 	}
-	return journalScrubSecrets(out)
+	return journalScrubValue(out, 0)
 }
 
-func journalScrubSecrets(v any) any {
+// journalScrubValue redacts by key name at any depth and applies the text net
+// to every string leaf — including a leaf that is itself JSON, which is decoded
+// (bounded by journalTextScanDepth) and redacted as JSON. writeRecord runs it
+// over the WHOLE assembled record, so the choke point is the record, not each
+// caller's memory to scrub.
+func journalScrubValue(v any, depth int) any {
 	switch t := v.(type) {
 	case map[string]any:
 		for k, val := range t {
-			lk := strings.ToLower(k)
-			if strings.Contains(lk, "token") || strings.Contains(lk, "secret") ||
-				strings.Contains(lk, "password") || strings.Contains(lk, "authorization") ||
-				strings.Contains(lk, "api_key") || strings.Contains(lk, "apikey") {
+			if journalSecretKey(k) {
 				t[k] = "[redacted]"
 				continue
 			}
-			t[k] = journalScrubSecrets(val)
+			t[k] = journalScrubValue(val, depth)
 		}
 		return t
 	case []any:
 		for i := range t {
-			t[i] = journalScrubSecrets(t[i])
+			t[i] = journalScrubValue(t[i], depth)
 		}
 		return t
+	case string:
+		return journalScrubTextDepth(t, depth)
 	default:
 		return v
 	}
+}
+
+// journalRedaction is the marker the net substitutes for a value. It doubles as
+// the guard against cutting an already-redacted value a second time: the net
+// runs once when the payload is built and again at the record choke point, and
+// re-cutting the marker left a stray bracket behind.
+const journalRedaction = "[redacted]"
+
+// journalRedactAssignments is the text net: a secret-ish key name followed by
+// '=' or ':' has its value replaced with journalRedaction. It covers the plain
+// form (API_KEY=sk-live-...), the quoted form ("api_key":"sk-..."), the
+// JSON-escaped form (\"api_key\":\"sk-...\") at any escape depth, and the
+// truncated \"api_key\":\"sk-live shape with no closing quote. The value runs to
+// its closing quote when quoted and to the end of the line when not, so a
+// multi-token value (Authorization: Bearer sk-..., a passphrase with spaces) is
+// redacted whole instead of being cut at its first whitespace. It cannot see a
+// bare high-entropy value under no secret-ish key name — one of the documented
+// limits of the guarantee in the package doc.
+func journalRedactAssignments(s string) string {
+	if s == "" {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	last := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] != '=' && s[i] != ':' {
+			continue
+		}
+		keyStart, ok := journalKeyBefore(s, i)
+		if !ok || !journalSecretKey(s[keyStart:i]) {
+			continue
+		}
+		valStart, quoted := journalValueStart(s, i+1)
+		if strings.HasPrefix(s[valStart:], journalRedaction) {
+			continue
+		}
+		valEnd := journalValueEnd(s, valStart, quoted)
+		if valEnd <= valStart {
+			continue
+		}
+		b.WriteString(s[last:valStart])
+		b.WriteString(journalRedaction)
+		last = valEnd
+		i = valEnd - 1
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// journalKeyBefore reads the key name that ends just before the separator at
+// sep, stepping over an optional closing quote — a plain " or an escaped \" at
+// ANY escape depth, so the key in a doubly-encoded \"api_key\" is still read as
+// api_key. A single-level step walked out from under the second layer of
+// escaping and let the secret through.
+func journalKeyBefore(s string, sep int) (int, bool) {
+	j := sep
+	for j > 0 && (s[j-1] == ' ' || s[j-1] == '\t') {
+		j--
+	}
+	if j > 0 && s[j-1] == '"' {
+		j--
+		for j > 0 && s[j-1] == '\\' {
+			j--
+		}
+	}
+	end := j
+	for j > 0 && journalNameByte(s[j-1]) {
+		j--
+	}
+	if j == end {
+		return 0, false
+	}
+	return j, true
+}
+
+func journalNameByte(c byte) bool {
+	return c == '_' || c == '-' || c == '.' ||
+		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// journalValueStart skips whitespace and reports where the value starts and
+// whether it is quoted — an opening " or an escaped \" at any escape depth. A
+// quoted value is then redacted through its closing quote, so a value with
+// internal whitespace (Bearer eyJ..., a passphrase) is covered whole.
+func journalValueStart(s string, i int) (int, bool) {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	if i < len(s) && s[i] == '"' {
+		return i + 1, true
+	}
+	if i < len(s) && s[i] == '\\' {
+		j := i
+		for j < len(s) && s[j] == '\\' {
+			j++
+		}
+		if j < len(s) && s[j] == '"' {
+			return j + 1, true
+		}
+	}
+	return i, false
+}
+
+// journalValueEnd ends the value. Quoted: at its closing quote (plain " or an
+// escaped \" at any escape depth) or at the end of the string, the latter being
+// the truncated \"key\":\"val shape with no close. Unquoted: at the first hard
+// delimiter — whitespace, a line break, a comma, a closing brace/bracket or a
+// semicolon — so a multi-token value is redacted whole rather than cut at its
+// first word.
+func journalValueEnd(s string, i int, quoted bool) int {
+	for i < len(s) {
+		c := s[i]
+		if quoted {
+			if c == '"' {
+				return i
+			}
+			if c == '\\' {
+				j := i
+				for j < len(s) && s[j] == '\\' {
+					j++
+				}
+				if j < len(s) && s[j] == '"' {
+					return i
+				}
+				i = j
+				continue
+			}
+			i++
+			continue
+		}
+		switch c {
+		case '\n', '\r', ',', '}', ']', ';', '"':
+			return i
+		}
+		i++
+	}
+	return i
 }
 
 func journalContentText(u map[string]any) string {
