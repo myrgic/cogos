@@ -150,6 +150,9 @@ func (a *agent) HandleRequest(method string, params json.RawMessage) (any, error
 		}
 		return map[string]any{"sessionId": a.newID("fork")}, nil
 	case "session/load":
+		if strings.HasPrefix(p.SessionID, FailLoadPrefix) {
+			return nil, &acprpc.Error{Code: -32001, Message: "acpfake: refusing to load " + p.SessionID}
+		}
 		a.update(p.SessionID, chunk("replayed history for "+p.SessionID))
 		return map[string]any{}, nil
 	case "session/set_mode":
