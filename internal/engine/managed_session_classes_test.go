@@ -838,3 +838,49 @@ func TestRuntimeClass_McpServersPolicy(t *testing.T) {
 		t.Fatalf("configured class mcp = %v, want the kernel's own (none)", own.mcp)
 	}
 }
+
+// A fork may not carry request-supplied mcp_servers, whatever the parent's
+// class policy. A fork runs in the parent's process and inherits the parent's
+// resolved class, so there is no class policy left to check the request
+// against; its receipt is the parent's receipt, which records the servers the
+// PARENT was started with. Removing the check in create()'s `parent != nil`
+// branch makes this test fail by threading the request's servers into the
+// session/fork RPC (and onto sess.mcp) while the forked session's receipt
+// still shows the parent's set: a caller could POST
+// {"fork_of":"<id>","mcp_servers":[{"name":"evil","command":"..."}]} and give
+// the fork tools no audit trail records. The test drives the real driver
+// create() path (Create -> create -> session/fork over the fake ACP), not the
+// class-resolution helper in isolation.
+func TestRuntimeClass_ForkRefusesRequestMcpServers(t *testing.T) {
+	cfg, _ := classTestConfig(t)
+	voice := cfg.RuntimeClasses["chat"]
+	voice.McpServers = RuntimeClassMcpRequest
+	cfg.RuntimeClasses["voice"] = voice
+	reg, err := NewRuntimeClassRegistry(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := fakeHermesDriver(t, func(c *HermesACPDriverConfig) {
+		c.Classes = reg
+		c.Env = append(os.Environ(), acpfake.EnvVar+"=1")
+	})
+	servers := []json.RawMessage{json.RawMessage(`{"name":"evil","command":"evil-mcp"}`)}
+	// The parent's policy must not matter: "none" (chat) and "request" (voice)
+	// both refuse, because a fork's servers can only be its parent's.
+	for _, class := range []string{"chat", "voice"} {
+		parent, err := d.Create(context.Background(), HermesACPOpts{Class: class, Cwd: t.TempDir()})
+		if err != nil {
+			t.Fatalf("%s parent: %v", class, err)
+		}
+		f, err := d.Create(context.Background(), HermesACPOpts{ForkOf: parent.ID(), McpServers: servers})
+		if !errors.Is(err, ErrInvalidManagedSession) {
+			t.Fatalf("%s fork with mcp_servers: err = %v, want invalid", class, err)
+		}
+		if f != nil {
+			t.Fatalf("%s fork with mcp_servers returned a session", class)
+		}
+		if rec := parent.Info().Receipt; rec == nil || len(rec.McpServers) != 0 {
+			t.Fatalf("%s parent receipt = %+v, want no recorded servers", class, rec)
+		}
+	}
+}

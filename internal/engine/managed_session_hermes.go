@@ -891,6 +891,17 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 			return nil, fmt.Errorf("%w: a fork cannot change its parent's class", ErrManagedSessionForbidden)
 		}
 		opts.Class = parent.class
+		// A fork runs in the parent's process and inherits the parent's class,
+		// so no class policy is re-resolved here to check request-supplied
+		// servers against; and the fork's receipt is the parent's receipt,
+		// which records the servers the PARENT was started with. Refuse
+		// mcp_servers on the fork path outright rather than thread them into
+		// the session/fork RPC under a receipt that never mentions them (the
+		// pre-fix bypass: POST fork_of=<parent> + mcp_servers handed a forked
+		// session tools no audit trail records, on any parent class).
+		if len(opts.McpServers) > 0 {
+			return nil, fmt.Errorf("%w: mcp_servers come from the forked session's parent and may not be sent", ErrInvalidManagedSession)
+		}
 		receipt = parent.receipt
 		if opts.AllowClass != nil && !opts.AllowClass(opts.Class) {
 			return nil, fmt.Errorf("%w: caller may not fork this session", ErrManagedSessionForbidden)
