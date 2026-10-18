@@ -1767,7 +1767,7 @@
     },
     {
       "file": "internal/engine/session_journal.go",
-      "line": 124,
+      "line": 151,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "NewSessionJournal",
@@ -1779,7 +1779,7 @@
     },
     {
       "file": "internal/engine/session_journal.go",
-      "line": 127,
+      "line": 154,
       "column": 12,
       "primitive": "os.OpenFile",
       "func": "NewSessionJournal",

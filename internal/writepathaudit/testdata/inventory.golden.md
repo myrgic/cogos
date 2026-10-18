@@ -206,8 +206,8 @@ These sites structurally resolved (the shape of the path is known) but the ROOT 
 | `{path}` | (*rotatingWriter).Write (`os.OpenFile`) | internal/engine/rotating_writer.go:89 | internal:engine |
 | `{path}.1` | (*rotatingWriter).rotateLocked (`os.Rename`) | internal/engine/rotating_writer.go:137 | internal:engine |
 | `{path}` | (*rotatingWriter).rotateLocked (`os.OpenFile`) | internal/engine/rotating_writer.go:141 | internal:engine |
-| `<call:DefaultSessionJournalDir>` | NewSessionJournal (`os.MkdirAll`) | internal/engine/session_journal.go:124 | internal:engine |
-| `<call:DefaultSessionJournalDir>/<call:journalFileName>.jsonl` | NewSessionJournal (`os.OpenFile`) | internal/engine/session_journal.go:127 | internal:engine |
+| `<call:DefaultSessionJournalDir>` | NewSessionJournal (`os.MkdirAll`) | internal/engine/session_journal.go:151 | internal:engine |
+| `<call:DefaultSessionJournalDir>/<call:journalFileName>.jsonl` | NewSessionJournal (`os.OpenFile`) | internal/engine/session_journal.go:154 | internal:engine |
 | `<call:turnSidecarPath>.tmp` | PatchTurnSpeculative (`os.Create`) | internal/engine/turn_storage.go:250 | internal:engine |
 | `<call:turnSidecarPath>` | PatchTurnSpeculative (`os.Rename`) | internal/engine/turn_storage.go:263 | internal:engine |
 | `dirname(<call:turnSidecarPath>)` | appendTurnSidecar (`os.MkdirAll`) | internal/engine/turn_storage.go:352 | internal:engine |
