@@ -250,42 +250,40 @@ func nonEmptyLines(s string) []string {
 	return out
 }
 
-// TestSessionJournal_DefaultDirRootedAtWorkspace drives the real resolution
-// (ConfigureSessionJournal → DefaultSessionJournalDir, the pair the kernel
-// boots with) and asserts the journal lands in the workspace's own
-// .cog/run/sessions, never under $HOME.
-func TestSessionJournal_DefaultDirRootedAtWorkspace(t *testing.T) {
+// TestSessionJournal_TwoDriversDoNotShareAJournalDirectory is the ADR-101
+// isolation requirement for this feature (cog-review on head 08d6f77): the
+// journal root is per DRIVER, not a process global, so two kernels booted in
+// one process — which internal/testkernel does — each keep their own
+// workspace's directory and neither can reroute the other's records. The
+// previous version of this test drove ConfigureSessionJournal/sessionJournalRoot,
+// the global that let the second boot overwrite the first.
+func TestSessionJournal_TwoDriversDoNotShareAJournalDirectory(t *testing.T) {
 	t.Setenv(SessionJournalDirEnv, "")
 	home := t.TempDir()
-	t.Setenv("HOME", home) // $HOME must not win over a known workspace root
-	root := t.TempDir()
+	t.Setenv("HOME", home) // $HOME must never win once a driver names its own workspace
+	rootA, rootB := t.TempDir(), t.TempDir()
+	wantA := filepath.Join(rootA, ".cog", "run", "sessions")
+	wantB := filepath.Join(rootB, ".cog", "run", "sessions")
 
-	prev := sessionJournalRoot
-	sessionJournalRoot = ""
-	defer func() { sessionJournalRoot = prev }()
+	ja := newSessionJournalForSession(&HermesACPSession{id: "sess-a"}, wantA)
+	jb := newSessionJournalForSession(&HermesACPSession{id: "sess-b"}, wantB)
+	if ja == nil || jb == nil {
+		t.Fatalf("newSessionJournalForSession returned nil (a=%v b=%v)", ja, jb)
+	}
+	defer ja.Close()
+	defer jb.Close()
 
-	want := filepath.Join(root, ".cog", "run", "sessions")
-	if got := ConfigureSessionJournal(root); got != want {
-		t.Fatalf("ConfigureSessionJournal(%q) = %q, want the workspace's own .cog/run/sessions", root, got)
+	if !strings.HasPrefix(ja.Path(), wantA+string(os.PathSeparator)) {
+		t.Fatalf("driver A journal = %q, want it under %q", ja.Path(), wantA)
 	}
-	if got := DefaultSessionJournalDir(); got != want {
-		t.Fatalf("DefaultSessionJournalDir() = %q, want %q", got, want)
+	if !strings.HasPrefix(jb.Path(), wantB+string(os.PathSeparator)) {
+		t.Fatalf("driver B journal = %q, want it under %q", jb.Path(), wantB)
 	}
-	if got := DefaultSessionJournalDir(); strings.HasPrefix(got, home) {
-		t.Fatalf("journal dir resolved under $HOME (%s): %s", home, got)
+	if strings.HasPrefix(ja.Path(), wantB) || strings.HasPrefix(jb.Path(), wantA) {
+		t.Fatalf("cross-contamination between two drivers in one process: %q / %q", ja.Path(), jb.Path())
 	}
-
-	// The kernel's own constructor resolves through the same function.
-	j := newSessionJournalForSession(&HermesACPSession{id: "sess-rooted"})
-	if j == nil {
-		t.Fatalf("newSessionJournalForSession returned nil for dir %q", want)
-	}
-	defer j.Close()
-	if !strings.HasPrefix(j.Path(), want+string(os.PathSeparator)) {
-		t.Fatalf("journal path = %q, want it under %q", j.Path(), want)
-	}
-	if strings.HasPrefix(j.Path(), home) {
-		t.Fatalf("journal path resolved under $HOME: %s", j.Path())
+	if strings.HasPrefix(ja.Path(), home) || strings.HasPrefix(jb.Path(), home) {
+		t.Fatalf("a driver's journal resolved under $HOME: %q / %q", ja.Path(), jb.Path())
 	}
 }
 

@@ -234,11 +234,6 @@ func (k *Kernel) Stop() error {
 // RegisterProviders / SetProvidersWorkspace are expected to have been called
 // (or intentionally left nil) by the caller before Boot.
 func Boot(ctx context.Context, cfg *Config, opts ...BootOption) (*Kernel, error) {
-	// Root the session journal at this workspace's own .cog/run/sessions, the
-	// same root the turn ledger uses, so journals are not shared machine-wide.
-	if cfg != nil {
-		ConfigureSessionJournal(cfg.WorkspaceRoot)
-	}
 	bootCfg := applyBootOptions(opts)
 
 	// L5-HTTP-AUTHZ: warn loudly (never block) if the HTTP surface is about

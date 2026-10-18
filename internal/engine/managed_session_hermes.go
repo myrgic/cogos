@@ -98,6 +98,12 @@ type HermesACPDriverConfig struct {
 	// request's. "" = no durable records: every cold resume reads as the
 	// legacy default class.
 	RecordDir string
+	// JournalDir is where this driver's session journals are written —
+	// <workspace>/.cog/run/sessions for the kernel's own workspace. Per driver,
+	// never a process global: two kernels in one process each keep their own
+	// (internal/testkernel boots two; ADR-101's isolation discipline). "" = the
+	// standalone fallback in DefaultSessionJournalDir.
+	JournalDir string
 	// RingSize bounds each session's replay buffer.
 	RingSize int
 	// PermissionTimeout is how long a permission request waits in the kernel
@@ -943,7 +949,7 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 	case opts.Load != "":
 		sid = opts.Load
 		sess.id, sess.ring = sid, NewEventRing(sid, d.cfg.RingSize)
-		if j := newSessionJournalForSession(sess); j != nil {
+		if j := newSessionJournalForSession(sess, d.cfg.JournalDir); j != nil {
 			sess.ring.SetJournal(j)
 		}
 		proc.mu.Lock()
@@ -972,7 +978,7 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 	}
 	if sess.ring == nil {
 		sess.id, sess.ring = sid, NewEventRing(sid, d.cfg.RingSize)
-		if j := newSessionJournalForSession(sess); j != nil {
+		if j := newSessionJournalForSession(sess, d.cfg.JournalDir); j != nil {
 			sess.ring.SetJournal(j)
 		}
 		proc.mu.Lock()

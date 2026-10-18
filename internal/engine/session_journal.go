@@ -104,37 +104,23 @@ type SessionJournal struct {
 	dropped int
 }
 
-// sessionJournalRoot is the workspace root the default journal directory is
-// rooted at. Set at boot/serve by ConfigureSessionJournal, before any session
-// is driven.
-var sessionJournalRoot string
-
-// ConfigureSessionJournal roots the default session-journal directory at the
-// workspace root and returns the resolved directory. It is hooked from Boot
-// (internal/engine/boot.go, Kernel startup) with cfg.WorkspaceRoot, so a
-// kernel that knows its workspace writes <workspace>/.cog/run/sessions — the
-// same root the turn ledger uses (turnSidecarPath) and the root the
-// observatory's cog://workspace/.cog/run/sessions/ ingest source resolves
-// against. COGOS_SESSION_JOURNAL_DIR still overrides everything.
-func ConfigureSessionJournal(workspaceRoot string) string {
-	if workspaceRoot != "" {
-		sessionJournalRoot = workspaceRoot
-	}
-	return DefaultSessionJournalDir()
-}
-
-// DefaultSessionJournalDir returns the directory the journal appends to:
-// COGOS_SESSION_JOURNAL_DIR when set, else <workspace>/.cog/run/sessions once
-// a workspace root is known (ConfigureSessionJournal), else — only when no
-// root is known at all, e.g. the standalone helpers that never boot a kernel —
-// <home>/.cog/run/sessions. $HOME is a last resort, never the fallback when a
-// workspace root is available. Empty means "no journal".
+// DefaultSessionJournalDir returns the directory a journal appends to when the
+// caller names none: COGOS_SESSION_JOURNAL_DIR when set, else <home>/.cog/run/
+// sessions (empty means "no journal").
+//
+// It is deliberately NOT the workspace root. Rooting that here would need a
+// process-wide variable, and there can be more than one kernel in a process —
+// internal/testkernel boots two — so the second Boot would silently reroute the
+// first workspace's journals into its own directory (or race on the read). The
+// workspace root is therefore threaded PER DRIVER, the way the sibling
+// HermesACPDriverConfig.RecordDir already is: serve.go builds
+// <workspace>/.cog/run/sessions into HermesACPDriverConfig.JournalDir, and
+// newSessionJournalForSession reads it from the driver. This function is the
+// standalone fallback for helpers that never boot a kernel. (ADR-101's
+// isolated-registry discipline; cog-review on head 08d6f77.)
 func DefaultSessionJournalDir() string {
 	if d := os.Getenv(SessionJournalDirEnv); d != "" {
 		return d
-	}
-	if r := sessionJournalRoot; r != "" {
-		return filepath.Join(r, ".cog", "run", "sessions")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -314,12 +300,17 @@ func (j *SessionJournal) writeRecord(rec map[string]any) {
 }
 
 // newSessionJournalForSession builds a journal for a driven session, or nil
-// when journalling is unavailable (logged, never fatal).
-func newSessionJournalForSession(sess *HermesACPSession) *SessionJournal {
+// when journalling is unavailable (logged, never fatal). `dir` is the driver's
+// own journal directory (HermesACPDriverConfig.JournalDir — the workspace root
+// of THIS driver, never a process global); empty falls back to
+// DefaultSessionJournalDir() for callers that never boot a kernel.
+func newSessionJournalForSession(sess *HermesACPSession, dir string) *SessionJournal {
 	if sess == nil {
 		return nil
 	}
-	dir := DefaultSessionJournalDir()
+	if dir == "" {
+		dir = DefaultSessionJournalDir()
+	}
 	if dir == "" {
 		return nil
 	}
