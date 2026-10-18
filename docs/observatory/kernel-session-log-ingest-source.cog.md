@@ -43,7 +43,8 @@ Record shape (one line per relayed event):
 ```json
 {"ts":"<RFC3339Nano>","session":"<acp session id>","room":"<room, when bound>",
  "actor":"<who the event belongs to>","kind":"turn|message|tool|permission|plan|state|end",
- "payload":{...bounded, secret-free...}}
+ "payload":{...bounded; secret-ish assignments redacted — see the journal's GUARANTEE
+  and its named limits; not blanket "secret-free"...}}
 ```
 
 Kinds: `turn` a turn started · `message` a user/agent/thought text chunk ·

@@ -32,15 +32,24 @@
 // follows events dropped by a full queue carries a "gap" count, the way the
 // event ring reports its own eviction gap, so the incompleteness is visible.
 //
-// GUARANTEE — one sentence: Every string that reaches a journal line passes
-// through the single helper journalScrubText, which redacts secret-ish key
-// assignments in plain (api_key=sk-...) and JSON-escaped (\"api_key\":\"sk-...\")
-// form and decodes a string that is itself JSON up to depth 3 and redacts it by
-// key, so a secret is caught only when a secret-ish key name (journalSecretKey:
-// token, secret, password, pwd, passwd, authorization, auth, bearer, api_key,
-// apikey, credential, private_key, sessionkey, access_key, client_secret)
-// carries it — KNOWN LIMIT: a bare high-entropy string with no secret-ish key
-// name is NOT redacted, so no line is claimed secret-free without that bound.
+// GUARANTEE — one sentence: every string that reaches a journal line is scrubbed
+// before it is written, at the record choke point (writeRecord → journalScrubValue
+// → journalScrubTextDepth) and again for text fields (journalTruncateText →
+// journalScrubText), so a caller cannot add a field that reaches disk unscrubbed.
+//
+// What the scrub does: it redacts the value of any assignment whose key name is
+// secret-ish (journalSecretKey — the list and its canonicalisation live there),
+// in plain (api_key=sk-...), JSON-escaped at any escape depth (\"api_key\":\"sk-...),
+// and truncated (\"key\":\"val) form; a text leaf whose first non-space byte is { or [
+// is decoded ONCE and walked by key; and a string whose key name or separator is
+// itself escaped (\uXXXX, \xNN or %XX) is detected on a normalised copy and then
+// dropped whole, since mapping a redaction back through that copy would be
+// guesswork and over-redaction is the accepted direction.
+//
+// KNOWN LIMITS, without which no line is claimed secret-free: detection is
+// key-name-driven, so a bare high-entropy value under no secret-ish key name is
+// NOT redacted; the assignment must carry a literal = or : or one of those three
+// normalised spellings; and an encoding outside those three is not normalised.
 //
 // SAFETY: the write path is non-blocking (a bounded queue drained by one
 // goroutine) and failure-tolerant — a write error is logged and the session
@@ -54,6 +63,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -641,6 +651,60 @@ const journalRedaction = "[redacted]"
 // bare high-entropy value under no secret-ish key name — one of the documented
 // limits of the guarantee in the package doc.
 func journalRedactAssignments(s string) string {
+	if s == "" {
+		return s
+	}
+	out := journalRedactPrecise(s)
+	// The key name or its separator can itself be escaped — api\u005fkey\u003dsk-..., auth%5Ftoken%3Dsk-..., api\x5fkey\x3dsk-... —
+	// so no literal = or : ever reaches the scanner above and it finds nothing. Detect on a normalised copy and, on a hit,
+	// drop the WHOLE string: the policy here is that over-redaction is safe and an unredacted secret is not, and mapping a
+	// redaction back through a normalised copy would be guesswork.
+	if n := journalNormalizeEscapes(s); n != s && journalRedactPrecise(n) != n {
+		return journalRedaction + "(escape-encoded secret-ish assignment)"
+	}
+	return out
+}
+
+// journalNormalizeEscapes decodes the three escape spellings a key name or its separator can wear — \uXXXX, \xNN and
+// %XX — so the assignment scanner sees the characters it matches on. DETECTION ONLY: the result is never written, and a
+// redaction found in it drops the original string entire.
+func journalNormalizeEscapes(s string) string {
+	if !strings.ContainsAny(s, `\%`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '\\' && i+6 <= len(s) && (s[i+1] == 'u' || s[i+1] == 'U') {
+			if v, err := strconv.ParseUint(s[i+2:i+6], 16, 32); err == nil {
+				b.WriteRune(rune(v))
+				i += 6
+				continue
+			}
+		}
+		if s[i] == '\\' && i+4 <= len(s) && (s[i+1] == 'x' || s[i+1] == 'X') {
+			if v, err := strconv.ParseUint(s[i+2:i+4], 16, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 4
+				continue
+			}
+		}
+		if s[i] == '%' && i+3 <= len(s) {
+			if v, err := strconv.ParseUint(s[i+1:i+3], 16, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// journalRedactPrecise is the literal-form scan: it walks the string for a = or : separator, reads the key name before it
+// (stepping over escape depth) and replaces the value that follows when the name is secret-ish.
+func journalRedactPrecise(s string) string {
 	if s == "" {
 		return s
 	}
