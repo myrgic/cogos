@@ -40,6 +40,12 @@ import (
 // run the fake agent on stdin/stdout and exit.
 const EnvVar = "ACPFAKE_AGENT"
 
+// FailLoadPrefix is a reserved session id prefix: a session/load naming an id
+// starting with it is refused with an error. It exists so a caller's
+// load-failure path is reachable from a test, the way "reject" makes a
+// set_model failure reachable.
+const FailLoadPrefix = "fail-load:"
+
 // MaybeRunMain is called from a test package's TestMain. When EnvVar is set
 // it serves the fake agent over the process's stdio and exits; otherwise it
 // returns immediately.

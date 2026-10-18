@@ -983,6 +983,13 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		delete(proc.sessions, sid)
 		empty := len(proc.sessions) == 0
 		proc.mu.Unlock()
+		// The session is leaving proc.sessions without ever going live, so
+		// nothing else will ever end its ring: close it here, exactly once.
+		// Only the opts.Load branch has created a ring before the call; the
+		// other branches leave sess.ring nil until after this point.
+		if sess.ring != nil {
+			sess.ring.Close()
+		}
 		if parent == nil && empty {
 			proc.stop()
 		}
