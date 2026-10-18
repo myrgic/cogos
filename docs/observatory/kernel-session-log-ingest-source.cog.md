@@ -17,7 +17,7 @@ description: >
   The kernel is the ACP client for every managed session, so it journals each
   relayed event as it drives. This file is the manifest fragment to fold into
   the operator's .cog/observatory/INGEST-MANIFEST.cog.md, declaring
-  <state>/run/sessions/ as a source the kernel writes.
+  <workspace>/.cog/run/sessions/ as a source the kernel writes.
 relates-to:
 - cog://architecture/rfcs/observatory-phase1-session-substrate-observer
 - cog://workspace/.cog/observatory/ontology/cogos.conversations.v1.yaml
@@ -42,9 +42,15 @@ Record shape (one line per relayed event):
 
 ```json
 {"ts":"<RFC3339Nano>","session":"<acp session id>","room":"<room, when bound>",
- "actor":"<who the event belongs to>","kind":"turn|message|tool|permission|plan|end",
+ "actor":"<who the event belongs to>","kind":"turn|message|tool|permission|plan|state|end",
  "payload":{...bounded, secret-free...}}
 ```
+
+Kinds: `turn` a turn started · `message` a user/agent/thought text chunk ·
+`tool` a tool call or update · `permission` a request or resolution · `plan` a
+plan update · `state` a managed-session lifecycle transition (non-terminal —
+the routine starting→live on create is NOT an end) · `end` a genuine turn or
+session ending.
 
 ## Why this supersedes the observer-reconstructed source
 
@@ -72,4 +78,4 @@ kernel-authored and live rather than a post-hoc reconstruction:
   turn.
 
 The kernel-turns observer remains for *historical* backfill of the pre-journal
-window; from this slice forward, `<state>/run/sessions/` is the live source.
+window; from this slice forward, `<workspace>/.cog/run/sessions/` is the live source.

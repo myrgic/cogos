@@ -249,3 +249,104 @@ func nonEmptyLines(s string) []string {
 	}
 	return out
 }
+
+// TestSessionJournal_DefaultDirRootedAtWorkspace drives the real resolution
+// (ConfigureSessionJournal → DefaultSessionJournalDir, the pair the kernel
+// boots with) and asserts the journal lands in the workspace's own
+// .cog/run/sessions, never under $HOME.
+func TestSessionJournal_DefaultDirRootedAtWorkspace(t *testing.T) {
+	t.Setenv(SessionJournalDirEnv, "")
+	home := t.TempDir()
+	t.Setenv("HOME", home) // $HOME must not win over a known workspace root
+	root := t.TempDir()
+
+	prev := sessionJournalRoot
+	sessionJournalRoot = ""
+	defer func() { sessionJournalRoot = prev }()
+
+	want := filepath.Join(root, ".cog", "run", "sessions")
+	if got := ConfigureSessionJournal(root); got != want {
+		t.Fatalf("ConfigureSessionJournal(%q) = %q, want the workspace's own .cog/run/sessions", root, got)
+	}
+	if got := DefaultSessionJournalDir(); got != want {
+		t.Fatalf("DefaultSessionJournalDir() = %q, want %q", got, want)
+	}
+	if got := DefaultSessionJournalDir(); strings.HasPrefix(got, home) {
+		t.Fatalf("journal dir resolved under $HOME (%s): %s", home, got)
+	}
+
+	// The kernel's own constructor resolves through the same function.
+	j := newSessionJournalForSession(&HermesACPSession{id: "sess-rooted"})
+	if j == nil {
+		t.Fatalf("newSessionJournalForSession returned nil for dir %q", want)
+	}
+	defer j.Close()
+	if !strings.HasPrefix(j.Path(), want+string(os.PathSeparator)) {
+		t.Fatalf("journal path = %q, want it under %q", j.Path(), want)
+	}
+	if strings.HasPrefix(j.Path(), home) {
+		t.Fatalf("journal path resolved under $HOME: %s", j.Path())
+	}
+}
+
+// TestSessionJournal_StateTransitionIsNotAnEnd pins the kind vocabulary: a
+// lifecycle transition maps to "state", a turn end still maps to "end".
+func TestSessionJournal_StateTransitionIsNotAnEnd(t *testing.T) {
+	if k, _ := journalKindPayload(ManagedSessionEvent{Kind: MSEventState, Data: json.RawMessage(`{"state":"live"}`)}); k != "state" {
+		t.Fatalf("MSEventState kind = %q, want %q", k, "state")
+	}
+	if k, _ := journalKindPayload(ManagedSessionEvent{Kind: MSEventTurnEnd, Data: json.RawMessage(`{"turn_id":"t1"}`)}); k != "end" {
+		t.Fatalf("MSEventTurnEnd kind = %q, want %q", k, "end")
+	}
+}
+
+// TestSessionJournal_CreateIsNotAnEnd drives a real create and asserts the
+// journal carries exactly one "end" record — the genuine turn end — so the
+// routine starting→live transition fired on create can never read as an end.
+func TestSessionJournal_CreateIsNotAnEnd(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(SessionJournalDirEnv, dir)
+
+	d := fakeHermesDriver(t, nil)
+	s, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := s.Prompt(json.RawMessage(`"hello"`)); err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	waitEvent(t, s, 0, kind(MSEventTurnEnd))
+	if err := d.Delete(s.ID()); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, journalFileName(s.ID())+".jsonl"))
+	if err != nil {
+		t.Fatalf("read journal: %v", err)
+	}
+	ends, sawState := 0, false
+	var endPayload map[string]any
+	for _, ln := range nonEmptyLines(string(b)) {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(ln), &rec); err != nil {
+			t.Fatalf("line not JSON: %v (%s)", err, ln)
+		}
+		k, _ := rec["kind"].(string)
+		switch k {
+		case "end":
+			ends++
+			endPayload, _ = rec["payload"].(map[string]any)
+		case "state":
+			sawState = true
+		}
+	}
+	if ends != 1 {
+		t.Fatalf("want exactly 1 kind==%q (the real turn end), no spurious end from create; got %d:\n%s", "end", ends, string(b))
+	}
+	if id, _ := endPayload["turn_id"].(string); id == "" {
+		t.Fatalf("the sole end record has no turn_id, so it is not a genuine turn end:\n%s", string(b))
+	}
+	if !sawState {
+		t.Fatalf("create journaled no kind==%q lifecycle record:\n%s", "state", string(b))
+	}
+}

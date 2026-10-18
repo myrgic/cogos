@@ -8,19 +8,22 @@
 // driver directory). This file writes ONE bounded JSON line per relayed event,
 // synchronously with the drive, into a node directory:
 //
-//	<state>/sessions/<session>.jsonl
+//	<workspace>/.cog/run/sessions/<session>.jsonl
 //
 // Path rationale: the kernel already keeps its append-only turn ledger at
-// <state>/run/turns/<session>.jsonl (see the kernel-turns observer). Keeping
-// the per-session ACP record under the same <state>/run root, in sessions/,
-// gives both kernel-authored records one home. One file per session because the
+// <workspace>/.cog/run/turns/<session>.jsonl (see the kernel-turns observer).
+// Keeping the per-session ACP record under the same <workspace>/.cog/run root,
+// in sessions/, gives both kernel-authored records one home — and roots the
+// journal at the WORKSPACE, so every workspace keeps its own journal and the
+// observatory's cog://workspace/.cog/run/sessions/ ingest source resolves to
+// exactly what the kernel wrote. One file per session because the
 // ACP session id is the natural key and the file is append-only. Override the
 // directory with COGOS_SESSION_JOURNAL_DIR.
 //
 // Line shape (bounded, secret-free):
 //
 //	{"ts":"<RFC3339Nano>","session":"<id>","room":"<room, blank when unbound>",
-//	 "actor":"<who the event belongs to>","kind":"turn|message|tool|permission|plan|end|gap",
+//	 "actor":"<who the event belongs to>","kind":"turn|message|tool|permission|plan|state|end|gap",
 //	 "payload":{...}}
 //
 // The room key is always present: an unbound session writes it blank, so a
@@ -74,11 +77,37 @@ type SessionJournal struct {
 	dropped int
 }
 
-// DefaultSessionJournalDir returns <home>/.cog/run/sessions, or the value of
-// COGOS_SESSION_JOURNAL_DIR when set. Empty means "no journal".
+// sessionJournalRoot is the workspace root the default journal directory is
+// rooted at. Set at boot/serve by ConfigureSessionJournal, before any session
+// is driven.
+var sessionJournalRoot string
+
+// ConfigureSessionJournal roots the default session-journal directory at the
+// workspace root and returns the resolved directory. It is hooked from Boot
+// (internal/engine/boot.go, Kernel startup) with cfg.WorkspaceRoot, so a
+// kernel that knows its workspace writes <workspace>/.cog/run/sessions — the
+// same root the turn ledger uses (turnSidecarPath) and the root the
+// observatory's cog://workspace/.cog/run/sessions/ ingest source resolves
+// against. COGOS_SESSION_JOURNAL_DIR still overrides everything.
+func ConfigureSessionJournal(workspaceRoot string) string {
+	if workspaceRoot != "" {
+		sessionJournalRoot = workspaceRoot
+	}
+	return DefaultSessionJournalDir()
+}
+
+// DefaultSessionJournalDir returns the directory the journal appends to:
+// COGOS_SESSION_JOURNAL_DIR when set, else <workspace>/.cog/run/sessions once
+// a workspace root is known (ConfigureSessionJournal), else — only when no
+// root is known at all, e.g. the standalone helpers that never boot a kernel —
+// <home>/.cog/run/sessions. $HOME is a last resort, never the fallback when a
+// workspace root is available. Empty means "no journal".
 func DefaultSessionJournalDir() string {
 	if d := os.Getenv(SessionJournalDirEnv); d != "" {
 		return d
+	}
+	if r := sessionJournalRoot; r != "" {
+		return filepath.Join(r, ".cog", "run", "sessions")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -269,6 +298,18 @@ func newSessionJournalForSession(sess *HermesACPSession) *SessionJournal {
 	return j
 }
 
+// Kinds — the bounded vocabulary, one meaning each:
+//
+//	turn       a turn started (MSEventTurnStart)
+//	message    a user/agent/thought text chunk
+//	tool       a tool call or a tool-call update
+//	permission a permission request or resolution
+//	plan       a plan update
+//	state      a managed-session lifecycle transition, NON-terminal (the
+//	           routine starting→live fired on every create, restart re-apply)
+//	end        a genuine turn or session ending (MSEventTurnEnd)
+//	gap        synthetic: N prior events were dropped by a full queue
+//
 // journalKindPayload maps a relayed ring event onto the bounded observatory
 // kind vocabulary and a bounded, secret-free payload.
 func journalKindPayload(ev ManagedSessionEvent) (string, any) {
@@ -304,8 +345,13 @@ func journalKindPayload(ev ManagedSessionEvent) (string, any) {
 			"by":         journalStr(d["by"]),
 		}
 	case MSEventState:
+		// A lifecycle transition is not a turn ending. Kind "state" keeps
+		// the routine starting→live transition fired on every create
+		// (managed_session_hermes.go ~990) and the best-effort restart
+		// re-apply failures (~659/664) out of the "end" stream, which is
+		// reserved for genuine turn/session endings (MSEventTurnEnd).
 		d := journalDecode(ev.Data)
-		return "end", map[string]any{
+		return "state", map[string]any{
 			"state": journalStr(d["state"]),
 			"error": journalTruncateText(journalStr(d["error"])),
 		}
