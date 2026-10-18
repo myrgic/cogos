@@ -350,3 +350,37 @@ func TestSessionJournal_CreateIsNotAnEnd(t *testing.T) {
 		t.Fatalf("create journaled no kind==%q lifecycle record:\n%s", "state", string(b))
 	}
 }
+
+// TestSessionJournal_UnboundActorIsExplicitBlank is the sibling of the room test
+// above: an unbound session's record still carries the actor key, blank. The
+// second pass fixed room and left actor gated on non-empty, so a reader could not
+// tell an absent key from a blank one — the same ambiguity, one key over
+// (cog-review on head 17f212b).
+func TestSessionJournal_UnboundActorIsExplicitBlank(t *testing.T) {
+	dir := t.TempDir()
+	j, err := NewSessionJournal(dir, "sess-unbound-actor", "", "")
+	if err != nil {
+		t.Fatalf("NewSessionJournal: %v", err)
+	}
+	ring := NewEventRing("sess-unbound-actor", 4)
+	ring.SetJournal(j)
+	ring.Append(MSEventState, map[string]any{"state": "ready"})
+	j.Close()
+
+	b, err := os.ReadFile(filepath.Join(dir, "sess-unbound-actor.jsonl"))
+	if err != nil {
+		t.Fatalf("read journal: %v", err)
+	}
+	line := nonEmptyLines(string(b))[0]
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(line), &rec); err != nil {
+		t.Fatalf("line not JSON: %v (%s)", err, line)
+	}
+	actor, ok := rec["actor"]
+	if !ok {
+		t.Fatalf("unbound record omits the actor key entirely: %s", line)
+	}
+	if actor != "" {
+		t.Fatalf("unbound actor = %v, want blank string: %s", actor, line)
+	}
+}

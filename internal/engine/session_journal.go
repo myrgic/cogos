@@ -256,11 +256,12 @@ func (j *SessionJournal) writeLine(ev ManagedSessionEvent) {
 		"ts":      ev.Time.UTC().Format(time.RFC3339Nano),
 		"session": j.sessionID,
 		"room":    j.room,
+		// actor is written even when empty, exactly as room is: a blank actor is a deliberate, visible fact, never an
+		// omitted key that a reader cannot tell apart from a line an older writer produced. (The room fix's sibling —
+		// cog-review, head 17f212b.)
+		"actor":   j.actor,
 		"kind":    kind,
 		"payload": payload,
-	}
-	if j.actor != "" {
-		rec["actor"] = j.actor
 	}
 	// A record written after dropped events is not contiguous with its
 	// predecessor: mark the gap instead of eliding the loss.
@@ -281,11 +282,9 @@ func (j *SessionJournal) writeGap(dropped int) {
 		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
 		"session": j.sessionID,
 		"room":    j.room,
+		"actor":   j.actor, // always present, blank when unbound — see writeLine
 		"kind":    "gap",
 		"payload": map[string]any{"dropped": dropped},
-	}
-	if j.actor != "" {
-		rec["actor"] = j.actor
 	}
 	j.writeRecord(rec)
 }
