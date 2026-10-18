@@ -117,6 +117,11 @@ type HermesACPDriverConfig struct {
 	// afterCreateCall is a test seam: called in Create after the agent's
 	// session/new|load|fork returned, before the session is registered Live.
 	afterCreateCall func(*hermesProcess)
+	// afterRingCreate is a test seam: called the moment a loaded session's
+	// event ring exists, before the session/load call that may fail. It lets a
+	// test hold the ring of a load that never goes live (Create returns nil on
+	// error, so the ring cannot be read off the result).
+	afterRingCreate func(*EventRing)
 }
 
 func (c *HermesACPDriverConfig) defaults() {
@@ -964,6 +969,9 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 	case opts.Load != "":
 		sid = opts.Load
 		sess.id, sess.ring = sid, NewEventRing(sid, d.cfg.RingSize)
+		if hook := d.cfg.afterRingCreate; hook != nil {
+			hook(sess.ring)
+		}
 		proc.mu.Lock()
 		proc.sessions[sid] = sess
 		proc.mu.Unlock()
