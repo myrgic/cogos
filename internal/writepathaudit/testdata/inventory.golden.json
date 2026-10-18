@@ -1767,7 +1767,7 @@
     },
     {
       "file": "internal/engine/session_journal.go",
-      "line": 151,
+      "line": 137,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "NewSessionJournal",
@@ -1779,7 +1779,7 @@
     },
     {
       "file": "internal/engine/session_journal.go",
-      "line": 154,
+      "line": 140,
       "column": 12,
       "primitive": "os.OpenFile",
       "func": "NewSessionJournal",
@@ -3306,7 +3306,7 @@
     },
     {
       "file": "internal/engine/managed_session_hermes.go",
-      "line": 218,
+      "line": 224,
       "column": 9,
       "func": "(*hermesProcess).start",
       "subsystem": "internal:engine",

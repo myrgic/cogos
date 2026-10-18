@@ -206,8 +206,8 @@ These sites structurally resolved (the shape of the path is known) but the ROOT 
 | `{path}` | (*rotatingWriter).Write (`os.OpenFile`) | internal/engine/rotating_writer.go:89 | internal:engine |
 | `{path}.1` | (*rotatingWriter).rotateLocked (`os.Rename`) | internal/engine/rotating_writer.go:137 | internal:engine |
 | `{path}` | (*rotatingWriter).rotateLocked (`os.OpenFile`) | internal/engine/rotating_writer.go:141 | internal:engine |
-| `<call:DefaultSessionJournalDir>` | NewSessionJournal (`os.MkdirAll`) | internal/engine/session_journal.go:151 | internal:engine |
-| `<call:DefaultSessionJournalDir>/<call:journalFileName>.jsonl` | NewSessionJournal (`os.OpenFile`) | internal/engine/session_journal.go:154 | internal:engine |
+| `<call:DefaultSessionJournalDir>` | NewSessionJournal (`os.MkdirAll`) | internal/engine/session_journal.go:137 | internal:engine |
+| `<call:DefaultSessionJournalDir>/<call:journalFileName>.jsonl` | NewSessionJournal (`os.OpenFile`) | internal/engine/session_journal.go:140 | internal:engine |
 | `<call:turnSidecarPath>.tmp` | PatchTurnSpeculative (`os.Create`) | internal/engine/turn_storage.go:250 | internal:engine |
 | `<call:turnSidecarPath>` | PatchTurnSpeculative (`os.Rename`) | internal/engine/turn_storage.go:263 | internal:engine |
 | `dirname(<call:turnSidecarPath>)` | appendTurnSidecar (`os.MkdirAll`) | internal/engine/turn_storage.go:352 | internal:engine |
@@ -335,7 +335,7 @@ Total subprocess sites: 85
 | _(not set — inherits the process's own working directory)_ | `exec.Command("taskkill", "/PID", strconv.Itoa(pid))` | internal/engine/daemon_stop_windows.go:37 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))` | internal/engine/daemon_stop_windows.go:56 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH")` | internal/engine/daemon_stop_windows.go:77 | internal:engine |
-| `{cwd}` | `exec.Command(argv[0], argv[1:]...)` | internal/engine/managed_session_hermes.go:218 | internal:engine |
+| `{cwd}` | `exec.Command(argv[0], argv[1:]...)` | internal/engine/managed_session_hermes.go:224 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "python3", cmdArgs...)` | internal/engine/mcp_architecture.go:156 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command(player, args...)` | internal/engine/mcp_modality_proxy.go:879 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, rgPath, args...)` | internal/engine/mcp_server.go:3268 | internal:engine |
