@@ -9,7 +9,7 @@
 //	POST   /v1/managed-sessions/{id}/prompt        {prompt: "text" | [ACP content blocks]} -> 202 {turn_id}
 //	POST   /v1/managed-sessions/{id}/cancel        session/cancel
 //	POST   /v1/managed-sessions/{id}/mode          {mode_id}
-//	POST   /v1/managed-sessions/{id}/model         {model_id}  (ACP session/set_model; re-applied after a crash-restart)
+//	POST   /v1/managed-sessions/{id}/model         {model_id}  (ACP session/set_model, else set_config_option "model"; re-applied after a crash-restart)
 //	POST   /v1/managed-sessions/{id}/permission    {request_id, option_id}  ("" option_id = cancelled)
 //	GET    /v1/managed-sessions/{id}/events?since=N
 //	       WebSocket when the request is an upgrade: a "hello" frame, then
