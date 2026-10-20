@@ -346,7 +346,7 @@ func TestStageUIKeys_ShadowNeverChangesAResponse(t *testing.T) {
 		t.Fatal("off mode built a shadow")
 	}
 	for name, st := range map[string]*ShareLinkStore{"agree": agree, "disagree": wrong, "nostore": nil} {
-		for _, mode := range []string{StageUIKeysShadow, StageUIKeysEnforce, "bogus"} {
+		for _, mode := range []string{StageUIKeysShadow, "bogus"} {
 			h, _ := shadowHandler(t, mode, up.URL, st)
 			got := fingerprint(h)
 			for i := range base {
@@ -391,19 +391,19 @@ func TestStageUIKeys_LockoutUnchanged(t *testing.T) {
 
 func TestStageUIKeys_ModeNormalization(t *testing.T) {
 	for in, want := range map[string]struct {
-		mode    string
-		enforce bool
-		ok      bool
+		mode string
+		ok   bool
 	}{
-		"":        {StageUIKeysOff, false, true},
-		"off":     {StageUIKeysOff, false, true},
-		"Shadow":  {StageUIKeysShadow, false, true},
-		"enforce": {StageUIKeysShadow, true, true},
-		"on":      {StageUIKeysOff, false, false},
+		"":         {StageUIKeysOff, true},
+		"off":      {StageUIKeysOff, true},
+		"Shadow":   {StageUIKeysShadow, true},
+		"enforce":  {StageUIKeysEnforce, true},
+		" ENFORCE": {StageUIKeysEnforce, true},
+		"on":       {StageUIKeysOff, false},
 	} {
-		m, e, ok := normalizeStageUIKeysMode(in)
-		if m != want.mode || e != want.enforce || ok != want.ok {
-			t.Errorf("%q: got %s %v %v want %+v", in, m, e, ok, want)
+		m, ok := normalizeStageUIKeysMode(in)
+		if m != want.mode || ok != want.ok {
+			t.Errorf("%q: got %s %v want %+v", in, m, ok, want)
 		}
 	}
 }

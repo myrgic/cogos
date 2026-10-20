@@ -12,8 +12,18 @@
 //
 //	off     (default) no resolution, no counters
 //	shadow  resolve and compare; never alters a response
-//	enforce reserved for S5. In this build it is treated as shadow, with one
-//	        warning at startup; it never refuses anything.
+//	enforce (S5) the listener answers the unknown-key cases itself and never
+//	        sends them upstream: a key the share-link store does not hold
+//	        (unknown, revoked, removed, rekeyed, or a room id) gets the Stage's
+//	        own 404 "not found" (a websocket gets the bare 403 the Stage's
+//	        pre-accept close 4404 becomes on the wire), and a home key used on
+//	        /r/ or /k/ gets the same 404. A key the store holds is proxied as
+//	        before and the Stage still decides everything else. The shadow
+//	        comparison keeps running for what is proxied.
+//
+// What an enforced miss does to the lockout (R14): an unknown key counts, a
+// home key on a room route does not (the Stage's key_known accepts a home key
+// whatever the prefix), a SELF caller never counts. See keyRefusal.
 //
 // Verdicts. A key is "known" when it opens something.
 //   - Stage verdict: a keyed request the upstream did not answer with a
@@ -57,16 +67,16 @@ const (
 
 // normalizeStageUIKeysMode maps the config value to the effective mode.
 // ok=false means the value was unrecognised (effective mode is off).
-func normalizeStageUIKeysMode(v string) (mode string, enforceRequested bool, ok bool) {
+func normalizeStageUIKeysMode(v string) (mode string, ok bool) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "", StageUIKeysOff:
-		return StageUIKeysOff, false, true
+		return StageUIKeysOff, true
 	case StageUIKeysShadow:
-		return StageUIKeysShadow, false, true
+		return StageUIKeysShadow, true
 	case StageUIKeysEnforce:
-		return StageUIKeysShadow, true, true
+		return StageUIKeysEnforce, true
 	}
-	return StageUIKeysOff, false, false
+	return StageUIKeysOff, false
 }
 
 // keyShadow holds the shadow counters. Safe for concurrent use.
@@ -226,4 +236,56 @@ func (s *Server) handleKeyShadowStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSONResp(w, http.StatusOK, g.shadow.stats(g.keysMode))
+}
+
+// stageHomeSurfacePrefix is the surface namespace of home keys (keys_sync.py:
+// stage/home/<pid>). Room and member keys live under stage/room/.
+const stageHomeSurfacePrefix = "stage/home/"
+
+// keyRefusal is keys=enforce. For a keyed /r/ /k/ /h/ request it asks the
+// share-link store about the key segment and reports whether the listener
+// answers the request itself (refuse) and whether that answer is a guess that
+// counts toward the lockout (count).
+//
+//   - segment not held as a live "share" link: unknown, revoked, removed,
+//     rekeyed or a room id. refuse and count (R14: an unknown key counts).
+//   - a home key (surface stage/home/...) on /r/ or /k/: the Stage answers 404
+//     and its key_known says the key is real, so refuse and do not count (K07).
+//   - anything else: proxy; the Stage decides (a held key opening a missing
+//     file, a room key on /h/, owner-only gates, ...).
+//
+// Nothing is decided without a store or for /pair/ (a code is not a share link
+// until S8/S9) or an empty segment: those go upstream unchanged.
+func (k *keyShadow) keyRefusal(path string) (refuse, count bool) {
+	class, seg, pair, ok := keyedClass(path)
+	if !ok || pair || seg == "" {
+		return false, false
+	}
+	st := k.store()
+	if st == nil {
+		return false, false
+	}
+	l, found := st.Resolve(seg)
+	if !found || l.Kind != ShareLinkKindShare {
+		return true, true
+	}
+	if class != "h" && strings.HasPrefix(l.Surface, stageHomeSurfacePrefix) {
+		return true, false
+	}
+	return false, false
+}
+
+// writeStageKeyRefusal writes the Stage's own answer for a refused key:
+// starlette PlainTextResponse("not found", 404), or for a websocket upgrade
+// the bare 403 that the pre-accept close 4404 is on the wire.
+func writeStageKeyRefusal(w http.ResponseWriter, ws bool) {
+	if ws {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	const body = "not found"
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Length", "9")
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write([]byte(body))
 }
