@@ -1000,7 +1000,10 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		}
 		proc = d.newProcess(opts.Profile, opts.Cwd, class)
 		if _, err := proc.start(ctx); err != nil {
-			if class != nil {
+			// A failure caused by the caller's own context ending says
+			// nothing about the class; only a genuine failure (or the
+			// InitTimeout deadline, which leaves ctx live) is cached.
+			if class != nil && ctx.Err() == nil && !errors.Is(err, context.Canceled) {
 				d.markClassUnavailable(class.Name, err)
 			}
 			return nil, err
@@ -1317,7 +1320,9 @@ func (d *HermesACPDriver) probeClass(ctx context.Context, name string) ManagedSe
 	d.classProbeInflight[name] = ch
 	d.classProbeMu.Unlock()
 
-	res := d.runClassProbe(ctx, name)
+	// The result lands in a cache shared by every caller, so the probe must
+	// not die with this caller's context. It stays bounded by InitTimeout.
+	res := d.runClassProbe(context.WithoutCancel(ctx), name)
 
 	d.classProbeMu.Lock()
 	d.classProbeCache[name] = res

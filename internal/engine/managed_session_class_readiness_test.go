@@ -224,3 +224,39 @@ func TestClassReadiness_CrashExhaustionInvalidatesCachedReady(t *testing.T) {
 		t.Fatalf("crash exhaustion left a cached readiness entry: %+v", st)
 	}
 }
+
+func slowInitClass(t *testing.T, name string) *HermesACPDriver {
+	t.Helper()
+	rc := RuntimeClass{Argv: []string{os.Args[0], "-test.run=^$"}}
+	rc.Env.Set = map[string]string{acpfake.EnvVar: "1", "ACPFAKE_INIT_DELAY": "1s"}
+	return readinessDriver(t, readinessClassConfig(t, name, rc), func(c *HermesACPDriverConfig) { c.ProbeCacheTTL = time.Minute })
+}
+
+// Review #704 round 3, finding 1: a probe whose own caller goes away
+// mid-initialize must not leave an "unavailable" entry for everyone else.
+func TestClassReadiness_CallerCancelDuringProbeIsNotCached(t *testing.T) {
+	d := slowInitClass(t, "slow")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = d.ClassStatus(ctx, "slow") // the caller's ctx ends mid-initialize
+	if st, ok := d.getCachedClassReadiness("slow"); ok && st.Status == "unavailable" {
+		t.Fatalf("caller cancellation was cached as unavailable: %+v", st)
+	}
+	if st := d.ClassStatus(context.Background(), "slow"); st.Status != "ready" {
+		t.Fatalf("second caller: status = %q reason=%s, want ready", st.Status, st.Reason)
+	}
+}
+
+// Review #704 round 3, finding 2: a create whose request ctx ends
+// mid-start must not mark the class unavailable.
+func TestClassReadiness_CallerCancelDuringCreateIsNotCached(t *testing.T) {
+	d := slowInitClass(t, "slow")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, err := d.Create(ctx, HermesACPOpts{Class: "slow", Cwd: t.TempDir()}); err == nil {
+		t.Fatal("create with a cancelled ctx should fail")
+	}
+	if st, ok := d.getCachedClassReadiness("slow"); ok && st.Status == "unavailable" {
+		t.Fatalf("caller cancellation marked the class unavailable: %+v", st)
+	}
+}
