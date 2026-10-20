@@ -124,6 +124,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -420,8 +421,13 @@ func newStageUIHandlerG(c StageUIConfig) (http.Handler, *stageGuard, error) {
 		},
 		ModifyResponse: guard.afterResponse,
 		FlushInterval:  -1, // stream (SSE, long polls) without buffering
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			slog.Warn("stage-ui: upstream error", "upstream", upstream, "err", err)
+			if r.Method == http.MethodGet && r.URL.Path == guardListPath {
+				// Answer from the kernel's own lockouts.
+				writeJSONResp(w, http.StatusOK, json.RawMessage(guard.mergeGuardList(nil)))
+				return
+			}
 			http.Error(w, "stage upstream unavailable", http.StatusBadGateway)
 		},
 	}
