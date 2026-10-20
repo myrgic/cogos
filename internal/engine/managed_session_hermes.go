@@ -691,20 +691,36 @@ func (s *HermesACPSession) SetMode(ctx context.Context, modeID string) error {
 }
 
 // SetModel calls session/set_model (Hermes rebuilds the session's agent on
-// modelId and keeps its history). Hermes resolves a named custom provider
+// modelId and keeps its history; an agent without it gets set_config_option,
+// see callSetModel). Hermes resolves a named custom provider
 // only from the full "custom:<provider>:<model>" form; the id is passed
 // through verbatim and remembered so a crash-restart re-applies it.
 func (s *HermesACPSession) SetModel(ctx context.Context, modelID string) error {
 	if err := s.live(); err != nil {
 		return err
 	}
-	if err := s.proc.currentConn().Call(ctx, "session/set_model", map[string]any{"sessionId": s.id, "modelId": modelID}, nil); err != nil {
+	if err := callSetModel(ctx, s.proc.currentConn(), s.id, modelID); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	s.model = modelID
 	s.mu.Unlock()
 	return nil
+}
+
+// callSetModel moves a session to modelID: ACP session/set_model, or, for an
+// agent that does not implement it (JSON-RPC method-not-found), the
+// session/set_config_option "model" option, which is how opencode's ACP agent
+// changes models (runtime class "opencode"; it takes "<provider>/<model>").
+// Any other refusal is returned as is: the agent knew the method and said no.
+func callSetModel(ctx context.Context, conn *acprpc.Conn, sessionID, modelID string) error {
+	err := conn.Call(ctx, "session/set_model", map[string]any{"sessionId": sessionID, "modelId": modelID}, nil)
+	var rpcErr *acprpc.Error
+	if !errors.As(err, &rpcErr) || rpcErr.Code != acprpc.CodeMethodNotFound {
+		return err
+	}
+	return conn.Call(ctx, "session/set_config_option",
+		map[string]any{"sessionId": sessionID, "configId": "model", "value": modelID}, nil)
 }
 
 // reapplySettings restores the mode and model a client chose after a
@@ -716,7 +732,7 @@ func (s *HermesACPSession) reapplySettings(ctx context.Context, conn *acprpc.Con
 	mode, model := s.mode, s.model
 	s.mu.Unlock()
 	if model != "" {
-		if err := conn.Call(ctx, "session/set_model", map[string]any{"sessionId": s.id, "modelId": model}, nil); err != nil {
+		if err := callSetModel(ctx, conn, s.id, model); err != nil {
 			s.ring.Append(MSEventState, map[string]any{"state": s.State().String(), "error": "restart: re-apply model: " + err.Error()})
 		}
 	}

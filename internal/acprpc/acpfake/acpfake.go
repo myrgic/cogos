@@ -18,7 +18,10 @@
 //	anything else    → one agent_message_chunk echoing the text, stopReason "end_turn"
 //
 // A session/set_model naming a model id with the "reject" prefix is refused with
-// an error, so a caller's model-application failure path is reachable.
+// an error, so a caller's model-application failure path is reachable. One
+// naming a model id with ConfigOnlyPrefix is answered method-not-found, as an
+// agent without session/set_model (opencode) answers it; such a model is set
+// through session/set_config_option {configId: "model", value}.
 //
 // Tests run it in-process (Serve over pipes) or as a subprocess by
 // re-executing the test binary with ACPFAKE_AGENT=1 (see MaybeRunMain).
@@ -47,6 +50,11 @@ const EnvVar = "ACPFAKE_AGENT"
 // load-failure path is reachable from a test, the way "reject" makes a
 // set_model failure reachable.
 const FailLoadPrefix = "fail-load:"
+
+// ConfigOnlyPrefix is a reserved model id prefix: session/set_model naming it
+// is answered method-not-found, so a caller's set_config_option fallback is
+// reachable (opencode's ACP agent changes models only that way).
+const ConfigOnlyPrefix = "config-only:"
 
 // MaybeRunMain is called from a test package's TestMain. When EnvVar is set
 // it serves the fake agent over the process's stdio and exits; otherwise it
@@ -85,6 +93,8 @@ type sessionParams struct {
 	Cwd       string `json:"cwd"`
 	ModeID    string `json:"modeId"`
 	ModelID   string `json:"modelId"`
+	ConfigID  string `json:"configId"`
+	Value     string `json:"value"`
 	Prompt    []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -187,8 +197,19 @@ func (a *agent) HandleRequest(method string, params json.RawMessage) (any, error
 		if strings.HasPrefix(p.ModelID, "reject") {
 			return nil, &acprpc.Error{Code: -32602, Message: "set_model refused " + p.ModelID}
 		}
+		if strings.HasPrefix(p.ModelID, ConfigOnlyPrefix) {
+			return nil, &acprpc.Error{Code: acprpc.CodeMethodNotFound, Message: "acpfake: no session/set_model"}
+		}
 		a.mu.Lock()
 		a.models[p.SessionID] = p.ModelID
+		a.mu.Unlock()
+		return map[string]any{}, nil
+	case "session/set_config_option":
+		if p.ConfigID != "model" || p.Value == "" {
+			return nil, &acprpc.Error{Code: -32602, Message: "acpfake: set_config_option supports a non-empty model only"}
+		}
+		a.mu.Lock()
+		a.models[p.SessionID] = p.Value
 		a.mu.Unlock()
 		return map[string]any{}, nil
 	case "session/prompt":

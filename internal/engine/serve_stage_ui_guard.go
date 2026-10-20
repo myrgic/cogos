@@ -76,7 +76,7 @@ type stageGuard struct {
 	// upstream. Replaced in tests.
 	keyKnown func(ctx context.Context, seg string) bool
 
-	// keysMode is the effective stage_ui.keys mode (off|shadow); shadow is nil
+	// keysMode is the effective stage_ui.keys mode (off|shadow|enforce); shadow is nil
 	// when off. See serve_stage_ui_keys.go.
 	keysMode string
 	shadow   *keyShadow
