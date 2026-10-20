@@ -334,3 +334,43 @@ func TestStageUIKeys_EnforceAnswerShape(t *testing.T) {
 		t.Fatalf("/pair/ must go upstream: %v", up.hits())
 	}
 }
+
+// The home-key exception in keyRefusal (class != "h"): a home key opens /h/
+// and reaches the Stage; the same key on /r/ and /k/ is the kernel's own 404
+// (K07) and never reaches the Stage; a room key on /h/ (K08) is not the
+// kernel's call, so it goes upstream and the Stage answers.
+func TestStageUIKeys_EnforceHomeKeyClassSplit(t *testing.T) {
+	h, g, up, _ := enforceFixture(t, StageUIKeysEnforce)
+	ip := "203.0.113.70"
+
+	up.reset()
+	rec := shadowDo(h, "GET", "/h/"+skGH+"/dashboard/orb.html", ip, false)
+	if rec.Code != 200 || len(up.hits()) != 1 {
+		t.Fatalf("home key on /h/: code %d hits %v, want 200 and exactly one Stage hit", rec.Code, up.hits())
+	}
+	up.reset()
+	if rec := shadowDo(h, "GET", "/h/"+skGH+"/ws/pad", ip, true); len(up.hits()) != 1 {
+		t.Fatalf("home key websocket on /h/: code %d hits %v, want one Stage hit", rec.Code, up.hits())
+	}
+
+	for _, pre := range []string{"/r/", "/k/"} {
+		up.reset()
+		rec := shadowDo(h, "GET", pre+skGH+"/dashboard/orb.html", ip, false)
+		if rec.Code != 404 || rec.Body.String() != "not found" {
+			t.Fatalf("home key on %s: %d %q, want the kernel's 404", pre, rec.Code, rec.Body.String())
+		}
+		if got := up.hits(); len(got) != 0 {
+			t.Fatalf("home key on %s reached the Stage: %v", pre, got)
+		}
+	}
+
+	// K08: a room key on /h/ is left to the Stage (which answers 404 itself).
+	up.reset()
+	shadowDo(h, "GET", "/h/"+skGK+"/dashboard/orb.html", ip, false)
+	if got := up.hits(); len(got) != 1 {
+		t.Fatalf("room key on /h/ must reach the Stage, hits=%v", got)
+	}
+	if n := len(g.fails[ip]); n != 0 {
+		t.Fatalf("none of these requests is a guess, but %d counted toward the lockout", n)
+	}
+}
