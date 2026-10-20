@@ -312,6 +312,52 @@ func TestHermesACPDriver_SetModelSurvivesCrashRestart(t *testing.T) {
 	})
 }
 
+// An agent without session/set_model (opencode's ACP agent, runtime class
+// "opencode") changes models through session/set_config_option. SetModel falls
+// back to it on method-not-found, records the model, and a crash-restart puts
+// it back the same way.
+func TestHermesACPDriver_SetModelFallsBackToConfigOption(t *testing.T) {
+	d := fakeHermesDriver(t, func(c *HermesACPDriverConfig) { c.CrashWindow = time.Nanosecond })
+	s, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const model = acpfake.ConfigOnlyPrefix + "openrouter/deepseek/deepseek-v4.1-flash-1017"
+	if err := s.SetModel(context.Background(), model); err != nil {
+		t.Fatalf("set_model with config-option fallback: %v", err)
+	}
+	if got := s.Info().Model; got != model {
+		t.Fatalf("info model = %q", got)
+	}
+	if _, err := s.Prompt(json.RawMessage(`"modelinfo"`)); err != nil {
+		t.Fatal(err)
+	}
+	ev := waitEvent(t, s, 0, func(ev ManagedSessionEvent) bool {
+		return ev.Kind == MSEventSessionUpdate && strings.Contains(string(ev.Data), "modelinfo:model="+model+":")
+	})
+	// A refusal that is not method-not-found is not retried as a config option.
+	if err := s.SetModel(context.Background(), "reject-me"); err == nil {
+		t.Fatal("a refused set_model must stay refused")
+	}
+	if got := s.Info().Model; got != model {
+		t.Fatalf("a refused set_model must not change the recorded model: %q", got)
+	}
+
+	_, _ = s.Prompt(json.RawMessage(`"crash now"`))
+	ev = waitEvent(t, s, ev.Seq, func(ev ManagedSessionEvent) bool {
+		return ev.Kind == MSEventSessionUpdate && strings.Contains(string(ev.Data), "replayed history for "+s.ID())
+	})
+	waitEvent(t, s, ev.Seq, func(ev ManagedSessionEvent) bool {
+		return ev.Kind == MSEventState && strings.Contains(string(ev.Data), `"live"`)
+	})
+	if _, err := s.Prompt(json.RawMessage(`"settings?"`)); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, s, ev.Seq, func(ev ManagedSessionEvent) bool {
+		return ev.Kind == MSEventSessionUpdate && strings.Contains(string(ev.Data), ":model="+model)
+	})
+}
+
 func TestEventRing_ReplayGapAndOverflow(t *testing.T) {
 	r := NewEventRing("s", 3)
 	for i := 0; i < 5; i++ {
