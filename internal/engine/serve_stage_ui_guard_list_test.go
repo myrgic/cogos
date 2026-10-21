@@ -1,10 +1,12 @@
 package engine
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -112,5 +114,67 @@ func TestStageUIGuardList_NoKernelLockoutPassesThrough(t *testing.T) {
 			t.Fatalf("%s: want byte-identical passthrough, got %d %q", mode, rec.Code, rec.Body.String())
 		}
 		up.Close()
+	}
+}
+
+func TestStageUIGuardList_SubThresholdMissesMerged(t *testing.T) {
+	up := guardListStage()
+	defer up.Close()
+	h, _ := shadowHandler(t, StageUIKeysEnforce, up.URL, nil)
+	const ip = "203.0.113.99"
+	for i := 0; i < 15; i++ {
+		shadowDo(h, http.MethodGet, "/r/"+skBAD+"/x", ip, false)
+	}
+	rec, d := guardListGet(t, h)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if d.Misses[ip] != 15 {
+		t.Fatalf("want kernel's 15 sub-threshold misses for %s, got %+v", ip, d)
+	}
+	if d.Misses["203.0.113.7"] != 2 || len(d.Locked) != 1 || d.Locked[0] != "198.51.100.1" {
+		t.Fatalf("Stage's own entries lost: %+v", d)
+	}
+}
+
+func TestStageUIGuardList_GzipClientStillSeesKernelLockout(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != guardListPath {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			w.Header().Set("Content-Encoding", "gzip")
+			zw := gzip.NewWriter(w)
+			zw.Write([]byte(guardListStageBody))
+			zw.Close()
+			return
+		}
+		fmt.Fprint(w, guardListStageBody)
+	}))
+	defer up.Close()
+	h, g := shadowHandler(t, StageUIKeysEnforce, up.URL, nil)
+	const ip = "203.0.113.52"
+	guardListMissPast(h, ip)
+	if !g.isLocked(ip) {
+		t.Fatal("precondition: kernel lockout")
+	}
+	req := httptest.NewRequest(http.MethodGet, guardListPath, nil)
+	req.RemoteAddr = guardPeer
+	req.Host = "localhost"
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var d guardListDoc
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatalf("bad json %q: %v", rec.Body.String(), err)
+	}
+	found := false
+	for _, x := range d.Locked {
+		found = found || x == ip
+	}
+	if !found {
+		t.Fatalf("gzip client missed kernel lockout: %+v", d)
 	}
 }

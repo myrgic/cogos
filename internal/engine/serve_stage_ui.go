@@ -418,6 +418,12 @@ func newStageUIHandlerG(c StageUIConfig) (http.Handler, *stageGuard, error) {
 			// SetURL rewrites Host to the upstream's; the guard decides on the
 			// client's Host, so put it back.
 			r.Out.Host = r.In.Host
+			// The guard listing is merged in ModifyResponse, which needs the
+			// plain JSON body: drop the client's Accept-Encoding so the Stage
+			// answers uncompressed (a gzip body would skip the merge).
+			if r.In.Method == http.MethodGet && r.In.URL.Path == guardListPath {
+				r.Out.Header.Del("Accept-Encoding")
+			}
 		},
 		ModifyResponse: guard.afterResponse,
 		FlushInterval:  -1, // stream (SSE, long polls) without buffering

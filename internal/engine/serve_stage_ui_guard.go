@@ -282,13 +282,14 @@ func (g *stageGuard) snapshot() (locked []string, misses map[string]int) {
 }
 
 // mergeGuardList unions the kernel's lockouts and miss counts into the Stage's
-// listing body (nil body = the Stage was unreachable). With no kernel lockouts
-// and a body to pass through, the body is returned untouched.
+// listing body (nil body = the Stage was unreachable). With neither a kernel
+// lockout nor a kernel miss count and a body to pass through, the body is
+// returned untouched (byte-identical).
 func (g *stageGuard) mergeGuardList(body []byte) []byte {
 	locked, misses := g.snapshot()
 	doc := map[string]any{}
 	if body != nil {
-		if len(locked) == 0 {
+		if len(locked) == 0 && len(misses) == 0 {
 			return body
 		}
 		if err := json.Unmarshal(body, &doc); err != nil {
