@@ -3364,7 +3364,7 @@
     },
     {
       "file": "internal/engine/managed_session_hermes.go",
-      "line": 1575,
+      "line": 1619,
       "column": 9,
       "func": "(*HermesACPDriver).runClassProbe",
       "subsystem": "internal:engine",

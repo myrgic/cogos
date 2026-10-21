@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -347,4 +349,81 @@ func TestClassReadiness_StartFailureReasonIsPathFree(t *testing.T) {
 		t.Fatal("create failure should cache unavailable")
 	}
 	assertClean("create-cached", st.Reason)
+}
+
+// Review #704 round 5b: every site that sets ManagedSessionClassStatus.Reason
+// must use a fixed category string. Each injected error carries a fake
+// absolute path and an env-like KEY=value; neither may reach Reason.
+func TestClassReadiness_ReasonNeverCarriesPathOrEnv(t *testing.T) {
+	const path = "/nonexistent-leak-dir-704/secret-wrapper"
+	const kv = "SECRET_TOKEN_704=hunter2"
+	leaky := func(msg string) error { return fmt.Errorf("%s %s %s", msg, path, kv) }
+	clean := func(t *testing.T, label, reason string) {
+		t.Helper()
+		if reason == "" {
+			t.Fatalf("%s: empty reason", label)
+		}
+		for _, bad := range []string{path, "nonexistent-leak-dir-704", "secret-wrapper", kv, "SECRET_TOKEN_704", "hunter2"} {
+			if strings.Contains(reason, bad) {
+				t.Fatalf("%s: reason %q leaks %q", label, reason, bad)
+			}
+		}
+	}
+
+	d := readinessDriver(t, readinessClassConfig(t, "x", RuntimeClass{Argv: []string{"/bin/true"}}), nil)
+
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"start error", newProcessStartError(leaky("fork/exec")), "hermes-acp: start process: start failed"},
+		{"pipe setup", newClassFailure("pipe setup failed", leaky("pipe")), "pipe setup failed"},
+		{"initialize", newClassFailure("initialize failed", leaky("hermes-acp: initialize:")), "initialize failed"},
+		{"protocol version", newClassFailure("unsupported protocol version 2", leaky("hermes-acp: initialize: unsupported protocol version 2")), "unsupported protocol version 2"},
+		{"untyped create error", leaky("anything else"), "start failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// create-time site: markClassUnavailable
+			d.markClassUnavailable("x", tc.err)
+			st, ok := d.getCachedClassReadiness("x")
+			if !ok {
+				t.Fatal("not cached")
+			}
+			clean(t, "markClassUnavailable", st.Reason)
+			if st.Reason != tc.want {
+				t.Fatalf("reason = %q, want %q", st.Reason, tc.want)
+			}
+		})
+	}
+
+	// probe-time sites (resolve, pipes, initialize) share classProbeFailure.
+	for _, reason := range []string{"class not resolvable", "pipe setup failed", "initialize failed"} {
+		st := d.classProbeFailure("x", time.Now(), reason, leaky(reason))
+		clean(t, "classProbeFailure "+reason, st.Reason)
+	}
+
+	// Real initialize failure over HTTP: the agent answers initialize with a
+	// JSON-RPC error whose message carries a path and KEY=value.
+	script := `read l; echo '{"jsonrpc":"2.0","id":"1","error":{"code":-32000,"message":"boom ` + path + ` ` + kv + `"}}'; echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"boom ` + path + ` ` + kv + `"}}'`
+	cfg := readinessClassConfig(t, "initfail", RuntimeClass{Argv: []string{"/bin/sh", "-c", script}})
+	srv := newGrantAuthTestServer(t)
+	srv.managedSessions = readinessDriver(t, cfg, nil)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	tok := mintScopedTestGrant(t, srv, "guest-surface", ScopeManagedSessionsClassPrefix+"initfail")
+	var out struct {
+		Classes []ManagedSessionClassStatus `json:"classes"`
+	}
+	if code := g0Do(t, ts, tok, "GET", "/v1/managed-sessions/classes", nil, &out); code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if len(out.Classes) != 1 || out.Classes[0].Status != "unavailable" {
+		t.Fatalf("classes = %+v", out.Classes)
+	}
+	clean(t, "endpoint initialize", out.Classes[0].Reason)
+	if out.Classes[0].Reason != "initialize failed" {
+		t.Fatalf("reason = %q, want initialize failed", out.Classes[0].Reason)
+	}
 }

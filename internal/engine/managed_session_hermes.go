@@ -280,11 +280,11 @@ func (p *hermesProcess) start(ctx context.Context) (*acprpc.Conn, error) {
 	cmd.Stderr = io.Discard
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, err
+		return nil, newClassFailure("pipe setup failed", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return nil, newClassFailure("pipe setup failed", err)
 	}
 	if err := cmd.Start(); err != nil {
 		return nil, newProcessStartError(err)
@@ -309,12 +309,12 @@ func (p *hermesProcess) start(ctx context.Context) (*acprpc.Conn, error) {
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return nil, fmt.Errorf("hermes-acp: initialize: %w", err)
+		return nil, newClassFailure("initialize failed", fmt.Errorf("hermes-acp: initialize: %w", err))
 	}
 	if res.ProtocolVersion != 1 {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return nil, fmt.Errorf("hermes-acp: initialize: unsupported protocol version %d", res.ProtocolVersion)
+		return nil, newClassFailure(fmt.Sprintf("unsupported protocol version %d", res.ProtocolVersion), fmt.Errorf("hermes-acp: initialize: unsupported protocol version %d", res.ProtocolVersion))
 	}
 	p.mu.Lock()
 	p.agentInfo = res.AgentInfo
@@ -337,6 +337,42 @@ type processStartError struct {
 
 func (e *processStartError) Error() string { return "hermes-acp: start process: " + e.reason }
 func (e *processStartError) Unwrap() error { return e.err }
+
+// classFailure tags a subprocess-setup error with a fixed, category-level
+// reason for ManagedSessionClassStatus.Reason. Error() is unchanged (the
+// create path still returns the full text); only the public Reason is
+// category-level, because the cause can embed paths, argv, or env values. The
+// full cause is written to the kernel log by newClassFailure.
+type classFailure struct {
+	reason string
+	err    error
+}
+
+func (e *classFailure) Error() string { return e.err.Error() }
+func (e *classFailure) Unwrap() error { return e.err }
+
+func newClassFailure(reason string, err error) *classFailure {
+	log.Printf("managed-sessions: class setup failed (%s): %v", reason, err)
+	return &classFailure{reason: reason, err: err}
+}
+
+// classUnavailableReason is the only text that may reach
+// ManagedSessionClassStatus.Reason from a setup error: a fixed category,
+// never err.Error().
+func classUnavailableReason(err error) string {
+	var pe *processStartError
+	if errors.As(err, &pe) {
+		return pe.Error()
+	}
+	var cf *classFailure
+	if errors.As(err, &cf) {
+		return cf.reason
+	}
+	if err != nil {
+		log.Printf("managed-sessions: class marked unavailable (start failed): %v", err)
+	}
+	return "start failed"
+}
 
 func newProcessStartError(err error) *processStartError {
 	reason := "start failed"
@@ -1452,7 +1488,7 @@ func (d *HermesACPDriver) recordClassReadinessFromProcess(class *ResolvedRuntime
 func (d *HermesACPDriver) markClassUnavailable(name string, err error) {
 	reason := ""
 	if err != nil {
-		reason = err.Error()
+		reason = classUnavailableReason(err)
 	}
 	st := ManagedSessionClassStatus{
 		Class:    name,
@@ -1554,6 +1590,13 @@ func (d *HermesACPDriver) probeClass(ctx context.Context, name string) ManagedSe
 	return res
 }
 
+// classProbeFailure builds an unavailable status with a fixed category-level
+// Reason; the full error goes to the kernel log only.
+func (d *HermesACPDriver) classProbeFailure(name string, ts time.Time, reason string, err error) ManagedSessionClassStatus {
+	log.Printf("managed-sessions: class %q probe: %s: %v", name, reason, err)
+	return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: ts, Reason: reason}
+}
+
 func (d *HermesACPDriver) runClassProbe(ctx context.Context, name string) ManagedSessionClassStatus {
 	ts := d.clockNow().UTC()
 	if d.cfg.Classes == nil || !d.cfg.Classes.Has(name) {
@@ -1565,7 +1608,8 @@ func (d *HermesACPDriver) runClassProbe(ctx context.Context, name string) Manage
 	}
 	rc, err := d.cfg.Classes.Resolve(name, base, "")
 	if err != nil {
-		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: ts, Reason: err.Error()}
+		log.Printf("managed-sessions: class %q probe: resolve failed: %v", name, err)
+		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: ts, Reason: "class not resolvable"}
 	}
 	argv, env := rc.Argv, rc.Env
 	cwd := rc.Cwd
@@ -1578,12 +1622,12 @@ func (d *HermesACPDriver) runClassProbe(ctx context.Context, name string) Manage
 	cmd.Stderr = io.Discard
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: ts, Reason: err.Error()}
+		return d.classProbeFailure(name, ts, "pipe setup failed", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
-		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: ts, Reason: err.Error()}
+		return d.classProbeFailure(name, ts, "pipe setup failed", err)
 	}
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
@@ -1608,7 +1652,7 @@ func (d *HermesACPDriver) runClassProbe(ctx context.Context, name string) Manage
 	_ = cmd.Wait()
 
 	if callErr != nil {
-		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: d.clockNow().UTC(), Reason: callErr.Error()}
+		return d.classProbeFailure(name, d.clockNow().UTC(), "initialize failed", callErr)
 	}
 	if res.ProtocolVersion != 1 {
 		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: d.clockNow().UTC(), Reason: fmt.Sprintf("unsupported protocol version %d", res.ProtocolVersion)}
