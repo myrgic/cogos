@@ -40,6 +40,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -250,6 +251,90 @@ func (g *stageGuard) unlock(ip string) []string {
 	return ips
 }
 
+// guardListPath is the owner's lockout listing (stage-cli guard list); the
+// Stage answers it from its own table, so the kernel merges its own in.
+const guardListPath = "/local/dev/guard"
+
+// snapshot returns the kernel's live lockouts and recent miss counts.
+func (g *stageGuard) snapshot() (locked []string, misses map[string]int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	misses = map[string]int{}
+	for ip, t := range g.locked {
+		if now.Before(t) {
+			locked = append(locked, ip)
+		}
+	}
+	sort.Strings(locked)
+	for ip, xs := range g.fails {
+		n := 0
+		for _, t := range xs {
+			if now.Sub(t) < stageGuardWindowS*time.Second {
+				n++
+			}
+		}
+		if n > 0 {
+			misses[ip] = n
+		}
+	}
+	return locked, misses
+}
+
+// mergeGuardList unions the kernel's lockouts and miss counts into the Stage's
+// listing body (nil body = the Stage was unreachable). With neither a kernel
+// lockout nor a kernel miss count and a body to pass through, the body is
+// returned untouched (byte-identical).
+func (g *stageGuard) mergeGuardList(body []byte) []byte {
+	locked, misses := g.snapshot()
+	doc := map[string]any{}
+	if body != nil {
+		if len(locked) == 0 && len(misses) == 0 {
+			return body
+		}
+		if err := json.Unmarshal(body, &doc); err != nil {
+			return body
+		}
+	}
+	seen := map[string]bool{}
+	merged := []string{}
+	if xs, ok := doc["locked"].([]any); ok {
+		for _, x := range xs {
+			if ip, ok := x.(string); ok && !seen[ip] {
+				seen[ip] = true
+				merged = append(merged, ip)
+			}
+		}
+	}
+	for _, ip := range locked {
+		if !seen[ip] {
+			seen[ip] = true
+			merged = append(merged, ip)
+		}
+	}
+	m := map[string]any{}
+	if old, ok := doc["misses"].(map[string]any); ok {
+		for k, v := range old {
+			m[k] = v
+		}
+	}
+	for ip, n := range misses {
+		if old, ok := m[ip].(float64); !ok || int(old) < n {
+			m[ip] = n
+		}
+	}
+	doc["locked"] = merged
+	doc["misses"] = m
+	if _, ok := doc["limit"]; !ok {
+		doc["limit"] = stageGuardLimit
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 func stageGuardLogPath(p string) string {
 	p = stageGuardKeyLogRe.ReplaceAllString(p, "/$1/…")
 	p = stageGuardPairLogRe.ReplaceAllString(p, "/pair/…")
@@ -431,6 +516,21 @@ type stageReqKey struct{}
 // afterResponse is the proxy's ModifyResponse: count unknown-key guesses.
 func (g *stageGuard) afterResponse(resp *http.Response) error {
 	info, _ := resp.Request.Context().Value(stageReqKey{}).(*stageReqInfo)
+	if info != nil && info.path == guardListPath && resp.Request.Method == http.MethodGet {
+		if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Encoding") != "" {
+			return nil
+		}
+		b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if err != nil {
+			return err
+		}
+		out := g.mergeGuardList(b)
+		resp.Body = io.NopCloser(bytes.NewReader(out))
+		resp.ContentLength = int64(len(out))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(out)))
+		return nil
+	}
 	if info == nil || !stageIsKeyedPath(info.path) {
 		return nil
 	}

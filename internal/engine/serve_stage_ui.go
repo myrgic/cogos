@@ -124,6 +124,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -417,11 +418,22 @@ func newStageUIHandlerG(c StageUIConfig) (http.Handler, *stageGuard, error) {
 			// SetURL rewrites Host to the upstream's; the guard decides on the
 			// client's Host, so put it back.
 			r.Out.Host = r.In.Host
+			// The guard listing is merged in ModifyResponse, which needs the
+			// plain JSON body: drop the client's Accept-Encoding so the Stage
+			// answers uncompressed (a gzip body would skip the merge).
+			if r.In.Method == http.MethodGet && r.In.URL.Path == guardListPath {
+				r.Out.Header.Del("Accept-Encoding")
+			}
 		},
 		ModifyResponse: guard.afterResponse,
 		FlushInterval:  -1, // stream (SSE, long polls) without buffering
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			slog.Warn("stage-ui: upstream error", "upstream", upstream, "err", err)
+			if r.Method == http.MethodGet && r.URL.Path == guardListPath {
+				// Answer from the kernel's own lockouts.
+				writeJSONResp(w, http.StatusOK, json.RawMessage(guard.mergeGuardList(nil)))
+				return
+			}
 			http.Error(w, "stage upstream unavailable", http.StatusBadGateway)
 		},
 	}
