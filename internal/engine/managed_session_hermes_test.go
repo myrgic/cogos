@@ -886,4 +886,22 @@ func TestHermesACPSession_SecondForwardWhileOnePending(t *testing.T) {
 	if err := s.Cancel(); err != nil {
 		t.Fatal(err)
 	}
+	// Let the first forward resolve before the test returns: its goroutine must not outlive the test.
+	waitForwardsResolved(t, s)
+}
+
+// waitForwardsResolved blocks until no forwarded prompt is unresolved.
+func waitForwardsResolved(t *testing.T, s *HermesACPSession) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		n := s.fwdPending
+		s.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("a forwarded prompt never resolved")
 }

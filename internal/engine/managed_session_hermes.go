@@ -717,6 +717,7 @@ func (s *HermesACPSession) Redirect(content json.RawMessage) (string, error) {
 	fid := "f" + strconv.FormatUint(s.turnSeq.Add(1), 10)
 	conn := s.proc.currentConn()
 	startSeq := s.ring.LastSeq()
+	grace := forwardGrace // read here, on the caller's goroutine: the forward goroutine outlives tests that retune it
 	go func() {
 		type outcome struct {
 			stop string
@@ -734,7 +735,7 @@ func (s *HermesACPSession) Redirect(content json.RawMessage) (string, error) {
 		var o outcome
 		select {
 		case o = <-done:
-		case <-time.After(forwardGrace):
+		case <-time.After(grace):
 			// Still unanswered: Hermes answers a redirect at once, so the agent took this as a turn of its own.
 			// Prompt() is refused while fwdPending > 0, so nothing else can hold the slot unless the original turn
 			// is somehow still running; then the call is just slow, and we keep waiting for it.
