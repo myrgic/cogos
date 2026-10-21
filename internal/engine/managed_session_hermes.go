@@ -615,6 +615,119 @@ func (s *HermesACPSession) Prompt(content json.RawMessage) (string, error) {
 	return turn.id, nil
 }
 
+// ErrNoTurnInFlight is returned by Redirect when the turn it would redirect
+// has already ended; the caller starts a normal turn instead.
+var ErrNoTurnInFlight = errors.New("managed session: no turn in flight")
+
+// forwardGrace is how long a forwarded prompt may stay unanswered before the
+// kernel concludes the agent took it as a NEW turn, not a redirect. A redirect
+// is answered at once ("Redirected the active turn", stopReason end_turn).
+var forwardGrace = 2 * time.Second
+
+// promptIsTextOnly reports whether every block is a text block. Hermes
+// redirects only text-only prompts; rich media falls back to its own
+// next-turn queue, which the kernel could not track.
+func promptIsTextOnly(blocks json.RawMessage) bool {
+	var bs []struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(blocks, &bs) != nil || len(bs) == 0 {
+		return false
+	}
+	for _, b := range bs {
+		if b.Type != "text" {
+			return false
+		}
+	}
+	return true
+}
+
+// Redirect sends content to the agent as a session/prompt WHILE a turn runs.
+// ACP has no separate redirect method: an agent that supports it (Hermes:
+// state.is_running, agent.redirect) folds the prompt into the running turn and
+// answers end_turn at once. The kernel does not open a second turn: the running
+// turn keeps its id and ends with its own turn_end; the forward is recorded as
+// a prompt_forwarded event. Returns the id of the turn it was sent into.
+//
+// Text-only content only (ErrTurnInFlight otherwise, the old behaviour).
+// ErrNoTurnInFlight means the turn ended first: call Prompt.
+//
+// Race: if the turn ends between this check and the agent receiving the
+// prompt, the agent starts a fresh turn. That shows as a call still pending
+// after forwardGrace; the kernel then adopts it as the session's turn
+// (turn_start ... turn_end) so a running turn is never untracked.
+func (s *HermesACPSession) Redirect(content json.RawMessage) (string, error) {
+	blocks := content
+	var text string
+	if json.Unmarshal(content, &text) == nil {
+		blocks, _ = json.Marshal([]map[string]any{{"type": "text", "text": text}})
+	}
+	s.mu.Lock()
+	if s.state != StateLive {
+		st := s.state
+		s.mu.Unlock()
+		return "", fmt.Errorf("%w: session %s is %s", ErrSessionNotLive, s.id, st)
+	}
+	turn := s.turn
+	s.mu.Unlock()
+	if turn == nil {
+		return "", ErrNoTurnInFlight
+	}
+	if !promptIsTextOnly(blocks) {
+		return "", ErrTurnInFlight
+	}
+	fid := "f" + strconv.FormatUint(s.turnSeq.Add(1), 10)
+	conn := s.proc.currentConn()
+	go func() {
+		type outcome struct {
+			stop string
+			err  error
+		}
+		done := make(chan outcome, 1)
+		go func() {
+			var res struct {
+				StopReason string `json:"stopReason"`
+			}
+			err := conn.Call(context.Background(), "session/prompt", map[string]any{"sessionId": s.id, "prompt": blocks}, &res)
+			done <- outcome{res.StopReason, err}
+		}()
+		var adopted *hermesTurn
+		var o outcome
+		select {
+		case o = <-done:
+		case <-time.After(forwardGrace):
+			s.mu.Lock()
+			if s.turn == nil {
+				adopted = &hermesTurn{id: fid, startedAt: time.Now()}
+				s.turn = adopted
+			}
+			s.mu.Unlock()
+			if adopted != nil {
+				s.ring.Append(MSEventTurnStart, map[string]any{"turn_id": adopted.id, "prompt": blocks})
+			}
+			o = <-done
+		}
+		end := map[string]any{"turn_id": turn.id, "forward_id": fid, "prompt": blocks, "stop_reason": o.stop}
+		if o.err != nil {
+			if errors.Is(o.err, acprpc.ErrClosed) {
+				o.err = errors.New("agent process exited")
+			}
+			end["error"] = o.err.Error()
+		}
+		if adopted != nil {
+			s.mu.Lock()
+			if s.turn == adopted {
+				s.turn = nil
+			}
+			s.mu.Unlock()
+			s.ring.Append(MSEventTurnEnd, map[string]any{"turn_id": adopted.id, "stop_reason": o.stop})
+			return
+		}
+		s.ring.Append(MSEventPromptForwarded, end)
+	}()
+	return turn.id, nil
+}
+
 // Cancel sends session/cancel and resolves parked permissions as cancelled
 // (the ACP contract: a cancelled turn's pending permission requests answer
 // "cancelled").

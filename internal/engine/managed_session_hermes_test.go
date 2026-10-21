@@ -652,3 +652,129 @@ func TestHermesACPDriver_CreateOverDeadProcessFails(t *testing.T) {
 		t.Fatalf("a failed create left %d session(s) registered", n)
 	}
 }
+
+func TestHermesACPSession_RedirectFoldsIntoRunningTurn(t *testing.T) {
+	d := fakeHermesDriver(t, nil)
+	s, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := s.Prompt(json.RawMessage(`"redir start"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, s, 0, func(ev ManagedSessionEvent) bool {
+		return ev.Kind == MSEventSessionUpdate && strings.Contains(string(ev.Data), "working")
+	})
+	got, err := s.Redirect(json.RawMessage(`"actually do Y"`))
+	if err != nil {
+		t.Fatalf("redirect: %v", err)
+	}
+	if got != turn {
+		t.Fatalf("redirect joined %q, want the running turn %q", got, turn)
+	}
+	// The running turn finishes by itself, carrying the redirect text: no cancel was sent.
+	end := waitEvent(t, s, 0, kind(MSEventTurnEnd))
+	if !strings.Contains(string(end.Data), `"end_turn"`) || !strings.Contains(string(end.Data), turn) {
+		t.Fatalf("turn_end = %s", end.Data)
+	}
+	fwd := waitEvent(t, s, 0, kind(MSEventPromptForwarded))
+	if !strings.Contains(string(fwd.Data), "actually do Y") || !strings.Contains(string(fwd.Data), turn) {
+		t.Fatalf("prompt_forwarded = %s", fwd.Data)
+	}
+	waitEvent(t, s, 0, func(ev ManagedSessionEvent) bool {
+		return ev.Kind == MSEventSessionUpdate && strings.Contains(string(ev.Data), "continued:actually do Y")
+	})
+	// Exactly one turn_start and one turn_end: the forward opened no second turn.
+	starts, ends := 0, 0
+	for _, ev := range s.Events().Subscribe(0, 512).Replay {
+		switch ev.Kind {
+		case MSEventTurnStart:
+			starts++
+		case MSEventTurnEnd:
+			ends++
+		}
+	}
+	if starts != 1 || ends != 1 {
+		t.Fatalf("turn_start=%d turn_end=%d, want 1 and 1", starts, ends)
+	}
+	if s.Info().TurnInFlight != "" {
+		t.Fatalf("turn still in flight: %q", s.Info().TurnInFlight)
+	}
+}
+
+func TestHermesACPSession_RedirectRefusals(t *testing.T) {
+	d := fakeHermesDriver(t, nil)
+	s, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Redirect(json.RawMessage(`"idle"`)); err != ErrNoTurnInFlight {
+		t.Fatalf("idle redirect: %v, want ErrNoTurnInFlight", err)
+	}
+	if _, err := s.Prompt(json.RawMessage(`"redir start"`)); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, s, 0, kind(MSEventSessionUpdate))
+	img := json.RawMessage(`[{"type":"text","text":"x"},{"type":"image","data":"AA==","mimeType":"image/png"}]`)
+	if _, err := s.Redirect(img); err != ErrTurnInFlight {
+		t.Fatalf("rich-media redirect: %v, want ErrTurnInFlight", err)
+	}
+	if err := s.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, s, 0, kind(MSEventTurnEnd))
+}
+
+// An agent that does NOT fold the prompt in starts a second turn. If the first
+// turn has ended by the time the grace passes, the kernel must adopt the
+// second as the session's turn: a running turn is never left untracked.
+func TestHermesACPSession_RedirectIntoNonRedirectingAgentIsAdopted(t *testing.T) {
+	old := forwardGrace
+	forwardGrace = 300 * time.Millisecond
+	defer func() { forwardGrace = old }()
+	d := fakeHermesDriver(t, nil)
+	s, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prompt(json.RawMessage(`"sleep150 first"`)); err != nil { // ends before the grace
+		t.Fatal(err)
+	}
+	waitEvent(t, s, 0, kind(MSEventSessionUpdate))
+	// The fake treats "sleep" prompts as independent turns, so this one runs now,
+	// for 1.2 s, and outlives both the first turn and the grace.
+	if _, err := s.Redirect(json.RawMessage(`"sleep1200 second"`)); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, s, 0, kind(MSEventTurnEnd)) // the first turn's end
+	time.Sleep(forwardGrace + 150*time.Millisecond)
+	if s.Info().TurnInFlight == "" {
+		t.Fatalf("second turn is running but the session tracks none: %+v", s.Info())
+	}
+	starts := 0
+	for _, ev := range s.Events().Subscribe(0, 512).Replay {
+		if ev.Kind == MSEventTurnStart {
+			starts++
+		}
+	}
+	if starts != 2 {
+		t.Fatalf("turn_start events = %d, want 2 (the adopted turn is announced)", starts)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for s.Info().TurnInFlight != "" && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if s.Info().TurnInFlight != "" {
+		t.Fatalf("adopted turn never closed: %+v", s.Info())
+	}
+	ends := 0
+	for _, ev := range s.Events().Subscribe(0, 512).Replay {
+		if ev.Kind == MSEventTurnEnd {
+			ends++
+		}
+	}
+	if ends != 2 {
+		t.Fatalf("turn_end events = %d, want 2", ends)
+	}
+}

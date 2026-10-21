@@ -30,6 +30,7 @@ const (
 	MSEventTurnStart          = "turn_start"          // data: {turn_id, prompt}
 	MSEventTurnEnd            = "turn_end"            // data: {turn_id, stop_reason, error}
 	MSEventState              = "state"               // data: {state, error}
+	MSEventPromptForwarded    = "prompt_forwarded"    // data: {turn_id, forward_id, prompt, stop_reason, error}: a prompt sent into a running turn (Redirect)
 )
 
 // ManagedSessionEvent is one entry on a managed session's event stream, and
