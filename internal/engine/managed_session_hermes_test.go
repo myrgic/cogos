@@ -679,6 +679,9 @@ func TestHermesACPSession_RedirectFoldsIntoRunningTurn(t *testing.T) {
 		t.Fatalf("turn_end = %s", end.Data)
 	}
 	fwd := waitEvent(t, s, 0, kind(MSEventPromptForwarded))
+	if !strings.Contains(string(fwd.Data), `"confirmed":true`) {
+		t.Fatalf("a real fold-in must be confirmed: %s", fwd.Data)
+	}
 	if !strings.Contains(string(fwd.Data), "actually do Y") || !strings.Contains(string(fwd.Data), turn) {
 		t.Fatalf("prompt_forwarded = %s", fwd.Data)
 	}
@@ -811,5 +814,76 @@ func TestHermesACPSession_PromptRefusedWhileForwardUnresolved(t *testing.T) {
 	}
 	if _, err := s.Prompt(json.RawMessage(`"C"`)); err != nil {
 		t.Fatalf("Prompt after the adopted turn ended: %v", err)
+	}
+}
+
+// cog-review (PR #712, round 2): an agent that does not redirect but answers the forwarded prompt as a quick
+// turn of its own must not be reported as a fold-in; the turn that ran has to be visible.
+func TestHermesACPSession_FastNonRedirectingAnswerIsNotAFoldIn(t *testing.T) {
+	d := fakeHermesDriver(t, nil)
+	s, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prompt(json.RawMessage(`"slow job"`)); err != nil { // runs until cancelled; does not redirect
+		t.Fatal(err)
+	}
+	waitEvent(t, s, 0, kind(MSEventSessionUpdate))
+	running := s.Info().TurnInFlight
+	if _, err := s.Redirect(json.RawMessage(`"quick question"`)); err != nil { // the fake answers: echo, end_turn, at once
+		t.Fatal(err)
+	}
+	waitEvent(t, s, 0, func(ev ManagedSessionEvent) bool {
+		return ev.Kind == MSEventSessionUpdate && strings.Contains(string(ev.Data), "echo:quick question")
+	})
+	deadline := time.Now().Add(3 * time.Second)
+	var starts []ManagedSessionEvent
+	for time.Now().Before(deadline) && len(starts) < 2 {
+		starts = starts[:0]
+		for _, ev := range s.Events().Subscribe(0, 512).Replay {
+			if ev.Kind == MSEventTurnStart {
+				starts = append(starts, ev)
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for _, ev := range s.Events().Subscribe(0, 512).Replay {
+		if ev.Kind == MSEventPromptForwarded && strings.Contains(string(ev.Data), `"confirmed":true`) {
+			t.Fatalf("a quick non-redirecting answer was reported as a confirmed fold-in: %s", ev.Data)
+		}
+	}
+	if len(starts) != 2 {
+		t.Fatalf("turn_start events = %d, want 2: the turn that actually ran must be announced", len(starts))
+	}
+	if got := s.Info().TurnInFlight; got != running {
+		t.Fatalf("the original turn must still be the tracked one: have %q want %q", got, running)
+	}
+	if err := s.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Only one forward may be unresolved at a time.
+func TestHermesACPSession_SecondForwardWhileOnePending(t *testing.T) {
+	old := forwardGrace
+	forwardGrace = 5 * time.Second
+	defer func() { forwardGrace = old }()
+	d := fakeHermesDriver(t, nil)
+	s, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prompt(json.RawMessage(`"slow job"`)); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, s, 0, kind(MSEventSessionUpdate))
+	if _, err := s.Redirect(json.RawMessage(`"sleep800 first forward"`)); err != nil { // pending for 800 ms
+		t.Fatal(err)
+	}
+	if _, err := s.Redirect(json.RawMessage(`"second forward"`)); err != ErrTurnInFlight {
+		t.Fatalf("second forward while one is pending = %v, want ErrTurnInFlight", err)
+	}
+	if err := s.Cancel(); err != nil {
+		t.Fatal(err)
 	}
 }

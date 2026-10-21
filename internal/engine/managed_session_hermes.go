@@ -35,6 +35,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -618,6 +619,33 @@ func (s *HermesACPSession) Prompt(content json.RawMessage) (string, error) {
 	return turn.id, nil
 }
 
+// redirectAck is the text Hermes streams when it folds a prompt into the running turn
+// (acp_adapter/server.py: "Redirected the active turn with your correction."). Hermes answers a fold-in
+// with this one message and stopReason end_turn; an agent that instead ran the prompt as a turn of its
+// own does not say it. Speed cannot tell the two apart, so the kernel requires the ack.
+const redirectAck = "Redirected the active turn"
+
+// sawRedirectAck reports whether an agent_message_chunk carrying redirectAck was appended after seq.
+func (s *HermesACPSession) sawRedirectAck(seq uint64) bool {
+	sub := s.ring.Subscribe(seq, 1)
+	defer s.ring.Unsubscribe(sub)
+	for _, ev := range sub.Replay {
+		if ev.Kind != MSEventSessionUpdate {
+			continue
+		}
+		var u struct {
+			Variant string `json:"sessionUpdate"`
+			Content struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(ev.Data, &u) == nil && u.Variant == "agent_message_chunk" && strings.Contains(u.Content.Text, redirectAck) {
+			return true
+		}
+	}
+	return false
+}
+
 // ErrNoTurnInFlight is returned by Redirect when the turn it would redirect
 // has already ended; the caller starts a normal turn instead.
 var ErrNoTurnInFlight = errors.New("managed session: no turn in flight")
@@ -680,10 +708,15 @@ func (s *HermesACPSession) Redirect(content json.RawMessage) (string, error) {
 		s.mu.Unlock()
 		return "", ErrTurnInFlight
 	}
+	if s.fwdPending > 0 { // one forward at a time: a second could not be told apart from the first's answer
+		s.mu.Unlock()
+		return "", ErrTurnInFlight
+	}
 	s.fwdPending++ // released below, in the same critical section that adopts or resolves the forward
 	s.mu.Unlock()
 	fid := "f" + strconv.FormatUint(s.turnSeq.Add(1), 10)
 	conn := s.proc.currentConn()
+	startSeq := s.ring.LastSeq()
 	go func() {
 		type outcome struct {
 			stop string
@@ -716,28 +749,35 @@ func (s *HermesACPSession) Redirect(content json.RawMessage) (string, error) {
 			}
 			o = <-done
 		}
+		confirmed := adopted == nil && o.err == nil && o.stop == "end_turn" && s.sawRedirectAck(startSeq)
 		s.mu.Lock()
 		s.fwdPending--
 		if adopted != nil && s.turn == adopted {
 			s.turn = nil
 		}
 		s.mu.Unlock()
-		end := map[string]any{"turn_id": turn.id, "forward_id": fid, "prompt": blocks, "stop_reason": o.stop}
+		if o.err != nil && errors.Is(o.err, acprpc.ErrClosed) {
+			o.err = errors.New("agent process exited")
+		}
+		errText := ""
 		if o.err != nil {
-			if errors.Is(o.err, acprpc.ErrClosed) {
-				o.err = errors.New("agent process exited")
-			}
-			end["error"] = o.err.Error()
+			errText = o.err.Error()
 		}
-		if adopted != nil {
-			endAdopted := map[string]any{"turn_id": adopted.id, "stop_reason": o.stop}
-			if o.err != nil {
-				endAdopted["error"] = o.err.Error()
+		switch {
+		case adopted != nil: // the agent ran it as a turn that outlived the grace
+			end := map[string]any{"turn_id": adopted.id, "stop_reason": o.stop}
+			if errText != "" {
+				end["error"] = errText
 			}
-			s.ring.Append(MSEventTurnEnd, endAdopted)
-			return
+			s.ring.Append(MSEventTurnEnd, end)
+		case confirmed: // Hermes folded it into the running turn
+			s.ring.Append(MSEventPromptForwarded, map[string]any{"turn_id": turn.id, "forward_id": fid, "prompt": blocks, "stop_reason": o.stop, "confirmed": true})
+		case errText != "": // the call failed: say so, claim nothing
+			s.ring.Append(MSEventPromptForwarded, map[string]any{"turn_id": turn.id, "forward_id": fid, "prompt": blocks, "stop_reason": o.stop, "confirmed": false, "error": errText})
+		default: // answered without the ack: the agent ran it as a turn of its own, and fast
+			s.ring.Append(MSEventTurnStart, map[string]any{"turn_id": fid, "prompt": blocks})
+			s.ring.Append(MSEventTurnEnd, map[string]any{"turn_id": fid, "stop_reason": o.stop})
 		}
-		s.ring.Append(MSEventPromptForwarded, end)
 	}()
 	return turn.id, nil
 }
