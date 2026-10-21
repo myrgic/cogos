@@ -297,3 +297,30 @@ func TestManagedSessionHTTP_WritesNeedGrant(t *testing.T) {
 		t.Fatalf("list = %d, want 200", code)
 	}
 }
+
+func TestManagedSessionHTTP_IfBusyForward(t *testing.T) {
+	ts, _ := managedSessionTestServer(t)
+	var info ManagedSessionInfo
+	if code := msDo(t, ts, "POST", "/v1/managed-sessions", map[string]any{"driver": "hermes-acp", "profile": "cog", "cwd": t.TempDir()}, &info); code != http.StatusCreated {
+		t.Fatalf("create = %d", code)
+	}
+	id := info.SessionID
+	var first map[string]any
+	if code := msDo(t, ts, "POST", "/v1/managed-sessions/"+id+"/prompt", map[string]any{"prompt": "redir go"}, &first); code != http.StatusAccepted {
+		t.Fatalf("first = %d", code)
+	}
+	// default is unchanged: busy -> 409
+	if code := msDo(t, ts, "POST", "/v1/managed-sessions/"+id+"/prompt", map[string]any{"prompt": "again"}, nil); code != http.StatusConflict {
+		t.Fatalf("default busy prompt = %d, want 409", code)
+	}
+	if code := msDo(t, ts, "POST", "/v1/managed-sessions/"+id+"/prompt", map[string]any{"prompt": "x", "if_busy": "bogus"}, nil); code != http.StatusBadRequest {
+		t.Fatalf("bad if_busy = %d, want 400", code)
+	}
+	var fwd map[string]any
+	if code := msDo(t, ts, "POST", "/v1/managed-sessions/"+id+"/prompt", map[string]any{"prompt": "do Y instead", "if_busy": "forward"}, &fwd); code != http.StatusAccepted {
+		t.Fatalf("forward = %d", code)
+	}
+	if fwd["forwarded"] != true || fwd["turn_id"] != first["turn_id"] {
+		t.Fatalf("forward reply = %v (first %v)", fwd, first)
+	}
+}

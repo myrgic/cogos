@@ -192,6 +192,11 @@ func (s *Server) handleManagedSessionPrompt(w http.ResponseWriter, r *http.Reque
 	}
 	var req struct {
 		Prompt json.RawMessage `json:"prompt"`
+		// IfBusy says what to do when a turn is already running: "reject"
+		// (default; 409) or "forward" (send the text into the running turn
+		// as the agent's own redirect; 202 with forwarded=true and the id of
+		// the turn it joined).
+		IfBusy string `json:"if_busy"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -200,7 +205,20 @@ func (s *Server) handleManagedSessionPrompt(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusBadRequest, "invalid_request", "prompt is required")
 		return
 	}
+	if req.IfBusy != "" && req.IfBusy != "reject" && req.IfBusy != "forward" {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request", `if_busy must be "reject" or "forward"`)
+		return
+	}
 	turn, err := sess.Prompt(req.Prompt)
+	if errors.Is(err, ErrTurnInFlight) && req.IfBusy == "forward" {
+		turn, err = sess.Redirect(req.Prompt)
+		if errors.Is(err, ErrNoTurnInFlight) { // it ended in between: an ordinary turn
+			turn, err = sess.Prompt(req.Prompt)
+		} else if err == nil {
+			writeJSONResp(w, http.StatusAccepted, map[string]any{"turn_id": turn, "session_id": sess.ID(), "forwarded": true})
+			return
+		}
+	}
 	if err != nil {
 		writeManagedSessionError(w, err)
 		return
