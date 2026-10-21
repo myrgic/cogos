@@ -31,6 +31,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"regexp"
@@ -118,6 +120,18 @@ type HermesACPDriverConfig struct {
 	MaxRestarts    int           // default 3
 	RestartBackoff time.Duration // default 1s, doubled per restart
 
+	// ProbeCacheTTL is how long a class readiness result (probed or recorded
+	// from a successful create) is served before the class is probed again.
+	// Default 60s.
+	ProbeCacheTTL time.Duration
+
+	// now is a test seam for the readiness cache clock; nil = time.Now.
+	now func() time.Time
+
+	// afterProbeWait is a test seam: called in a probe joiner right after the
+	// leader signals completion, before the joiner returns.
+	afterProbeWait func(name string)
+
 	// afterRestartLoad is a test seam: called after each restart's
 	// session/load returns, before its state write.
 	afterRestartLoad func(*HermesACPSession)
@@ -158,6 +172,9 @@ func (c *HermesACPDriverConfig) defaults() {
 	if c.RestartBackoff <= 0 {
 		c.RestartBackoff = time.Second
 	}
+	if c.ProbeCacheTTL <= 0 {
+		c.ProbeCacheTTL = 60 * time.Second
+	}
 }
 
 // HermesACPDriver owns Hermes ACP processes and the sessions inside them.
@@ -168,6 +185,19 @@ type HermesACPDriver struct {
 	sessions map[string]*HermesACPSession
 	loads    map[string]*loadClaim // in-flight Create{Load: id}, one per id
 	closed   bool
+
+	classProbeMu       sync.Mutex
+	classProbeCache    map[string]ManagedSessionClassStatus
+	classProbeInflight map[string]*classProbeFlight
+}
+
+// classProbeFlight is one in-flight class probe. The leader stores res before
+// closing done, so a joiner returns the leader's actual result and never
+// depends on the shared cache still holding it (invalidateClassReadiness can
+// drop the entry between close(done) and the joiner waking).
+type classProbeFlight struct {
+	done chan struct{}
+	res  ManagedSessionClassStatus
 }
 
 // loadClaim is the single in-flight load of one session id. A second
@@ -183,7 +213,22 @@ type loadClaim struct {
 // NewHermesACPDriver returns a driver with no sessions.
 func NewHermesACPDriver(cfg HermesACPDriverConfig) *HermesACPDriver {
 	cfg.defaults()
-	return &HermesACPDriver{cfg: cfg, sessions: map[string]*HermesACPSession{}, loads: map[string]*loadClaim{}}
+	return &HermesACPDriver{cfg: cfg, sessions: map[string]*HermesACPSession{}, loads: map[string]*loadClaim{}, classProbeCache: map[string]ManagedSessionClassStatus{}, classProbeInflight: map[string]*classProbeFlight{}}
+}
+
+// invalidateClassReadiness drops a class's cached readiness entry.
+func (d *HermesACPDriver) invalidateClassReadiness(name string) {
+	d.classProbeMu.Lock()
+	delete(d.classProbeCache, name)
+	d.classProbeMu.Unlock()
+}
+
+// clockNow is the readiness cache clock (time.Now unless a test seam is set).
+func (d *HermesACPDriver) clockNow() time.Time {
+	if d.cfg.now != nil {
+		return d.cfg.now()
+	}
+	return time.Now()
 }
 
 // ── process ─────────────────────────────────────────────────────────────────
@@ -194,15 +239,17 @@ type hermesProcess struct {
 	cwd     string
 	class   *ResolvedRuntimeClass // nil = the built-in default class
 
-	mu        sync.Mutex
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	conn      *acprpc.Conn
-	startedAt time.Time
-	restarts  int
-	stopping  bool
-	sessions  map[string]*HermesACPSession
-	agentInfo json.RawMessage
+	mu                sync.Mutex
+	cmd               *exec.Cmd
+	stdin             io.WriteCloser
+	conn              *acprpc.Conn
+	startedAt         time.Time
+	restarts          int
+	stopping          bool
+	sessions          map[string]*HermesACPSession
+	agentInfo         json.RawMessage
+	protocolVersion   int
+	agentCapabilities json.RawMessage
 }
 
 func (d *HermesACPDriver) newProcess(profile, cwd string, class *ResolvedRuntimeClass) *hermesProcess {
@@ -233,14 +280,14 @@ func (p *hermesProcess) start(ctx context.Context) (*acprpc.Conn, error) {
 	cmd.Stderr = io.Discard
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, err
+		return nil, newClassFailure("pipe setup failed", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return nil, newClassFailure("pipe setup failed", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("hermes-acp: start %v: %w", argv, err)
+		return nil, newProcessStartError(err)
 	}
 	conn := acprpc.NewConn(stdout, stdin, p)
 	p.mu.Lock()
@@ -250,7 +297,9 @@ func (p *hermesProcess) start(ctx context.Context) (*acprpc.Conn, error) {
 	ictx, cancel := context.WithTimeout(ctx, p.d.cfg.InitTimeout)
 	defer cancel()
 	var res struct {
-		AgentInfo json.RawMessage `json:"agentInfo"`
+		ProtocolVersion   int             `json:"protocolVersion"`
+		AgentInfo         json.RawMessage `json:"agentInfo"`
+		AgentCapabilities json.RawMessage `json:"agentCapabilities"`
 	}
 	err = conn.Call(ictx, "initialize", map[string]any{
 		"protocolVersion":    1,
@@ -260,13 +309,81 @@ func (p *hermesProcess) start(ctx context.Context) (*acprpc.Conn, error) {
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return nil, fmt.Errorf("hermes-acp: initialize: %w", err)
+		return nil, newClassFailure("initialize failed", fmt.Errorf("hermes-acp: initialize: %w", err))
+	}
+	if res.ProtocolVersion != 1 {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, newClassFailure(fmt.Sprintf("unsupported protocol version %d", res.ProtocolVersion), fmt.Errorf("hermes-acp: initialize: unsupported protocol version %d", res.ProtocolVersion))
 	}
 	p.mu.Lock()
 	p.agentInfo = res.AgentInfo
+	p.protocolVersion = res.ProtocolVersion
+	p.agentCapabilities = res.AgentCapabilities
 	p.mu.Unlock()
 	go p.watch(cmd, conn)
 	return conn, nil
+}
+
+// processStartError is a subprocess start failure whose message is safe to
+// expose (it lands in ManagedSessionClassStatus.Reason and create errors):
+// the OS error from cmd.Start embeds the resolved executable path, so the
+// public text is a fixed, path-free reason. The full error stays reachable
+// through Unwrap (errors.Is/As) and is written to the kernel log only.
+type processStartError struct {
+	reason string
+	err    error
+}
+
+func (e *processStartError) Error() string { return "hermes-acp: start process: " + e.reason }
+func (e *processStartError) Unwrap() error { return e.err }
+
+// classFailure tags a subprocess-setup error with a fixed, category-level
+// reason for ManagedSessionClassStatus.Reason. Error() is unchanged (the
+// create path still returns the full text); only the public Reason is
+// category-level, because the cause can embed paths, argv, or env values. The
+// full cause is written to the kernel log by newClassFailure.
+type classFailure struct {
+	reason string
+	err    error
+}
+
+func (e *classFailure) Error() string { return e.err.Error() }
+func (e *classFailure) Unwrap() error { return e.err }
+
+func newClassFailure(reason string, err error) *classFailure {
+	log.Printf("managed-sessions: class setup failed (%s): %v", reason, err)
+	return &classFailure{reason: reason, err: err}
+}
+
+// classUnavailableReason is the only text that may reach
+// ManagedSessionClassStatus.Reason from a setup error: a fixed category,
+// never err.Error().
+func classUnavailableReason(err error) string {
+	var pe *processStartError
+	if errors.As(err, &pe) {
+		return pe.Error()
+	}
+	var cf *classFailure
+	if errors.As(err, &cf) {
+		return cf.reason
+	}
+	if err != nil {
+		log.Printf("managed-sessions: class marked unavailable (start failed): %v", err)
+	}
+	return "start failed"
+}
+
+func newProcessStartError(err error) *processStartError {
+	reason := "start failed"
+	switch {
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, exec.ErrNotFound):
+		reason = "executable not found"
+	case errors.Is(err, fs.ErrPermission):
+		reason = "executable not permitted"
+	}
+	log.Printf("managed-sessions: subprocess start failed (%s): %v", reason, err)
+	return &processStartError{reason: reason, err: err}
 }
 
 func (p *hermesProcess) currentConn() *acprpc.Conn {
@@ -301,6 +418,12 @@ func (p *hermesProcess) watch(cmd *exec.Cmd, conn *acprpc.Conn) {
 		exitErr = errors.New("agent process exited")
 	}
 	if lived < p.d.cfg.CrashWindow || restarts >= p.d.cfg.MaxRestarts {
+		// The class's agent is down for good: its cached readiness is stale.
+		// Drop it so the next read re-probes (before the Crashed state is
+		// visible, so a reader that sees Crashed never sees the old receipt).
+		if p.class != nil {
+			p.d.invalidateClassReadiness(p.class.Name)
+		}
 		for _, s := range sessions {
 			s.setState(StateCrashed, exitErr)
 		}
@@ -319,6 +442,9 @@ func (p *hermesProcess) watch(cmd *exec.Cmd, conn *acprpc.Conn) {
 	p.mu.Unlock()
 	conn, err := p.start(context.Background())
 	if err != nil {
+		if p.class != nil {
+			p.d.invalidateClassReadiness(p.class.Name)
+		}
 		for _, s := range sessions {
 			s.setState(StateCrashed, err)
 		}
@@ -1134,7 +1260,16 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		}
 		proc = d.newProcess(opts.Profile, opts.Cwd, class)
 		if _, err := proc.start(ctx); err != nil {
+			// A failure caused by the caller's own context ending says
+			// nothing about the class; only a genuine failure (or the
+			// InitTimeout deadline, which leaves ctx live) is cached.
+			if class != nil && ctx.Err() == nil && !errors.Is(err, context.Canceled) {
+				d.markClassUnavailable(class.Name, err)
+			}
 			return nil, err
+		}
+		if class != nil {
+			d.recordClassReadinessFromProcess(class, proc)
 		}
 	}
 
@@ -1327,6 +1462,219 @@ func (d *HermesACPDriver) detach(s *HermesACPSession) {
 	}
 	s.ring.Close()
 }
+
+// recordClassReadinessFromProcess caches a ready receipt derived from a
+// process that successfully initialized, so a later probe/create does not
+// spawn a second expensive child for the same class.
+func (d *HermesACPDriver) recordClassReadinessFromProcess(class *ResolvedRuntimeClass, p *hermesProcess) {
+	p.mu.Lock()
+	pv := p.protocolVersion
+	caps := p.agentCapabilities
+	p.mu.Unlock()
+	name := class.Name
+	st := ManagedSessionClassStatus{
+		Class:             name,
+		Status:            "ready",
+		ProbedAt:          d.clockNow().UTC(),
+		ProtocolVersion:   pv,
+		AgentCapabilities: caps,
+		Receipt:           class.Receipt(),
+	}
+	d.classProbeMu.Lock()
+	d.classProbeCache[name] = st
+	d.classProbeMu.Unlock()
+}
+
+func (d *HermesACPDriver) markClassUnavailable(name string, err error) {
+	reason := ""
+	if err != nil {
+		reason = classUnavailableReason(err)
+	}
+	st := ManagedSessionClassStatus{
+		Class:    name,
+		Status:   "unavailable",
+		ProbedAt: d.clockNow().UTC(),
+		Reason:   reason,
+	}
+	d.classProbeMu.Lock()
+	d.classProbeCache[name] = st
+	d.classProbeMu.Unlock()
+}
+
+// ClassNames returns the declared (sorted) class names.
+func (d *HermesACPDriver) ClassNames() []string {
+	if d.cfg.Classes == nil {
+		return nil
+	}
+	return d.cfg.Classes.Names()
+}
+
+func (d *HermesACPDriver) getCachedClassReadiness(name string) (ManagedSessionClassStatus, bool) {
+	d.classProbeMu.Lock()
+	defer d.classProbeMu.Unlock()
+	st, ok := d.classProbeCache[name]
+	return st, ok
+}
+
+// ClassStatus probes (or returns the cached receipt for) one declared class.
+func (d *HermesACPDriver) ClassStatus(ctx context.Context, name string) ManagedSessionClassStatus {
+	return d.probeClass(ctx, name)
+}
+
+// ProbeClass is an alias for ClassStatus.
+func (d *HermesACPDriver) ProbeClass(ctx context.Context, name string) ManagedSessionClassStatus {
+	return d.probeClass(ctx, name)
+}
+
+// ProbeClasses probes every declared class.
+func (d *HermesACPDriver) ProbeClasses(ctx context.Context) []ManagedSessionClassStatus {
+	names := d.ClassNames()
+	out := make([]ManagedSessionClassStatus, 0, len(names))
+	for _, n := range names {
+		out = append(out, d.probeClass(ctx, n))
+	}
+	return out
+}
+
+// ClassStatuses is an alias for ProbeClasses.
+func (d *HermesACPDriver) ClassStatuses(ctx context.Context) []ManagedSessionClassStatus {
+	return d.ProbeClasses(ctx)
+}
+
+// ClassReadiness is an alias for ProbeClasses.
+func (d *HermesACPDriver) ClassReadiness(ctx context.Context) []ManagedSessionClassStatus {
+	return d.ProbeClasses(ctx)
+}
+
+// ReadinessReceipts is an alias for ProbeClasses.
+func (d *HermesACPDriver) ReadinessReceipts(ctx context.Context) []ManagedSessionClassStatus {
+	return d.ProbeClasses(ctx)
+}
+
+func (d *HermesACPDriver) probeClass(ctx context.Context, name string) ManagedSessionClassStatus {
+	d.classProbeMu.Lock()
+	if cached, ok := d.classProbeCache[name]; ok {
+		if d.clockNow().Sub(cached.ProbedAt) < d.cfg.ProbeCacheTTL {
+			d.classProbeMu.Unlock()
+			return cached
+		}
+		// Expired: drop it and re-probe (an inflight probe is joined below).
+		delete(d.classProbeCache, name)
+	}
+	if fl, ok := d.classProbeInflight[name]; ok {
+		d.classProbeMu.Unlock()
+		select {
+		case <-fl.done:
+		case <-ctx.Done():
+			return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: d.clockNow().UTC(), Reason: ctx.Err().Error()}
+		}
+		if d.cfg.afterProbeWait != nil {
+			d.cfg.afterProbeWait(name)
+		}
+		return fl.res // written before close(done): safe to read
+	}
+	fl := &classProbeFlight{done: make(chan struct{})}
+	d.classProbeInflight[name] = fl
+	d.classProbeMu.Unlock()
+
+	// The result lands in a cache shared by every caller, so the probe must
+	// not die with this caller's context. It stays bounded by InitTimeout.
+	res := d.runClassProbe(context.WithoutCancel(ctx), name)
+
+	d.classProbeMu.Lock()
+	d.classProbeCache[name] = res
+	delete(d.classProbeInflight, name)
+	fl.res = res
+	d.classProbeMu.Unlock()
+	close(fl.done)
+	return res
+}
+
+// classProbeFailure builds an unavailable status with a fixed category-level
+// Reason; the full error goes to the kernel log only.
+func (d *HermesACPDriver) classProbeFailure(name string, ts time.Time, reason string, err error) ManagedSessionClassStatus {
+	log.Printf("managed-sessions: class %q probe: %s: %v", name, reason, err)
+	return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: ts, Reason: reason}
+}
+
+func (d *HermesACPDriver) runClassProbe(ctx context.Context, name string) ManagedSessionClassStatus {
+	ts := d.clockNow().UTC()
+	if d.cfg.Classes == nil || !d.cfg.Classes.Has(name) {
+		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: ts, Reason: "unknown runtime class"}
+	}
+	base := d.cfg.Env
+	if base == nil {
+		base = os.Environ()
+	}
+	rc, err := d.cfg.Classes.Resolve(name, base, "")
+	if err != nil {
+		log.Printf("managed-sessions: class %q probe: resolve failed: %v", name, err)
+		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: ts, Reason: "class not resolvable"}
+	}
+	argv, env := rc.Argv, rc.Env
+	cwd := rc.Cwd
+	if len(argv) == 0 {
+		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: ts, Reason: "empty argv"}
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = cwd
+	cmd.Env = env
+	cmd.Stderr = io.Discard
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return d.classProbeFailure(name, ts, "pipe setup failed", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return d.classProbeFailure(name, ts, "pipe setup failed", err)
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: ts, Reason: newProcessStartError(err).Error()}
+	}
+
+	conn := acprpc.NewConn(stdout, stdin, acpProbeHandler{})
+	ictx, cancel := context.WithTimeout(ctx, d.cfg.InitTimeout)
+	var res struct {
+		ProtocolVersion   int             `json:"protocolVersion"`
+		AgentInfo         json.RawMessage `json:"agentInfo"`
+		AgentCapabilities json.RawMessage `json:"agentCapabilities"`
+	}
+	callErr := conn.Call(ictx, "initialize", map[string]any{
+		"protocolVersion":    1,
+		"clientCapabilities": map[string]any{"fs": map[string]any{"readTextFile": false, "writeTextFile": false}, "terminal": false},
+		"clientInfo":         map[string]any{"name": "cogos-kernel", "version": "0.1"},
+	}, &res)
+	cancel()
+	// kill and reap
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+
+	if callErr != nil {
+		return d.classProbeFailure(name, d.clockNow().UTC(), "initialize failed", callErr)
+	}
+	if res.ProtocolVersion != 1 {
+		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: d.clockNow().UTC(), Reason: fmt.Sprintf("unsupported protocol version %d", res.ProtocolVersion)}
+	}
+	caps := res.AgentCapabilities
+	st := ManagedSessionClassStatus{
+		Class:             name,
+		Status:            "ready",
+		ProbedAt:          d.clockNow().UTC(),
+		ProtocolVersion:   res.ProtocolVersion,
+		AgentCapabilities: caps,
+		Receipt:           rc.Receipt(),
+	}
+	return st
+}
+
+type acpProbeHandler struct{}
+
+func (acpProbeHandler) HandleRequest(string, json.RawMessage) (any, error) {
+	return nil, &acprpc.Error{Code: acprpc.CodeMethodNotFound, Message: "not supported"}
+}
+func (acpProbeHandler) HandleNotification(string, json.RawMessage) {}
 
 // TurnsInFlight counts sessions with a running turn (self-update gate seam:
 // the brief says the kernel should refuse to restart while one is running).

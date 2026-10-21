@@ -3354,12 +3354,22 @@
     },
     {
       "file": "internal/engine/managed_session_hermes.go",
-      "line": 230,
+      "line": 277,
       "column": 9,
       "func": "(*hermesProcess).start",
       "subsystem": "internal:engine",
       "raw": "exec.Command(argv[0], argv[1:]...)",
       "dir": "{cwd}",
+      "dir_known": true
+    },
+    {
+      "file": "internal/engine/managed_session_hermes.go",
+      "line": 1619,
+      "column": 9,
+      "func": "(*HermesACPDriver).runClassProbe",
+      "subsystem": "internal:engine",
+      "raw": "exec.Command(argv[0], argv[1:]...)",
+      "dir": "{rc.Cwd}",
       "dir_known": true
     },
     {

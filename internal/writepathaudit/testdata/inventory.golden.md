@@ -307,7 +307,7 @@ These sites write to disk but this tool could not structurally resolve their pat
 
 v1 counts direct filesystem primitives + sqlite only (see the package doc). A spawned process can write anywhere its own logic chooses, which this tool cannot see without executing it — these sites are enumerated for visibility, with cmd.Dir resolved where possible, but are NOT classified into any bin above and do not contribute to the totals at the top of this document. Non-Go writers (shell/Python scripts this repo runs) are not enumerable by a Go source scanner at all and are not listed here either — see the package doc.
 
-Total subprocess sites: 88
+Total subprocess sites: 89
 
 | cmd.Dir | call | file:line | subsystem |
 |---|---|---|---|
@@ -339,7 +339,8 @@ Total subprocess sites: 88
 | _(not set — inherits the process's own working directory)_ | `exec.Command("taskkill", "/PID", strconv.Itoa(pid))` | internal/engine/daemon_stop_windows.go:37 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))` | internal/engine/daemon_stop_windows.go:56 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH")` | internal/engine/daemon_stop_windows.go:77 | internal:engine |
-| `{cwd}` | `exec.Command(argv[0], argv[1:]...)` | internal/engine/managed_session_hermes.go:230 | internal:engine |
+| `{cwd}` | `exec.Command(argv[0], argv[1:]...)` | internal/engine/managed_session_hermes.go:277 | internal:engine |
+| `{rc.Cwd}` | `exec.Command(argv[0], argv[1:]...)` | internal/engine/managed_session_hermes.go:1619 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "python3", cmdArgs...)` | internal/engine/mcp_architecture.go:156 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command(player, args...)` | internal/engine/mcp_modality_proxy.go:879 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, rgPath, args...)` | internal/engine/mcp_server.go:3268 | internal:engine |
