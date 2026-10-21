@@ -452,6 +452,10 @@ func newStageUIHandlerG(c StageUIConfig) (http.Handler, *stageGuard, error) {
 					writeStageKeyRefusal(w, info.ws)
 					return
 				}
+				if ans := guard.shadow.roleRefusal(r.Method, info.path, info.ws); ans != nil {
+					writeStageRoleRefusal(w, ans, info.path)
+					return
+				}
 			}
 		}
 		clean := path.Clean(r.URL.Path)

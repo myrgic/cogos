@@ -151,7 +151,10 @@ func TestStageUIKeys_EnforceVectors(t *testing.T) {
 				_, seg, pair, _ := keyedClass(p)
 				originRefused := s.Headers["origin"] != "" // the guard's own 4403, not the key gate
 				heldKey := seg == skGK
-				mustReach := pair || heldKey || !strings.HasPrefix(p, "/r/")
+				// A held guest key on an owner-only route is the role gate's (S6): the
+				// kernel answers it with the same 404 the Stage's key (this vector) expects.
+				roleGate := g.shadow.roleRefusal(method, p, s.Kind == "ws") != nil
+				mustReach := (pair || heldKey || !strings.HasPrefix(p, "/r/")) && !roleGate
 				switch {
 				case originRefused:
 					if len(up.hits()) != 0 {
