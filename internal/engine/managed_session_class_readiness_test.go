@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -295,4 +296,55 @@ func TestClassReadiness_JoinerSurvivesInvalidateAfterLeaderCompletes(t *testing.
 	if lst := <-leaderDone; lst.Status != st.Status {
 		t.Fatalf("joiner %q differs from leader %q", st.Status, lst.Status)
 	}
+}
+
+// Review #704 round 5: ManagedSessionClassStatus.Reason is public. A start
+// failure must not carry the executable path (or its directory), either from
+// the probe or from the create()-time markClassUnavailable path.
+func TestClassReadiness_StartFailureReasonIsPathFree(t *testing.T) {
+	const dir = "/nonexistent-leak-dir-704"
+	const bin = dir + "/secret-wrapper"
+	assertClean := func(label, reason string) {
+		t.Helper()
+		if reason == "" {
+			t.Fatalf("%s: empty reason", label)
+		}
+		if containsString(reason, bin) || containsString(reason, dir) || containsString(reason, "secret-wrapper") {
+			t.Fatalf("%s: reason leaks executable path: %q", label, reason)
+		}
+	}
+	cfg := readinessClassConfig(t, "bad", RuntimeClass{Argv: []string{bin}})
+
+	// Probe path, over the real HTTP endpoint.
+	srv := newGrantAuthTestServer(t)
+	srv.managedSessions = readinessDriver(t, cfg, nil)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	tok := mintScopedTestGrant(t, srv, "guest-surface", ScopeManagedSessionsClassPrefix+"bad")
+	var out struct {
+		Classes []ManagedSessionClassStatus `json:"classes"`
+	}
+	if code := g0Do(t, ts, tok, "GET", "/v1/managed-sessions/classes", nil, &out); code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if len(out.Classes) != 1 || out.Classes[0].Status != "unavailable" {
+		t.Fatalf("classes = %+v", out.Classes)
+	}
+	assertClean("probe", out.Classes[0].Reason)
+
+	// Create path: markClassUnavailable fed by proc.start (no prior probe).
+	d := readinessDriver(t, cfg, nil)
+	_, err := d.Create(context.Background(), HermesACPOpts{Class: "bad", Cwd: t.TempDir()})
+	if err == nil {
+		t.Fatal("create with nonexistent argv should fail")
+	}
+	assertClean("create error", err.Error())
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("full cause must stay reachable via errors.Is, got %v", err)
+	}
+	st, ok := d.getCachedClassReadiness("bad")
+	if !ok {
+		t.Fatal("create failure should cache unavailable")
+	}
+	assertClean("create-cached", st.Reason)
 }

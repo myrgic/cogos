@@ -31,6 +31,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"regexp"
@@ -285,7 +287,7 @@ func (p *hermesProcess) start(ctx context.Context) (*acprpc.Conn, error) {
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("hermes-acp: start process: %w", err)
+		return nil, newProcessStartError(err)
 	}
 	conn := acprpc.NewConn(stdout, stdin, p)
 	p.mu.Lock()
@@ -321,6 +323,31 @@ func (p *hermesProcess) start(ctx context.Context) (*acprpc.Conn, error) {
 	p.mu.Unlock()
 	go p.watch(cmd, conn)
 	return conn, nil
+}
+
+// processStartError is a subprocess start failure whose message is safe to
+// expose (it lands in ManagedSessionClassStatus.Reason and create errors):
+// the OS error from cmd.Start embeds the resolved executable path, so the
+// public text is a fixed, path-free reason. The full error stays reachable
+// through Unwrap (errors.Is/As) and is written to the kernel log only.
+type processStartError struct {
+	reason string
+	err    error
+}
+
+func (e *processStartError) Error() string { return "hermes-acp: start process: " + e.reason }
+func (e *processStartError) Unwrap() error { return e.err }
+
+func newProcessStartError(err error) *processStartError {
+	reason := "start failed"
+	switch {
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, exec.ErrNotFound):
+		reason = "executable not found"
+	case errors.Is(err, fs.ErrPermission):
+		reason = "executable not permitted"
+	}
+	log.Printf("managed-sessions: subprocess start failed (%s): %v", reason, err)
+	return &processStartError{reason: reason, err: err}
 }
 
 func (p *hermesProcess) currentConn() *acprpc.Conn {
@@ -1560,7 +1587,7 @@ func (d *HermesACPDriver) runClassProbe(ctx context.Context, name string) Manage
 	}
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
-		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: ts, Reason: err.Error()}
+		return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: ts, Reason: newProcessStartError(err).Error()}
 	}
 
 	conn := acprpc.NewConn(stdout, stdin, acpProbeHandler{})
