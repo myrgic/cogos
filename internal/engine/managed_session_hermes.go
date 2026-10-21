@@ -35,6 +35,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -517,16 +518,17 @@ type HermesACPSession struct {
 	permTO    time.Duration
 	mcp       []json.RawMessage
 
-	mu       sync.Mutex
-	state    ManagedSessionState
-	lastErr  error
-	turn     *hermesTurn
-	mode     string
-	model    string
-	perms    map[string]*pendingPermission
-	permSeq  atomic.Uint64
-	turnSeq  atomic.Uint64
-	detached bool
+	mu         sync.Mutex
+	state      ManagedSessionState
+	lastErr    error
+	turn       *hermesTurn
+	mode       string
+	model      string
+	perms      map[string]*pendingPermission
+	permSeq    atomic.Uint64
+	turnSeq    atomic.Uint64
+	fwdPending int // forwarded prompts (Redirect) not yet answered or adopted; Prompt refuses (409) until they resolve
+	detached   bool
 }
 
 type hermesTurn struct {
@@ -646,7 +648,9 @@ func (s *HermesACPSession) Prompt(content json.RawMessage) (string, error) {
 		s.mu.Unlock()
 		return "", fmt.Errorf("%w: session %s is %s", ErrSessionNotLive, s.id, st)
 	}
-	if s.turn != nil {
+	// A forward not yet answered may still turn out to be a turn of its own (see Redirect): starting one now
+	// would run two on the session and leave the forward untracked.
+	if s.turn != nil || s.fwdPending > 0 {
 		s.mu.Unlock()
 		return "", ErrTurnInFlight
 	}
@@ -674,6 +678,170 @@ func (s *HermesACPSession) Prompt(content json.RawMessage) (string, error) {
 		}
 		s.mu.Unlock()
 		s.ring.Append(MSEventTurnEnd, end)
+	}()
+	return turn.id, nil
+}
+
+// redirectAck is the text Hermes streams when it folds a prompt into the running turn
+// (acp_adapter/server.py: "Redirected the active turn with your correction."). Hermes answers a fold-in
+// with this one message and stopReason end_turn; an agent that instead ran the prompt as a turn of its
+// own does not say it. Speed cannot tell the two apart, so the kernel requires the ack.
+const redirectAck = "Redirected the active turn"
+
+// sawRedirectAck reports whether an agent_message_chunk carrying redirectAck was appended after seq.
+func (s *HermesACPSession) sawRedirectAck(seq uint64) bool {
+	sub := s.ring.Subscribe(seq, 1)
+	defer s.ring.Unsubscribe(sub)
+	for _, ev := range sub.Replay {
+		if ev.Kind != MSEventSessionUpdate {
+			continue
+		}
+		var u struct {
+			Variant string `json:"sessionUpdate"`
+			Content struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(ev.Data, &u) == nil && u.Variant == "agent_message_chunk" && strings.Contains(u.Content.Text, redirectAck) {
+			return true
+		}
+	}
+	return false
+}
+
+// ErrNoTurnInFlight is returned by Redirect when the turn it would redirect
+// has already ended; the caller starts a normal turn instead.
+var ErrNoTurnInFlight = errors.New("managed session: no turn in flight")
+
+// forwardGrace is how long a forwarded prompt may stay unanswered before the
+// kernel concludes the agent took it as a NEW turn, not a redirect. A redirect
+// is answered at once ("Redirected the active turn", stopReason end_turn).
+var forwardGrace = 2 * time.Second
+
+// promptIsTextOnly reports whether every block is a text block. Hermes
+// redirects only text-only prompts; rich media falls back to its own
+// next-turn queue, which the kernel could not track.
+func promptIsTextOnly(blocks json.RawMessage) bool {
+	var bs []struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(blocks, &bs) != nil || len(bs) == 0 {
+		return false
+	}
+	for _, b := range bs {
+		if b.Type != "text" {
+			return false
+		}
+	}
+	return true
+}
+
+// Redirect sends content to the agent as a session/prompt WHILE a turn runs.
+// ACP has no separate redirect method: an agent that supports it (Hermes:
+// state.is_running, agent.redirect) folds the prompt into the running turn and
+// answers end_turn at once. The kernel does not open a second turn: the running
+// turn keeps its id and ends with its own turn_end; the forward is recorded as
+// a prompt_forwarded event. Returns the id of the turn it was sent into.
+//
+// Text-only content only (ErrTurnInFlight otherwise, the old behaviour).
+// ErrNoTurnInFlight means the turn ended first: call Prompt.
+//
+// Race: if the turn ends between this check and the agent receiving the
+// prompt, the agent starts a fresh turn. That shows as a call still pending
+// after forwardGrace; the kernel then adopts it as the session's turn
+// (turn_start ... turn_end) so a running turn is never untracked.
+func (s *HermesACPSession) Redirect(content json.RawMessage) (string, error) {
+	blocks := content
+	var text string
+	if json.Unmarshal(content, &text) == nil {
+		blocks, _ = json.Marshal([]map[string]any{{"type": "text", "text": text}})
+	}
+	s.mu.Lock()
+	if s.state != StateLive {
+		st := s.state
+		s.mu.Unlock()
+		return "", fmt.Errorf("%w: session %s is %s", ErrSessionNotLive, s.id, st)
+	}
+	turn := s.turn
+	if turn == nil {
+		s.mu.Unlock()
+		return "", ErrNoTurnInFlight
+	}
+	if !promptIsTextOnly(blocks) {
+		s.mu.Unlock()
+		return "", ErrTurnInFlight
+	}
+	if s.fwdPending > 0 { // one forward at a time: a second could not be told apart from the first's answer
+		s.mu.Unlock()
+		return "", ErrTurnInFlight
+	}
+	s.fwdPending++ // released below, in the same critical section that adopts or resolves the forward
+	s.mu.Unlock()
+	fid := "f" + strconv.FormatUint(s.turnSeq.Add(1), 10)
+	conn := s.proc.currentConn()
+	startSeq := s.ring.LastSeq()
+	grace := forwardGrace // read here, on the caller's goroutine: the forward goroutine outlives tests that retune it
+	go func() {
+		type outcome struct {
+			stop string
+			err  error
+		}
+		done := make(chan outcome, 1)
+		go func() {
+			var res struct {
+				StopReason string `json:"stopReason"`
+			}
+			err := conn.Call(context.Background(), "session/prompt", map[string]any{"sessionId": s.id, "prompt": blocks}, &res)
+			done <- outcome{res.StopReason, err}
+		}()
+		var adopted *hermesTurn
+		var o outcome
+		select {
+		case o = <-done:
+		case <-time.After(grace):
+			// Still unanswered: Hermes answers a redirect at once, so the agent took this as a turn of its own.
+			// Prompt() is refused while fwdPending > 0, so nothing else can hold the slot unless the original turn
+			// is somehow still running; then the call is just slow, and we keep waiting for it.
+			s.mu.Lock()
+			if s.turn == nil {
+				adopted = &hermesTurn{id: fid, startedAt: time.Now()}
+				s.turn = adopted
+			}
+			s.mu.Unlock()
+			if adopted != nil {
+				s.ring.Append(MSEventTurnStart, map[string]any{"turn_id": adopted.id, "prompt": blocks})
+			}
+			o = <-done
+		}
+		confirmed := adopted == nil && o.err == nil && o.stop == "end_turn" && s.sawRedirectAck(startSeq)
+		s.mu.Lock()
+		s.fwdPending--
+		if adopted != nil && s.turn == adopted {
+			s.turn = nil
+		}
+		s.mu.Unlock()
+		if o.err != nil && errors.Is(o.err, acprpc.ErrClosed) {
+			o.err = errors.New("agent process exited")
+		}
+		errText := ""
+		if o.err != nil {
+			errText = o.err.Error()
+		}
+		switch {
+		case adopted != nil: // the agent ran it as a turn that outlived the grace
+			end := map[string]any{"turn_id": adopted.id, "stop_reason": o.stop}
+			if errText != "" {
+				end["error"] = errText
+			}
+			s.ring.Append(MSEventTurnEnd, end)
+		case confirmed: // Hermes folded it into the running turn
+			s.ring.Append(MSEventPromptForwarded, map[string]any{"turn_id": turn.id, "forward_id": fid, "prompt": blocks, "stop_reason": o.stop, "confirmed": true})
+		case errText != "": // the call failed: say so, claim nothing
+			s.ring.Append(MSEventPromptForwarded, map[string]any{"turn_id": turn.id, "forward_id": fid, "prompt": blocks, "stop_reason": o.stop, "confirmed": false, "error": errText})
+		default: // answered without the ack: the agent ran it as a turn of its own, and fast
+			s.ring.Append(MSEventTurnStart, map[string]any{"turn_id": fid, "prompt": blocks})
+			s.ring.Append(MSEventTurnEnd, map[string]any{"turn_id": fid, "stop_reason": o.stop})
+		}
 	}()
 	return turn.id, nil
 }

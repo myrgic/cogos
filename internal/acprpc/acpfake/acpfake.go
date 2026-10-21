@@ -10,6 +10,12 @@
 //	"slow ..."       → streams nothing until session/cancel, then stopReason "cancelled"
 //	"ignore_cancel ." → streams one update, then parks the turn forever and never
 //	                   honours session/cancel (an agent that drops the notification)
+//	"redir ..."     → a turn that Hermes-style folds in a prompt arriving mid-turn: the
+//	                   second prompt is answered end_turn at once with
+//	                   "Redirected the active turn..." and the running turn then
+//	                   ends with "continued:<text of the redirect>"
+//	"sleep<ms> ..."  → ends the turn (end_turn) after <ms> milliseconds, and does NOT
+//	                   treat a prompt arriving mid-turn as a redirect
 //	"crash ..."      → the process exits with status 3 (subprocess mode only)
 //	"modelinfo ..."  → reports the model and the count of set_model requests this
 //	                   session has received (what the agent held when the prompt
@@ -77,13 +83,14 @@ type agent struct {
 	models    map[string]string
 	modelSets map[string]int // session id -> set_model requests received
 	cancels   map[string]chan struct{}
+	redirects map[string]chan string // session id -> the running "redir" turn's inbox
 }
 
 // Serve runs the fake agent over r/w. The returned channel closes when r
 // ends. subprocess enables the "crash" behaviour (os.Exit).
 func Serve(r io.Reader, w io.Writer, subprocess bool) <-chan struct{} {
 	a := &agent{subprocess: subprocess, modes: map[string]string{}, models: map[string]string{},
-		modelSets: map[string]int{}, cancels: map[string]chan struct{}{}}
+		modelSets: map[string]int{}, cancels: map[string]chan struct{}{}, redirects: map[string]chan string{}}
 	a.conn = acprpc.NewConn(r, w, a)
 	return a.conn.Done()
 }
@@ -223,7 +230,42 @@ func (a *agent) prompt(p sessionParams) (any, error) {
 	for _, b := range p.Prompt {
 		text += b.Text
 	}
+	a.mu.Lock()
+	inbox, running := a.redirects[p.SessionID]
+	a.mu.Unlock()
+	if running { // a prompt while a "redir" turn runs: fold it in, like Hermes' agent.redirect
+		inbox <- text
+		a.update(p.SessionID, chunk("Redirected the active turn with your correction."))
+		return map[string]any{"stopReason": "end_turn"}, nil
+	}
 	switch {
+	case strings.HasPrefix(text, "redir"):
+		inbox := make(chan string, 1)
+		ch := make(chan struct{})
+		a.mu.Lock()
+		a.redirects[p.SessionID] = inbox
+		a.cancels[p.SessionID] = ch
+		a.mu.Unlock()
+		a.update(p.SessionID, chunk("working..."))
+		var stop, note string
+		select {
+		case note = <-inbox:
+			stop, note = "end_turn", "continued:"+note
+		case <-ch:
+			stop = "cancelled"
+		}
+		a.mu.Lock()
+		delete(a.redirects, p.SessionID)
+		a.mu.Unlock()
+		if note != "" {
+			a.update(p.SessionID, chunk(note))
+		}
+		return map[string]any{"stopReason": stop}, nil
+	case strings.HasPrefix(text, "sleep"):
+		ms, _ := strconv.Atoi(strings.TrimPrefix(strings.Fields(text)[0], "sleep"))
+		a.update(p.SessionID, chunk("sleeping..."))
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+		return map[string]any{"stopReason": "end_turn"}, nil
 	case strings.HasPrefix(text, "crash") && a.subprocess:
 		os.Exit(3)
 	case strings.HasPrefix(text, "slow"):
