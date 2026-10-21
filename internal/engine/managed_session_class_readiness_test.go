@@ -260,3 +260,39 @@ func TestClassReadiness_CallerCancelDuringCreateIsNotCached(t *testing.T) {
 		t.Fatalf("caller cancellation marked the class unavailable: %+v", st)
 	}
 }
+
+// Review #704 round 4: a joiner of an in-flight probe must return the
+// leader's result even when the cache entry is invalidated between the
+// leader's completion and the joiner waking (a live session of the class
+// crashing). It used to re-read the cache and return an empty Status.
+func TestClassReadiness_JoinerSurvivesInvalidateAfterLeaderCompletes(t *testing.T) {
+	rc := RuntimeClass{Argv: []string{os.Args[0], "-test.run=^$"}}
+	rc.Env.Set = map[string]string{acpfake.EnvVar: "1", "ACPFAKE_INIT_DELAY": "500ms"}
+	var d *HermesACPDriver
+	d = readinessDriver(t, readinessClassConfig(t, "fake", rc), func(c *HermesACPDriverConfig) {
+		c.ProbeCacheTTL = time.Minute
+		c.afterProbeWait = func(name string) { d.invalidateClassReadiness(name) }
+	})
+	leaderDone := make(chan ManagedSessionClassStatus, 1)
+	go func() { leaderDone <- d.ClassStatus(context.Background(), "fake") }()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		d.classProbeMu.Lock()
+		_, inflight := d.classProbeInflight["fake"]
+		d.classProbeMu.Unlock()
+		if inflight {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("leader probe never went in flight")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	st := d.ClassStatus(context.Background(), "fake") // joins the leader
+	if st.Status != "ready" && st.Status != "unavailable" {
+		t.Fatalf("joiner status = %q, want ready or unavailable (%+v)", st.Status, st)
+	}
+	if lst := <-leaderDone; lst.Status != st.Status {
+		t.Fatalf("joiner %q differs from leader %q", st.Status, lst.Status)
+	}
+}

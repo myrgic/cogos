@@ -125,6 +125,10 @@ type HermesACPDriverConfig struct {
 	// now is a test seam for the readiness cache clock; nil = time.Now.
 	now func() time.Time
 
+	// afterProbeWait is a test seam: called in a probe joiner right after the
+	// leader signals completion, before the joiner returns.
+	afterProbeWait func(name string)
+
 	// afterRestartLoad is a test seam: called after each restart's
 	// session/load returns, before its state write.
 	afterRestartLoad func(*HermesACPSession)
@@ -181,7 +185,16 @@ type HermesACPDriver struct {
 
 	classProbeMu       sync.Mutex
 	classProbeCache    map[string]ManagedSessionClassStatus
-	classProbeInflight map[string]chan struct{}
+	classProbeInflight map[string]*classProbeFlight
+}
+
+// classProbeFlight is one in-flight class probe. The leader stores res before
+// closing done, so a joiner returns the leader's actual result and never
+// depends on the shared cache still holding it (invalidateClassReadiness can
+// drop the entry between close(done) and the joiner waking).
+type classProbeFlight struct {
+	done chan struct{}
+	res  ManagedSessionClassStatus
 }
 
 // loadClaim is the single in-flight load of one session id. A second
@@ -197,7 +210,7 @@ type loadClaim struct {
 // NewHermesACPDriver returns a driver with no sessions.
 func NewHermesACPDriver(cfg HermesACPDriverConfig) *HermesACPDriver {
 	cfg.defaults()
-	return &HermesACPDriver{cfg: cfg, sessions: map[string]*HermesACPSession{}, loads: map[string]*loadClaim{}, classProbeCache: map[string]ManagedSessionClassStatus{}, classProbeInflight: map[string]chan struct{}{}}
+	return &HermesACPDriver{cfg: cfg, sessions: map[string]*HermesACPSession{}, loads: map[string]*loadClaim{}, classProbeCache: map[string]ManagedSessionClassStatus{}, classProbeInflight: map[string]*classProbeFlight{}}
 }
 
 // invalidateClassReadiness drops a class's cached readiness entry.
@@ -1317,23 +1330,20 @@ func (d *HermesACPDriver) probeClass(ctx context.Context, name string) ManagedSe
 		// Expired: drop it and re-probe (an inflight probe is joined below).
 		delete(d.classProbeCache, name)
 	}
-	if ch, ok := d.classProbeInflight[name]; ok {
+	if fl, ok := d.classProbeInflight[name]; ok {
 		d.classProbeMu.Unlock()
 		select {
-		case <-ch:
+		case <-fl.done:
 		case <-ctx.Done():
 			return ManagedSessionClassStatus{Class: name, Status: "unavailable", ProbedAt: d.clockNow().UTC(), Reason: ctx.Err().Error()}
 		}
-		d.classProbeMu.Lock()
-		cached := d.classProbeCache[name]
-		d.classProbeMu.Unlock()
-		if cached.Class == "" {
-			cached.Class = name
+		if d.cfg.afterProbeWait != nil {
+			d.cfg.afterProbeWait(name)
 		}
-		return cached
+		return fl.res // written before close(done): safe to read
 	}
-	ch := make(chan struct{})
-	d.classProbeInflight[name] = ch
+	fl := &classProbeFlight{done: make(chan struct{})}
+	d.classProbeInflight[name] = fl
 	d.classProbeMu.Unlock()
 
 	// The result lands in a cache shared by every caller, so the probe must
@@ -1343,8 +1353,9 @@ func (d *HermesACPDriver) probeClass(ctx context.Context, name string) ManagedSe
 	d.classProbeMu.Lock()
 	d.classProbeCache[name] = res
 	delete(d.classProbeInflight, name)
+	fl.res = res
 	d.classProbeMu.Unlock()
-	close(ch)
+	close(fl.done)
 	return res
 }
 
