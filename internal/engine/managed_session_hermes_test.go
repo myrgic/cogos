@@ -778,3 +778,38 @@ func TestHermesACPSession_RedirectIntoNonRedirectingAgentIsAdopted(t *testing.T)
 		t.Fatalf("turn_end events = %d, want 2", ends)
 	}
 }
+
+// cog-review (PR #712): a normal Prompt() must not take the turn slot while a forward is unresolved,
+// or the forward runs on as an untracked second turn.
+func TestHermesACPSession_PromptRefusedWhileForwardUnresolved(t *testing.T) {
+	old := forwardGrace
+	forwardGrace = 400 * time.Millisecond
+	defer func() { forwardGrace = old }()
+	d := fakeHermesDriver(t, nil)
+	s, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prompt(json.RawMessage(`"sleep100 first"`)); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, s, 0, kind(MSEventSessionUpdate))
+	if _, err := s.Redirect(json.RawMessage(`"sleep1500 second"`)); err != nil { // a non-redirecting agent: runs as its own turn
+		t.Fatal(err)
+	}
+	waitEvent(t, s, 0, kind(MSEventTurnEnd)) // the first turn is over; the grace window is still open
+	if _, err := s.Prompt(json.RawMessage(`"B"`)); err != ErrTurnInFlight {
+		t.Fatalf("Prompt inside the grace window = %v, want ErrTurnInFlight (the forward may still be a turn)", err)
+	}
+	time.Sleep(forwardGrace + 200*time.Millisecond) // past the grace: the forward is adopted
+	if s.Info().TurnInFlight == "" {
+		t.Fatalf("forward not adopted after the grace: %+v", s.Info())
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for s.Info().TurnInFlight != "" && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := s.Prompt(json.RawMessage(`"C"`)); err != nil {
+		t.Fatalf("Prompt after the adopted turn ended: %v", err)
+	}
+}

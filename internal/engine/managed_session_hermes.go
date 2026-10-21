@@ -454,16 +454,17 @@ type HermesACPSession struct {
 	permTO    time.Duration
 	mcp       []json.RawMessage
 
-	mu       sync.Mutex
-	state    ManagedSessionState
-	lastErr  error
-	turn     *hermesTurn
-	mode     string
-	model    string
-	perms    map[string]*pendingPermission
-	permSeq  atomic.Uint64
-	turnSeq  atomic.Uint64
-	detached bool
+	mu         sync.Mutex
+	state      ManagedSessionState
+	lastErr    error
+	turn       *hermesTurn
+	mode       string
+	model      string
+	perms      map[string]*pendingPermission
+	permSeq    atomic.Uint64
+	turnSeq    atomic.Uint64
+	fwdPending int // forwarded prompts (Redirect) not yet answered or adopted; Prompt waits them out
+	detached   bool
 }
 
 type hermesTurn struct {
@@ -583,7 +584,9 @@ func (s *HermesACPSession) Prompt(content json.RawMessage) (string, error) {
 		s.mu.Unlock()
 		return "", fmt.Errorf("%w: session %s is %s", ErrSessionNotLive, s.id, st)
 	}
-	if s.turn != nil {
+	// A forward not yet answered may still turn out to be a turn of its own (see Redirect): starting one now
+	// would run two on the session and leave the forward untracked.
+	if s.turn != nil || s.fwdPending > 0 {
 		s.mu.Unlock()
 		return "", ErrTurnInFlight
 	}
@@ -669,13 +672,16 @@ func (s *HermesACPSession) Redirect(content json.RawMessage) (string, error) {
 		return "", fmt.Errorf("%w: session %s is %s", ErrSessionNotLive, s.id, st)
 	}
 	turn := s.turn
-	s.mu.Unlock()
 	if turn == nil {
+		s.mu.Unlock()
 		return "", ErrNoTurnInFlight
 	}
 	if !promptIsTextOnly(blocks) {
+		s.mu.Unlock()
 		return "", ErrTurnInFlight
 	}
+	s.fwdPending++ // released below, in the same critical section that adopts or resolves the forward
+	s.mu.Unlock()
 	fid := "f" + strconv.FormatUint(s.turnSeq.Add(1), 10)
 	conn := s.proc.currentConn()
 	go func() {
@@ -696,6 +702,9 @@ func (s *HermesACPSession) Redirect(content json.RawMessage) (string, error) {
 		select {
 		case o = <-done:
 		case <-time.After(forwardGrace):
+			// Still unanswered: Hermes answers a redirect at once, so the agent took this as a turn of its own.
+			// Prompt() is refused while fwdPending > 0, so nothing else can hold the slot unless the original turn
+			// is somehow still running; then the call is just slow, and we keep waiting for it.
 			s.mu.Lock()
 			if s.turn == nil {
 				adopted = &hermesTurn{id: fid, startedAt: time.Now()}
@@ -707,6 +716,12 @@ func (s *HermesACPSession) Redirect(content json.RawMessage) (string, error) {
 			}
 			o = <-done
 		}
+		s.mu.Lock()
+		s.fwdPending--
+		if adopted != nil && s.turn == adopted {
+			s.turn = nil
+		}
+		s.mu.Unlock()
 		end := map[string]any{"turn_id": turn.id, "forward_id": fid, "prompt": blocks, "stop_reason": o.stop}
 		if o.err != nil {
 			if errors.Is(o.err, acprpc.ErrClosed) {
@@ -715,12 +730,11 @@ func (s *HermesACPSession) Redirect(content json.RawMessage) (string, error) {
 			end["error"] = o.err.Error()
 		}
 		if adopted != nil {
-			s.mu.Lock()
-			if s.turn == adopted {
-				s.turn = nil
+			endAdopted := map[string]any{"turn_id": adopted.id, "stop_reason": o.stop}
+			if o.err != nil {
+				endAdopted["error"] = o.err.Error()
 			}
-			s.mu.Unlock()
-			s.ring.Append(MSEventTurnEnd, map[string]any{"turn_id": adopted.id, "stop_reason": o.stop})
+			s.ring.Append(MSEventTurnEnd, endAdopted)
 			return
 		}
 		s.ring.Append(MSEventPromptForwarded, end)
