@@ -463,7 +463,7 @@ type HermesACPSession struct {
 	perms      map[string]*pendingPermission
 	permSeq    atomic.Uint64
 	turnSeq    atomic.Uint64
-	fwdPending int // forwarded prompts (Redirect) not yet answered or adopted; Prompt waits them out
+	fwdPending int // forwarded prompts (Redirect) not yet answered or adopted; Prompt refuses (409) until they resolve
 	detached   bool
 }
 
