@@ -25,14 +25,14 @@ func (c *Constellation) Search(query string, limit int) ([]Node, error) {
 		SELECT d.id, d.path, d.title, d.type, d.sector, d.status, d.content,
 		       bm25(documents_fts) AS rank
 		FROM documents_fts
-		JOIN documents d ON d.rowid = documents_fts.rowid
+		JOIN documents d ON d.id = documents_fts.id
 		WHERE documents_fts MATCH ?
-		  AND d.status != 'deprecated'
+		  AND COALESCE(d.status, '') != 'deprecated'
 		ORDER BY rank
 		LIMIT ?
 	`
 
-	rows, err := c.db.Query(querySQL, query, limit)
+	rows, err := c.db.Query(querySQL, sanitizeFTSQuery(query), limit)
 
 	if err != nil {
 		return nil, fmt.Errorf("search query failed: %w", err)
@@ -42,10 +42,12 @@ func (c *Constellation) Search(query string, limit int) ([]Node, error) {
 	var nodes []Node
 	for rows.Next() {
 		var n Node
-		err := rows.Scan(&n.ID, &n.Path, &n.Title, &n.Type, &n.Sector, &n.Status, &n.Content, &n.Rank)
+		var status sql.NullString
+		err := rows.Scan(&n.ID, &n.Path, &n.Title, &n.Type, &n.Sector, &status, &n.Content, &n.Rank)
 		if err != nil {
 			return nil, err
 		}
+		n.Status = status.String
 		nodes = append(nodes, n)
 	}
 
@@ -125,9 +127,9 @@ func (c *Constellation) QueryRelevantWithSubstance(anchor, goal string, maxCandi
 		       COALESCE(d.substance_ratio, 0.0) AS substance_ratio,
 		       COALESCE(d.ref_count, 0) AS ref_count
 		FROM documents_fts
-		JOIN documents d ON d.rowid = documents_fts.rowid
+		JOIN documents d ON d.id = documents_fts.id
 		WHERE documents_fts MATCH ?
-		  AND d.status != 'deprecated'
+		  AND COALESCE(d.status, '') != 'deprecated'
 		ORDER BY rank
 		LIMIT ?
 	`
@@ -144,15 +146,17 @@ func (c *Constellation) QueryRelevantWithSubstance(anchor, goal string, maxCandi
 
 	for rows.Next() {
 		var n Node
+		var status sql.NullString
 		var bm25Rank float64
 		var substanceRatio float64
 		var refCount int
 
-		err := rows.Scan(&n.ID, &n.Path, &n.Title, &n.Type, &n.Sector, &n.Status, &n.Content,
+		err := rows.Scan(&n.ID, &n.Path, &n.Title, &n.Type, &n.Sector, &status, &n.Content,
 			&bm25Rank, &substanceRatio, &refCount)
 		if err != nil {
 			return nil, err
 		}
+		n.Status = status.String
 
 		// Filter by minimum substance ratio
 		if substanceRatio < filter.MinSubstanceRatio {
@@ -237,9 +241,9 @@ func (c *Constellation) QueryRelevantWithEmbedding(anchor, goal string, maxCandi
 		       COALESCE(d.ref_count, 0) AS ref_count,
 		       d.embedding_128
 		FROM documents_fts
-		JOIN documents d ON d.rowid = documents_fts.rowid
+		JOIN documents d ON d.id = documents_fts.id
 		WHERE documents_fts MATCH ?
-		  AND d.status != 'deprecated'
+		  AND COALESCE(d.status, '') != 'deprecated'
 		ORDER BY rank
 		LIMIT ?
 	`
@@ -255,16 +259,18 @@ func (c *Constellation) QueryRelevantWithEmbedding(anchor, goal string, maxCandi
 
 	for rows.Next() {
 		var n Node
+		var status sql.NullString
 		var bm25Rank float64
 		var substanceRatio float64
 		var refCount int
 		var embBlob []byte
 
-		err := rows.Scan(&n.ID, &n.Path, &n.Title, &n.Type, &n.Sector, &n.Status, &n.Content,
+		err := rows.Scan(&n.ID, &n.Path, &n.Title, &n.Type, &n.Sector, &status, &n.Content,
 			&bm25Rank, &substanceRatio, &refCount, &embBlob)
 		if err != nil {
 			return nil, err
 		}
+		n.Status = status.String
 
 		if substanceRatio < filter.MinSubstanceRatio {
 			continue
@@ -340,8 +346,8 @@ func SortNodesByScore(candidates []NodeWithScore) {
 // SearchWithFilters performs filtered full-text search.
 func (c *Constellation) SearchWithFilters(query string, types []string, sector string, limit int) ([]Node, error) {
 	// Build WHERE clause
-	whereClauses := []string{"fts MATCH ?", "d.status != 'deprecated'"}
-	args := []interface{}{query}
+	whereClauses := []string{"documents_fts MATCH ?", "COALESCE(d.status, '') != 'deprecated'"}
+	args := []interface{}{sanitizeFTSQuery(query)}
 
 	if len(types) > 0 {
 		placeholders := make([]string, len(types))
@@ -361,9 +367,9 @@ func (c *Constellation) SearchWithFilters(query string, types []string, sector s
 
 	querySQL := fmt.Sprintf(`
 		SELECT d.id, d.path, d.title, d.type, d.sector, d.status, d.content,
-		       bm25(fts) AS rank
-		FROM documents_fts fts
-		JOIN documents d ON d.rowid = fts.rowid
+		       bm25(documents_fts) AS rank
+		FROM documents_fts
+		JOIN documents d ON d.id = documents_fts.id
 		WHERE %s
 		ORDER BY rank
 		LIMIT ?
@@ -378,10 +384,12 @@ func (c *Constellation) SearchWithFilters(query string, types []string, sector s
 	var nodes []Node
 	for rows.Next() {
 		var n Node
-		err := rows.Scan(&n.ID, &n.Path, &n.Title, &n.Type, &n.Sector, &n.Status, &n.Content, &n.Rank)
+		var status sql.NullString
+		err := rows.Scan(&n.ID, &n.Path, &n.Title, &n.Type, &n.Sector, &status, &n.Content, &n.Rank)
 		if err != nil {
 			return nil, err
 		}
+		n.Status = status.String
 		nodes = append(nodes, n)
 	}
 
@@ -467,7 +475,7 @@ func (c *Constellation) GetRecentBySector(sector string, limit int) ([]Node, err
 		SELECT id, path, title, type, sector, status, content, updated
 		FROM documents
 		WHERE sector = ?
-		  AND status != 'deprecated'
+		  AND COALESCE(status, '') != 'deprecated'
 		ORDER BY updated DESC
 		LIMIT ?
 	`, sector, limit)
@@ -480,11 +488,13 @@ func (c *Constellation) GetRecentBySector(sector string, limit int) ([]Node, err
 	var nodes []Node
 	for rows.Next() {
 		var n Node
+		var status sql.NullString
 		var updated sql.NullString
-		err := rows.Scan(&n.ID, &n.Path, &n.Title, &n.Type, &n.Sector, &n.Status, &n.Content, &updated)
+		err := rows.Scan(&n.ID, &n.Path, &n.Title, &n.Type, &n.Sector, &status, &n.Content, &updated)
 		if err != nil {
 			return nil, err
 		}
+		n.Status = status.String
 		nodes = append(nodes, n)
 	}
 
@@ -703,6 +713,234 @@ func (c *Constellation) SubstanceSummary() (*SubstanceMetrics, error) {
 	m.Sector = "workspace" // Marker for aggregate
 	return &m, nil
 }
+
+// ftsRawToken is one unit produced by tokenizing a raw search string for
+// sanitizeFTSQuery: a search operand (a bare word or a user-quoted phrase) or
+// one of the FTS5 operator keywords.
+type ftsRawToken struct {
+	text   string // sanitized content, without wrapping quotes
+	phrase bool   // true if this operand came from a user-quoted "..." span
+	op     bool   // true if this token is an FTS5 operator keyword
+}
+
+// sanitizeFTSQuery converts a caller-supplied search string into a
+// syntactically valid FTS5 MATCH expression.
+//
+// Constellation.Search and Constellation.SearchWithFilters hand the caller's
+// raw query to `documents_fts MATCH ?`. FTS5 reads that string as a query
+// language, not as text, so an ordinary search like "serve_compat.go" or
+// "v0.16.31" is a SYNTAX ERROR -- the query fails instead of matching -- and
+// "foo-bar" is worse than an error: FTS5 parses it as column filter `foo`
+// minus `bar` and answers confidently from an interpretation the caller never
+// asked for. This function is the boundary that stops both harms.
+//
+// Semantics (a deliberate second copy of the buildFTSQuery pipeline in
+// internal/engine/mcp_stubs.go):
+//
+//   - Tokenize on whitespace, honoring double-quoted phrases. A '"' either
+//     opens or closes a phrase; a quoted span is re-emitted as a phrase with
+//     any embedded '"' stripped. An UNTERMINATED quote means the remainder of
+//     the input is a phrase, which we emit closed, so a dangling quote can
+//     never reach FTS5 as syntax.
+//   - The uppercase words AND, OR, NOT and NEAR are FTS5 operators; every
+//     other spelling is a bareword (FTS5 matches its keywords
+//     case-sensitively).
+//   - A leading '-' or ':' is stripped from a bareword, so caller text can
+//     never become a negation ("-foo") or a column filter ("col:foo").
+//   - A bareword is re-emitted UNQUOTED only when it is the query's SOLE
+//     operand and is a safe FTS5 bareword (letters, digits, '_' and non-ASCII
+//     bytes). Anything else -- '.', '-', '+', '/' and friends -- is
+//     double-quoted with embedded quotes stripped. Quoting is
+//     semantics-preserving for a plain token and turns what would have been a
+//     syntax error or a column-filter misparse into a literal phrase match.
+//     Reserved keywords are never emitted unquoted.
+//   - Adjacent operands are joined with an explicit AND (the meaning FTS5
+//     already gives implicit adjacency, made explicit here because the
+//     operands are quoted); an explicit AND/OR/NOT/NEAR between operands is
+//     preserved.
+//   - An operator with no operand on its left, and any trailing operator, are
+//     DROPPED: FTS5 rejects a dangling operator.
+//   - An empty or whitespace-only query, or one that reduces to nothing (a
+//     lone "AND", a lone "-"), returns the two-character FTS5 empty phrase
+//     `""` -- valid and zero-match. It is NEVER the empty Go string, which
+//     would be an FTS5 syntax error. Search("") is therefore a no-match, not
+//     an error.
+//
+// Sanitizing an already-sanitized query is a no-op (idempotent), which is
+// load-bearing: QueryRelevant calls c.Search(buildKeywordFTSQuery(keywords)),
+// whose output is already quoted and OR-joined, so Search sanitizes it a
+// second time.
+//
+// This is a second copy of the sanitizer in internal/engine/mcp_stubs.go
+// rather than a shared call because sdk is its OWN Go module (sdk/go.mod,
+// github.com/myrgic/cogos/sdk) and Go forbids importing an internal/ package
+// across a module boundary. Keep the two copies in step deliberately.
+func sanitizeFTSQuery(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return `""`
+	}
+	toks := trimDanglingRawFTSOperators(tokenizeRawFTSQuery(raw))
+	if len(toks) == 0 {
+		return `""`
+	}
+
+	operands := 0
+	for _, t := range toks {
+		if !t.op {
+			operands++
+		}
+	}
+
+	var out []string
+	prevOperand := false
+	for _, t := range toks {
+		if t.op {
+			out = append(out, t.text)
+			prevOperand = false
+			continue
+		}
+		if prevOperand {
+			out = append(out, "AND")
+		}
+		if !t.phrase && operands == 1 && isRawFTSSafeBareword(t.text) {
+			out = append(out, t.text)
+		} else {
+			out = append(out, `"`+t.text+`"`)
+		}
+		prevOperand = true
+	}
+	return strings.Join(out, " ")
+}
+
+// tokenizeRawFTSQuery splits a raw search string into an ordered sequence of
+// operand and operator tokens, honoring double-quoted phrase spans.
+func tokenizeRawFTSQuery(raw string) []ftsRawToken {
+	var toks []ftsRawToken
+	i, n := 0, len(raw)
+	for i < n {
+		for i < n && isRawFTSQuerySpace(raw[i]) {
+			i++
+		}
+		if i >= n {
+			break
+		}
+		if raw[i] == '"' {
+			rest := raw[i+1:]
+			j := strings.IndexByte(rest, '"')
+			var phrase string
+			if j == -1 {
+				// Unterminated quote: the remainder of the input is a
+				// phrase, which we emit closed rather than leaving FTS5 a
+				// dangling quote.
+				phrase = rest
+				i = n
+			} else {
+				phrase = rest[:j]
+				i = i + 1 + j + 1
+			}
+			phrase = strings.ReplaceAll(strings.TrimSpace(phrase), `"`, "")
+			toks = append(toks, ftsRawToken{text: phrase, phrase: true})
+			continue
+		}
+		k := i
+		for k < n && !isRawFTSQuerySpace(raw[k]) && raw[k] != '"' {
+			k++
+		}
+		word := raw[i:k]
+		i = k
+		if isRawFTSOperator(word) {
+			toks = append(toks, ftsRawToken{text: word, op: true})
+			continue
+		}
+		if tok, ok := sanitizeRawFTSBareword(word); ok {
+			toks = append(toks, tok)
+		}
+	}
+	return toks
+}
+
+// sanitizeRawFTSBareword strips the FTS5 special characters that would let a
+// bare word become syntax: embedded quotes, a leading '-' (negation) and ':'
+// (column filter). Returns false if nothing is left.
+func sanitizeRawFTSBareword(w string) (ftsRawToken, bool) {
+	w = strings.ReplaceAll(w, `"`, "")
+	w = strings.TrimLeft(w, "-")
+	w = strings.ReplaceAll(w, ":", "")
+	if w == "" {
+		return ftsRawToken{}, false
+	}
+	return ftsRawToken{text: w}, true
+}
+
+// isRawFTSSafeBareword reports whether w may be emitted UNQUOTED as the sole
+// term of an FTS5 MATCH expression and mean exactly "match this token".
+// FTS5's bareword alphabet is ASCII letters, digits, '_', 0x1A and every byte
+// >= 0x80; anything else outside a quoted string is syntax ('.' and '+' are
+// errors, '-' is a column filter, '*' and '(' are operators), and the
+// reserved keywords are only special unquoted.
+func isRawFTSSafeBareword(w string) bool {
+	if isRawFTSReservedWord(w) || w == "" {
+		return false
+	}
+	for i := 0; i < len(w); i++ {
+		b := w[i]
+		switch {
+		case b >= 0x80, b == '_', b == 0x1A,
+			b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isRawFTSOperator reports whether word is an FTS5 operator keyword, matched
+// case-sensitively as FTS5 itself does.
+func isRawFTSOperator(word string) bool {
+	switch word {
+	case "AND", "OR", "NOT", "NEAR":
+		return true
+	default:
+		return false
+	}
+}
+
+// isRawFTSReservedWord reports whether w is one of FTS5's reserved query
+// keywords: special when unquoted, ordinary search terms otherwise.
+func isRawFTSReservedWord(w string) bool {
+	return isRawFTSOperator(w)
+}
+
+// trimDanglingRawFTSOperators drops operator tokens with no operand on their
+// left (leading or doubled) and any trailing operator: FTS5 rejects a
+// dangling operator.
+func trimDanglingRawFTSOperators(toks []ftsRawToken) []ftsRawToken {
+	var out []ftsRawToken
+	for _, t := range toks {
+		if t.op && (len(out) == 0 || out[len(out)-1].op) {
+			continue
+		}
+		out = append(out, t)
+	}
+	for len(out) > 0 && out[len(out)-1].op {
+		out = out[:len(out)-1]
+	}
+	return out
+}
+
+// isRawFTSQuerySpace reports whether b is whitespace for tokenizing an FTS5
+// search string. Byte-level scanning is safe for UTF-8: multi-byte
+// continuation bytes are >= 0x80 and never match an ASCII delimiter.
+func isRawFTSQuerySpace(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\r':
+		return true
+	default:
+		return false
+	}
+}
+
 
 // extractKeywords extracts search keywords from anchor and goal strings.
 func extractKeywords(anchor, goal string) []string {
