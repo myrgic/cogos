@@ -100,7 +100,7 @@ func (s *Server) handleServicesList(w http.ResponseWriter, r *http.Request) {
 	views := make([]serviceView, 0, len(names))
 	for _, name := range names {
 		def := manifest.Services[name]
-		views = append(views, projectService(name, def, healthSnap[name]))
+		views = append(views, s.projectServiceLive(r.Context(), name, def, healthSnap[name]))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -132,10 +132,43 @@ func (s *Server) handleServicesGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	healthSnap := s.process.NodeHealth().Snapshot()
-	view := projectService(name, def, healthSnap[name])
+	view := s.projectServiceLive(r.Context(), name, def, healthSnap[name])
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(view)
+}
+
+// projectServiceLive projects one service for the HTTP API, filling the two
+// gaps the health snapshot alone leaves:
+//
+//   - The kernel's own entry. NodeHealth.Probe deliberately skips the service
+//     whose port is the kernel's own (the kernel does not probe itself, and
+//     the node watcher must never remediate it), so the snapshot has no row
+//     for it. A request being answered proves the kernel is up, so the entry
+//     is synthesized as healthy here, at the projection only: the snapshot is
+//     left untouched, so the watcher still treats the kernel as absent.
+//   - Unprobeable services (probe status "unknown": an observed service with
+//     no health path). "unknown" carries no liveness signal, so a service
+//     whose launchd job is loaded and running read running:false. When the
+//     service declares a launchd label, ask the launchctl controller (a
+//     read-only `launchctl list`) for the truth. The health block stays
+//     "unknown": launchd says the process is alive, not that it is healthy.
+func (s *Server) projectServiceLive(ctx context.Context, name string, def ServiceDef, h ServiceHealth) serviceView {
+	if def.Port != 0 && def.Port == s.cfg.Port {
+		h = ServiceHealth{Port: def.Port, Status: "healthy", At: time.Now().UTC()}
+		return projectService(name, def, h)
+	}
+	view := projectService(name, def, h)
+	if h.Status == "unknown" && def.Launchd != "" {
+		if st, err := s.supervisorFromServer().Status(ctx, name, def); err == nil && st != nil && st.Running {
+			view.Running = true
+			if st.PID > 0 {
+				pid := st.PID
+				view.PID = &pid
+			}
+		}
+	}
+	return view
 }
 
 // projectService converts a ServiceDef + live ServiceHealth into a serviceView.
