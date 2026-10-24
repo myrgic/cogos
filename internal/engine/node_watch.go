@@ -53,6 +53,11 @@ const (
 	DefaultRestartBackoffMax  = 30 * time.Minute
 	DefaultMaxRestartsPerHour = 3
 	nodeRestartTimeout        = 30 * time.Second
+	// DefaultNodeRecheckInterval is how soon a report-only service that is not
+	// healthy is probed again (cog session-eol.md L5): at the 60 s cadence alone
+	// a stage back up in seconds read down for one to two minutes more, which
+	// is how /health said "stage: down" while the stage served 200.
+	DefaultNodeRecheckInterval = 10 * time.Second
 )
 
 // Event types emitted by the watcher.
@@ -82,6 +87,12 @@ type NodeWatcher struct {
 	RestartBackoff     time.Duration
 	RestartBackoffMax  time.Duration
 	MaxRestartsPerHour int
+	// RecheckInterval: a report-only service (one this watcher never
+	// restarts) that is not healthy is probed again this soon, between full
+	// ticks, so its recovery shows within seconds. Services the watcher
+	// remediates keep the full-tick cadence their RemediateAfter count is
+	// measured in. <= 0 = DefaultNodeRecheckInterval.
+	RecheckInterval time.Duration
 
 	now func() time.Time
 
@@ -136,12 +147,73 @@ func (w *NodeWatcher) Run(ctx context.Context) {
 	w.Tick(ctx)
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	var recheck <-chan time.Time
+	arm := func() {
+		recheck = nil
+		if len(w.recheckNames()) > 0 {
+			recheck = time.After(w.recheckInterval())
+		}
+	}
+	arm()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 			w.Tick(ctx)
+			arm()
+		case <-recheck:
+			w.Recheck(ctx)
+			arm()
+		}
+	}
+}
+
+func (w *NodeWatcher) recheckInterval() time.Duration {
+	if w.RecheckInterval > 0 {
+		return w.RecheckInterval
+	}
+	return DefaultNodeRecheckInterval
+}
+
+// recheckNames is the set of probeable, report-only services last seen down or
+// degraded: the ones Recheck looks at again.
+func (w *NodeWatcher) recheckNames() map[string]bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var out map[string]bool
+	for name, svc := range w.manifest.Services {
+		st := w.state[name]
+		if st == nil || (st.status != "down" && st.status != "degraded") || !probeable(svc) || w.willRestart(svc) {
+			continue
+		}
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[name] = true
+	}
+	return out
+}
+
+// Recheck probes again only the report-only services that are not healthy and
+// folds the results in like a tick: a recovery emits its recovered event now
+// rather than at the next full tick. Remediable services are left to Tick.
+func (w *NodeWatcher) Recheck(ctx context.Context) {
+	if w == nil || w.manifest == nil {
+		return
+	}
+	names := w.recheckNames()
+	if len(names) == 0 {
+		return
+	}
+	w.health.ProbeOnly(w.manifest, w.selfPort, names)
+	snap := w.health.Snapshot()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	now := w.now()
+	for name := range names {
+		if h, ok := snap[name]; ok {
+			w.observe(ctx, name, w.manifest.Services[name], h.Status, now)
 		}
 	}
 }

@@ -1,10 +1,14 @@
 package engine
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -12,6 +16,8 @@ import (
 type NodeHealth struct {
 	mu       sync.RWMutex
 	services map[string]ServiceHealth
+	// Timeout bounds each probe (0 = DefaultNodeProbeTimeout).
+	Timeout time.Duration
 }
 
 // ServiceHealth is the probed state of a single service.
@@ -19,7 +25,21 @@ type ServiceHealth struct {
 	Port   int       `json:"port"`
 	Status string    `json:"status"` // healthy, degraded, down, unknown
 	At     time.Time `json:"probed_at"`
+	// Reason says why a probe was not healthy ("connection refused",
+	// "no answer within 5s", "http 503"); LatencyMs is how long the probe
+	// took. Both omitted when there is nothing to say.
+	Reason    string `json:"reason,omitempty"`
+	LatencyMs int64  `json:"latency_ms,omitempty"`
 }
+
+// DefaultNodeProbeTimeout bounds one health probe. It is the stage
+// watchdog's own bound (cog apps/stage/deploy/stage-watchdog.sh, curl -m 5):
+// what the node already calls "answering". It was 2 s, and every time a
+// loaded node's Python stage took longer than that (its event loop
+// serializing a 13 MB rooms.json) the probe called it down while it served
+// 200 (cog session-eol.md L5: 23 of 44 down transitions in a day had no
+// restart near them).
+const DefaultNodeProbeTimeout = 5 * time.Second
 
 // probeable reports whether an HTTP health probe is meaningful for svc.
 //
@@ -57,10 +77,66 @@ func NewNodeHealth() *NodeHealth {
 }
 
 // Probe checks all sibling services defined in the manifest concurrently.
-// Skips the kernel itself (it knows its own health).
-// Each probe has a 2s timeout; total wall time is ~2s regardless of service count.
+// Skips the kernel itself (it knows its own health). Each probe is bounded by
+// the probe timeout (DefaultNodeProbeTimeout); total wall time is about that
+// regardless of service count.
 func (nh *NodeHealth) Probe(manifest *NodeManifest, selfPort int) {
-	client := &http.Client{Timeout: 2 * time.Second}
+	nh.probe(manifest, selfPort, nil)
+}
+
+// ProbeOnly probes just the named services (the watcher's quick re-check of
+// services that are not healthy).
+func (nh *NodeHealth) ProbeOnly(manifest *NodeManifest, selfPort int, names map[string]bool) {
+	if len(names) == 0 {
+		return
+	}
+	nh.probe(manifest, selfPort, names)
+}
+
+func (nh *NodeHealth) timeout() time.Duration {
+	if nh.Timeout > 0 {
+		return nh.Timeout
+	}
+	return DefaultNodeProbeTimeout
+}
+
+// probeNodeService GETs one service's health path and says what the answer means:
+//
+//	200                      healthy
+//	any other status         degraded ("http 503": it answered, unhappily)
+//	no answer within timeout degraded ("no answer within 5s": something holds
+//	                         the port but does not answer in time; a busy
+//	                         process, not a missing one)
+//	connection refused       down (nothing is listening)
+//	anything else            down ("unreachable")
+//
+// A timeout used to read down, so a slow stage read exactly like a stopped one.
+func probeNodeService(client *http.Client, svc ServiceDef, now time.Time) ServiceHealth {
+	url := fmt.Sprintf("http://localhost:%d%s", svc.Port, svc.Health)
+	t0 := time.Now()
+	resp, err := client.Get(url)
+	h := ServiceHealth{Port: svc.Port, At: now, LatencyMs: time.Since(t0).Milliseconds()}
+	var nerr net.Error
+	switch {
+	case err == nil:
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			h.Status = "healthy"
+		} else {
+			h.Status, h.Reason = "degraded", fmt.Sprintf("http %d", resp.StatusCode)
+		}
+	case errors.Is(err, syscall.ECONNREFUSED):
+		h.Status, h.Reason = "down", "connection refused"
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &nerr) && nerr.Timeout()):
+		h.Status, h.Reason = "degraded", fmt.Sprintf("no answer within %s", client.Timeout)
+	default:
+		h.Status, h.Reason = "down", "unreachable"
+	}
+	return h
+}
+
+func (nh *NodeHealth) probe(manifest *NodeManifest, selfPort int, only map[string]bool) {
+	client := &http.Client{Timeout: nh.timeout()}
 	now := time.Now().UTC()
 
 	type result struct {
@@ -75,6 +151,9 @@ func (nh *NodeHealth) Probe(manifest *NodeManifest, selfPort int) {
 		if svc.Port != 0 && svc.Port == selfPort {
 			continue
 		}
+		if only != nil && !only[name] {
+			continue
+		}
 		// Unprobeable services never get an HTTP attempt, so they can never
 		// be reported "down" by a probe that was never going to succeed.
 		if !probeable(svc) {
@@ -85,18 +164,7 @@ func (nh *NodeHealth) Probe(manifest *NodeManifest, selfPort int) {
 		}
 		count++
 		go func(name string, svc ServiceDef) {
-			status := "down"
-			url := fmt.Sprintf("http://localhost:%d%s", svc.Port, svc.Health)
-			resp, err := client.Get(url)
-			if err == nil {
-				resp.Body.Close()
-				if resp.StatusCode == 200 {
-					status = "healthy"
-				} else {
-					status = "degraded"
-				}
-			}
-			ch <- result{name, ServiceHealth{Port: svc.Port, Status: status, At: now}}
+			ch <- result{name, probeNodeService(client, svc, now)}
 		}(name, svc)
 	}
 

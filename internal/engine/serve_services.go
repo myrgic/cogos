@@ -54,9 +54,11 @@ type serviceView struct {
 
 // serviceHealthV is the health sub-object embedded in serviceView.
 type serviceHealthV struct {
-	Status   string    `json:"status"`
-	Endpoint string    `json:"endpoint"`
-	ProbedAt time.Time `json:"probed_at"`
+	Status    string    `json:"status"`
+	Endpoint  string    `json:"endpoint"`
+	ProbedAt  time.Time `json:"probed_at"`
+	Reason    string    `json:"reason,omitempty"`     // why not healthy: "connection refused", "no answer within 5s", "http 503"
+	LatencyMs int64     `json:"latency_ms,omitempty"` // how long the last probe took
 }
 
 // registerServiceRoutes wires GET /v1/services and GET /v1/services/{name}.
@@ -168,9 +170,11 @@ func projectService(name string, def ServiceDef, h ServiceHealth) serviceView {
 	var healthV *serviceHealthV
 	if h.Status != "" {
 		healthV = &serviceHealthV{
-			Status:   h.Status,
-			Endpoint: def.Health,
-			ProbedAt: h.At,
+			Status:    h.Status,
+			Endpoint:  def.Health,
+			ProbedAt:  h.At,
+			Reason:    h.Reason,
+			LatencyMs: h.LatencyMs,
 		}
 	}
 
