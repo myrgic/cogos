@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -46,6 +47,47 @@ type ManagedSessionsConfig struct {
 	// Per-session vars ({profile}) are added at resolution time.
 	Vars           map[string]string       `yaml:"vars,omitempty"`
 	RuntimeClasses map[string]RuntimeClass `yaml:"runtimeClasses,omitempty"`
+	// IdleTimeout is ADR-093 §4's idle_timeout (managed_session_reaper.go): a
+	// Go duration ("1h", "30m"); "" = the default 1h; "0" or "off" = never
+	// reap for idleness (an expired client lease still reaps).
+	IdleTimeout string `yaml:"idleTimeout,omitempty"`
+	// ReapInterval is how often the reaper looks ("" = 1m; at least 1s).
+	ReapInterval string `yaml:"reapInterval,omitempty"`
+}
+
+// reaperSettings turns the kernel.yaml strings into driver settings (0 = the
+// driver's default, negative idle = off). A value that does not parse keeps
+// the default and is logged: a typo must not switch the backstop off.
+func (c *ManagedSessionsConfig) reaperSettings() (idle, interval time.Duration) {
+	if c == nil {
+		return 0, 0
+	}
+	switch v := strings.TrimSpace(strings.ToLower(c.IdleTimeout)); v {
+	case "":
+	case "0", "off", "never", "none":
+		idle = -1
+	default:
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			slog.Error("managedSessions.idleTimeout invalid; using the default", "value", c.IdleTimeout, "default", DefaultManagedSessionIdleTimeout)
+		} else if d == 0 {
+			idle = -1
+		} else {
+			idle = d
+		}
+	}
+	if v := strings.TrimSpace(c.ReapInterval); v != "" {
+		d, err := time.ParseDuration(v)
+		switch {
+		case err != nil || d <= 0:
+			slog.Error("managedSessions.reapInterval invalid; using the default", "value", c.ReapInterval, "default", DefaultManagedSessionReapInterval)
+		case d < time.Second:
+			interval = time.Second
+		default:
+			interval = d
+		}
+	}
+	return idle, interval
 }
 
 // RuntimeClass is one declared class.

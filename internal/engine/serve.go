@@ -288,7 +288,9 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 		// is refused; the default (no class) path is unaffected.
 		slog.Error("serve: managedSessions.runtimeClasses invalid; named runtime classes disabled", "err", err)
 	}
-	s.managedSessions = NewHermesACPDriver(HermesACPDriverConfig{Classes: classes, RecordDir: filepath.Join(cfg.WorkspaceRoot, ".cog", "run", "managed-sessions"), JournalDir: filepath.Join(cfg.WorkspaceRoot, ".cog", "run", "sessions")})
+	idleTimeout, reapInterval := cfg.ManagedSessions.reaperSettings()
+	s.managedSessions = NewHermesACPDriver(HermesACPDriverConfig{Classes: classes, RecordDir: filepath.Join(cfg.WorkspaceRoot, ".cog", "run", "managed-sessions"), JournalDir: filepath.Join(cfg.WorkspaceRoot, ".cog", "run", "sessions"),
+		IdleTimeout: idleTimeout, ReapInterval: reapInterval})
 
 	mux := http.NewServeMux()
 	s.routeH(mux, "GET /", dashboard.Handler())
@@ -663,6 +665,13 @@ func (s *Server) startBackground() {
 	s.reaperStop = stop
 	s.startSessionReaper(ctx, defaultSessionReapTTL, defaultSessionReapInterval)
 	s.startRunExecutorLocked(ctx)
+	// ADR-093 §4: the managed-session reaper (idle_timeout + client leases),
+	// the kernel's backstop for session end-of-life (managed_session_reaper.go).
+	if s.managedSessions != nil {
+		idle, every := s.managedSessions.ReaperSettings()
+		slog.Info("serve: managed-session reaper on", "idle_timeout", idle.String(), "interval", every.String())
+		go s.managedSessions.RunReaper(ctx)
+	}
 }
 
 // startRunExecutor wires the Hermes-fork run executor (idempotent): once
@@ -879,6 +888,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		if summary := nh.Summary(); len(summary) > 0 {
 			resp["node"] = summary
 		}
+	}
+	// Kernel-managed agent sessions: how many, how busy, how idle, what their
+	// process trees cost, and how many the reaper has let go (session-eol.md:
+	// 62 sessions / ~11 GB went unseen for days). The process stats come from
+	// one cached ps snapshot (managed_session_procs.go), never one per call.
+	if s.managedSessions != nil {
+		mctx, cancel := context.WithTimeout(r.Context(), procStatsTimeout)
+		resp["managed_sessions"] = s.managedSessions.HealthBlock(mctx)
+		cancel()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
