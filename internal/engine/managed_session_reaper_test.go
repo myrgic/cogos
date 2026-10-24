@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -431,5 +432,119 @@ func TestRenewLease_ActiveIsActivityAPlainRenewalIsNot(t *testing.T) {
 	}
 	if !s.Info().LastActivityAt.After(before) {
 		t.Fatal("an active renewal did not move the idle clock")
+	}
+}
+
+func TestResume_JournalsALoadsReplayOnceNotOnEveryResume(t *testing.T) {
+	jdir := t.TempDir()
+	d, _ := reapDriver(t, func(c *HermesACPDriverConfig) { c.JournalDir = jdir })
+	ctx := context.Background()
+	read := func(id string) string {
+		b, _ := os.ReadFile(filepath.Join(jdir, journalFileName(id)+".jsonl"))
+		return string(b)
+	}
+
+	// A session the kernel created and journaled, reaped and resumed twice: the
+	// load's replay is not appended to its record again.
+	s, err := d.Create(ctx, HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := s.ID()
+	promptAndWait(t, s, "first words")
+	for i := 0; i < 2; i++ {
+		if got := d.Reap(time.Now().Add(2 * time.Hour)); len(got) != 1 {
+			t.Fatalf("reap %d = %+v", i, got)
+		}
+		r, err := d.Create(ctx, HermesACPOpts{Load: id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitEvent(t, r, 0, kind(MSEventSessionUpdate)) // the replay reached the ring (clients still get it)
+	}
+	if err := d.Delete(id); err != nil {
+		t.Fatal(err)
+	}
+	if j := read(id); !strings.Contains(j, "first words") || strings.Contains(j, "replayed history") {
+		t.Fatalf("journal after two resumes:\n%s", j)
+	}
+
+	// A session the kernel never journaled: its first load's replay starts its record.
+	old, err := d.Create(ctx, HermesACPOpts{Load: "never-journaled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, old, 0, kind(MSEventSessionUpdate))
+	if err := d.Delete(old.ID()); err != nil {
+		t.Fatal(err)
+	}
+	if j := read("never-journaled"); !strings.Contains(j, "replayed history for never-journaled") {
+		t.Fatalf("first load did not backfill the journal:\n%s", j)
+	}
+}
+
+func TestSweepRetention_RemovesOnlyOldFilesOfSessionsNotHeld(t *testing.T) {
+	jdir, rdir := t.TempDir(), t.TempDir()
+	d, _ := reapDriver(t, func(c *HermesACPDriverConfig) {
+		c.JournalDir, c.RecordDir, c.Retention = jdir, rdir, 24*time.Hour
+	})
+	held, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	write := func(p string, mtime time.Time) string {
+		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	goneJournal := write(filepath.Join(jdir, journalFileName("gone")+".jsonl"), old)
+	goneRecord := write(d.managedSessionRecordPath("gone"), old)
+	recent := write(filepath.Join(jdir, journalFileName("recent")+".jsonl"), time.Now())
+	heldJournal := filepath.Join(jdir, journalFileName(held.ID())+".jsonl")
+	heldRecord := d.managedSessionRecordPath(held.ID())
+	for _, p := range []string{heldJournal, heldRecord} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("held session file missing: %v", err)
+		}
+		_ = os.Chtimes(p, old, old) // as old as the gone ones: kept because the session is held
+	}
+	removed := d.SweepRetention(time.Now())
+	if len(removed) != 2 || !(contains2(removed, goneJournal) && contains2(removed, goneRecord)) {
+		t.Fatalf("removed = %v", removed)
+	}
+	for _, p := range []string{recent, heldJournal, heldRecord} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s removed: %v", p, err)
+		}
+	}
+
+	off, _ := reapDriver(t, func(c *HermesACPDriverConfig) { c.JournalDir = jdir })
+	write(goneJournal, old)
+	if got := off.SweepRetention(time.Now()); len(got) != 0 {
+		t.Fatalf("retention off removed %v", got)
+	}
+}
+
+func contains2(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+func TestManagedSessionsConfig_RetentionFailsSafe(t *testing.T) {
+	for v, want := range map[string]time.Duration{
+		"": 0, "30d": 30 * 24 * time.Hour, "720h": 720 * time.Hour, "banana": 0, "-3d": 0, "0d": 0,
+	} {
+		if got := (&ManagedSessionsConfig{SessionRetention: v}).retention(); got != want {
+			t.Errorf("%q -> %v, want %v", v, got, want)
+		}
 	}
 }

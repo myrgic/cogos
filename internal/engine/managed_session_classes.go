@@ -37,6 +37,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -53,6 +54,32 @@ type ManagedSessionsConfig struct {
 	IdleTimeout string `yaml:"idleTimeout,omitempty"`
 	// ReapInterval is how often the reaper looks ("" = 1m; at least 1s).
 	ReapInterval string `yaml:"reapInterval,omitempty"`
+	// SessionRetention keeps the journal and record of a session the kernel
+	// no longer holds for this long after their last write ("30d", "720h";
+	// "" = forever, the default). SweepRetention, managed_session_reaper.go.
+	SessionRetention string `yaml:"sessionRetention,omitempty"`
+}
+
+// retention parses SessionRetention: a Go duration or whole days ("30d").
+// "" or anything that does not parse is 0 (keep forever), and a typo is
+// logged: retention is the one setting here that deletes, so it fails safe.
+func (c *ManagedSessionsConfig) retention() time.Duration {
+	if c == nil {
+		return 0
+	}
+	v := strings.TrimSpace(strings.ToLower(c.SessionRetention))
+	if v == "" {
+		return 0
+	}
+	if n, ok := strings.CutSuffix(v, "d"); ok {
+		if days, err := strconv.Atoi(n); err == nil && days > 0 {
+			return time.Duration(days) * 24 * time.Hour
+		}
+	} else if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return d
+	}
+	slog.Error("managedSessions.sessionRetention invalid; keeping session files forever", "value", c.SessionRetention)
+	return 0
 }
 
 // reaperSettings turns the kernel.yaml strings into driver settings (0 = the

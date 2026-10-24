@@ -290,7 +290,7 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 	}
 	idleTimeout, reapInterval := cfg.ManagedSessions.reaperSettings()
 	s.managedSessions = NewHermesACPDriver(HermesACPDriverConfig{Classes: classes, RecordDir: filepath.Join(cfg.WorkspaceRoot, ".cog", "run", "managed-sessions"), JournalDir: filepath.Join(cfg.WorkspaceRoot, ".cog", "run", "sessions"),
-		IdleTimeout: idleTimeout, ReapInterval: reapInterval})
+		IdleTimeout: idleTimeout, ReapInterval: reapInterval, Retention: cfg.ManagedSessions.retention()})
 
 	mux := http.NewServeMux()
 	s.routeH(mux, "GET /", dashboard.Handler())

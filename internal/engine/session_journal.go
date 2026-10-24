@@ -102,7 +102,15 @@ type SessionJournal struct {
 	// synthetic "gap" record when the queue drains), so a dropped event is
 	// never silent.
 	dropped int
+
+	// openedSize is the file's size when this journal opened it: 0 means the
+	// kernel has no record of the session yet (managed_session_hermes.go uses
+	// it to journal a load's replayed history once, not on every resume).
+	openedSize int64
 }
+
+// HasRecord reports whether the file already held lines when it was opened.
+func (j *SessionJournal) HasRecord() bool { return j != nil && j.openedSize > 0 }
 
 // DefaultSessionJournalDir returns the directory a journal appends to when the
 // caller names none: COGOS_SESSION_JOURNAL_DIR when set, else <home>/.cog/run/
@@ -149,6 +157,9 @@ func NewSessionJournal(dir, sessionID, room, actor string) (*SessionJournal, err
 		file:      f,
 		ch:        make(chan ManagedSessionEvent, sessionJournalQueue),
 		done:      make(chan struct{}),
+	}
+	if st, err := f.Stat(); err == nil {
+		j.openedSize = st.Size()
 	}
 	j.wg.Add(1)
 	go j.loop()

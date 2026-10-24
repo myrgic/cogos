@@ -40,6 +40,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -179,20 +182,79 @@ func (d *HermesACPDriver) Reap(now time.Time) []ReapRecord {
 	return out
 }
 
-// RunReaper calls Reap every ReapInterval until ctx is done. The serving
-// lifetime owns it (Server.startBackground); a driver that is only
-// constructed (tests) never reaps on its own.
+// RunReaper calls Reap every ReapInterval until ctx is done, and the retention
+// sweep at most once an hour. The serving lifetime owns it
+// (Server.startBackground); a driver that is only constructed (tests) never
+// reaps on its own.
 func (d *HermesACPDriver) RunReaper(ctx context.Context) {
 	t := time.NewTicker(d.cfg.ReapInterval)
 	defer t.Stop()
+	var swept time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
 			d.Reap(now)
+			if d.cfg.Retention > 0 && now.Sub(swept) >= retentionSweepEvery {
+				swept = now
+				d.SweepRetention(now)
+			}
 		}
 	}
+}
+
+// retentionSweepEvery spaces the retention sweeps.
+const retentionSweepEvery = time.Hour
+
+// SweepRetention removes the per-session files of sessions this driver does
+// not hold whose last write is older than Retention: journals (JournalDir,
+// <session>.jsonl) and durable records (RecordDir). A resident session's files
+// are never touched, whatever their age. Removing a record means a later cold
+// resume of that session runs the default class with the request's profile;
+// the agent's own conversation store is not touched. Returns the paths
+// removed. Off (nothing removed) while Retention is 0.
+func (d *HermesACPDriver) SweepRetention(now time.Time) []string {
+	if d.cfg.Retention <= 0 {
+		return nil
+	}
+	cut := now.Add(-d.cfg.Retention)
+	resident := map[string]bool{}
+	for _, s := range d.snapshotSessions() {
+		resident[journalFileName(s.id)+".jsonl"] = true
+		resident[filepath.Base(d.managedSessionRecordPath(s.id))] = true
+	}
+	var removed []string
+	sweep := func(dir, suffix string) {
+		if dir == "" {
+			return
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, suffix) || resident[name] {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil || info.ModTime().After(cut) {
+				continue
+			}
+			p := filepath.Join(dir, name)
+			if err := os.Remove(p); err == nil {
+				removed = append(removed, p)
+			}
+		}
+	}
+	sweep(d.cfg.JournalDir, ".jsonl")
+	sweep(d.cfg.RecordDir, ".json")
+	if len(removed) > 0 {
+		slog.Info("managed-sessions: retention removed files of sessions not held", "count", len(removed),
+			"retention", d.cfg.Retention.String())
+	}
+	return removed
 }
 
 // ReaperSettings reports the effective idle timeout and reap interval.

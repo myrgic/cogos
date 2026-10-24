@@ -138,6 +138,11 @@ type HermesACPDriverConfig struct {
 	IdleTimeout time.Duration
 	// ReapInterval is how often the serving loop calls Reap. Default 60 s.
 	ReapInterval time.Duration
+	// Retention is how long the per-session files of a session the driver no
+	// longer holds (its journal in JournalDir, its record in RecordDir) are
+	// kept after their last write (SweepRetention). 0 = forever (the default:
+	// the operator turns it on; nothing already on disk is removed unasked).
+	Retention time.Duration
 
 	// now is a test seam for the readiness cache clock; nil = time.Now.
 	now func() time.Time
@@ -1512,13 +1517,28 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		if hook := d.cfg.afterRingCreate; hook != nil {
 			hook(sess.ring)
 		}
-		if j := newSessionJournalForSession(sess, d.cfg.JournalDir); j != nil {
+		// session/load replays the whole conversation as session/update
+		// events. A session the kernel has never journaled gets that replay
+		// as the start of its record; one it already has (the usual case once
+		// idle sessions are reaped and resumed, session-eol.md) would get a
+		// full copy of its history appended on every resume, so its journal
+		// attaches after the load and records only what happens from here.
+		j := newSessionJournalForSession(sess, d.cfg.JournalDir)
+		if j != nil && !j.HasRecord() {
 			sess.ring.SetJournal(j)
+			j = nil
 		}
 		proc.mu.Lock()
 		proc.sessions[sid] = sess
 		proc.mu.Unlock()
 		err = proc.currentConn().Call(cctx, "session/load", map[string]any{"sessionId": sid, "cwd": opts.Cwd, "mcpServers": mcp}, nil)
+		if j != nil {
+			if err == nil {
+				sess.ring.SetJournal(j)
+			} else {
+				j.Close()
+			}
+		}
 		if err == nil && resume != nil && (resume.Mode != "" || resume.Model != "") {
 			// session/load rebuilds the session on the agent's defaults: put
 			// back the mode and model it had when it was reaped (or crashed),
@@ -1945,7 +1965,10 @@ func (d *HermesACPDriver) TurnsInFlight() int {
 	return n
 }
 
-// Close detaches every session and stops every process.
+// Close detaches every session and stops every process, a few at a time:
+// each stop waits up to 3 s for its process to exit, and a kernel holding
+// dozens of sessions (62 on darkstar, 2026-10-24) must not take minutes to
+// shut down.
 func (d *HermesACPDriver) Close() {
 	d.mu.Lock()
 	d.closed = true
@@ -1954,7 +1977,15 @@ func (d *HermesACPDriver) Close() {
 		ids = append(ids, id)
 	}
 	d.mu.Unlock()
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, reapConcurrency)
 	for _, id := range ids {
-		_ = d.drop(id)
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(id string) {
+			defer func() { <-sem; wg.Done() }()
+			_ = d.drop(id)
+		}(id)
 	}
+	wg.Wait()
 }
