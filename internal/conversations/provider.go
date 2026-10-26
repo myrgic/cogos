@@ -138,6 +138,10 @@ func (p *Provider) Ontology() *LoadedOntology {
 // Type returns the resource type identifier.
 func (p *Provider) Type() string { return "conversations" }
 
+// HeapHeavy opts the conversations provider into the reconcile heap watermark guard (issue #716): its
+// FetchLive/ApplyPlan scale with the projection index, so it is the first thing to shed under memory pressure.
+func (p *Provider) HeapHeavy() bool { return true }
+
 // ResolveURI resolves a cog:conversations/… URI against the live index.
 // Returns ErrURIUnknownParam (or a parse error) when the URI is invalid.
 // Returns an error when the index is not yet initialised.

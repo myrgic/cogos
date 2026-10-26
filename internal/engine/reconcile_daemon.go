@@ -1065,6 +1065,15 @@ func (d *ReconcileDaemon) runOneCycle(ctx context.Context, providerType string) 
 		return err
 	}
 
+	// Heap watermark guard (#716): a memory-heavy provider is skipped while the
+	// live heap is above the watermark. A skip is neither success nor failure,
+	// so recordOutcome is cleared. The bumpCycleSerial defer still bumps on a
+	// skip; that is acceptable because the serial is telemetry, not control flow.
+	if heapGuardSkip(provider, providerType) {
+		recordOutcome = false
+		return nil
+	}
+
 	// Per-phase timing. Each reconcile step is timed so a slow phase — e.g. an
 	// O(corpus) FetchLive index reload, or a large WriteState — is visible in
 	// the cycle-complete log and on the span, instead of only the opaque cycle
