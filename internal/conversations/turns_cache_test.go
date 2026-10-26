@@ -204,7 +204,7 @@ func TestTurnsCache_MemoryBound(t *testing.T) {
 	}
 	after := heapAllocAfterGC()
 
-	var growth int64 = int64(after) - int64(before)
+	growth := int64(after) - int64(before)
 	if growth > 40<<20 {
 		t.Fatalf("HeapAlloc grew by %d bytes over the scan; want < 40 MB (cache cap is 4 MB)", growth)
 	}
