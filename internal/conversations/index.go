@@ -735,6 +735,21 @@ func (idx *Index) turnsForSession(sessionID string, insert bool) ([]Turn, bool) 
 	return turns, true
 }
 
+// sessionMayMatchWindow reports whether a session's turns could fall inside
+// [since, until] according to its meta bounds alone. It is a pre-filter: a
+// false result proves no turn can match, so the turns file need not be read.
+// Zero bounds (unset filter, or unknown session bounds) never exclude.
+// Turn-level timestamp filters still apply to every turn that is read (#716).
+func sessionMayMatchWindow(meta SessionMeta, since, until time.Time) bool {
+	if !since.IsZero() && !meta.LastTurnAt.IsZero() && meta.LastTurnAt.Before(since) {
+		return false
+	}
+	if !until.IsZero() && !meta.FirstTurnAt.IsZero() && meta.FirstTurnAt.After(until) {
+		return false
+	}
+	return true
+}
+
 // Search performs a case-insensitive multi-term search over all indexed turns.
 //
 // Query parsing rules:
@@ -773,6 +788,9 @@ func (idx *Index) Search(query string, since, until time.Time, sessionID, identi
 	for _, c := range cands {
 		sid, meta, hasMeta := c.sid, c.meta, c.hasMeta
 		if identity != "" && hasMeta && !strings.EqualFold(meta.Identity, identity) {
+			continue
+		}
+		if hasMeta && !sessionMayMatchWindow(meta, since, until) {
 			continue
 		}
 

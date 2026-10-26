@@ -74,6 +74,10 @@ const (
 // abstractMaxLen is the number of characters kept per turn in abstract mode.
 const abstractMaxLen = 200
 
+// allSessionsDefaultLimit caps an all-sessions URI that sets no limit=, so a
+// scan cannot materialise every turn in the index (#716).
+const allSessionsDefaultLimit = 200
+
 // URIQuery is the parsed, validated form of a cog:conversations URI.
 type URIQuery struct {
 	// Path components.
@@ -477,74 +481,69 @@ func resolveQuery(rawURI string, uq *URIQuery, idx *Index) (*ResolvedSlice, erro
 	}
 	idx.mu.RUnlock()
 
-	// Collect matching turns.
+	// Collect matching turns, streaming (#716): stop as soon as offset+limit
+	// turns are collected instead of materialising every match across all
+	// sessions. effLimit == 0 means unlimited (single-session scope, no limit).
+	effLimit := uq.Limit
+	if effLimit == 0 && uq.SessionID == "" {
+		effLimit = allSessionsDefaultLimit
+	}
+	need := 0
+	if effLimit > 0 {
+		need = uq.Offset + effLimit
+	}
+	desc := uq.Order == "desc"
+
 	var allTurns []Turn
 	sourcesSeen := make(map[string]struct{})
 
-	for _, sid := range sids {
-		turns, ok := idx.peekOrReadTurns(sid)
-		if !ok {
-			continue
+	// Ascending order visits sids ascending and each session's turns in order.
+	// desc visits sids descending and each session's turns in reverse, which
+	// yields the same sequence the old build-ascending-then-reverse produced.
+	for i := range sids {
+		sid := sids[i]
+		if desc {
+			sid = sids[len(sids)-1-i]
 		}
 		meta := metas[sid]
 
-		// Track sources for response metadata.
+		// Track sources for response metadata. Sessions skipped by the meta
+		// pre-filter are still counted, as before.
 		src := meta.Source
 		if src == "" {
 			src = "claude-code"
 		}
+		if !sessionMayMatchWindow(meta, uq.Since, uq.Until) {
+			sourcesSeen[src] = struct{}{}
+			continue
+		}
+
+		turns, ok := idx.peekOrReadTurns(sid)
+		if !ok {
+			continue
+		}
 		sourcesSeen[src] = struct{}{}
 
-		for _, t := range turns {
-			// Role filter.
-			if roleSet != nil {
-				if _, ok := roleSet[t.Role]; !ok {
-					continue
-				}
+		for k := range turns {
+			t := turns[k]
+			if desc {
+				t = turns[len(turns)-1-k]
 			}
-			// Time filters.
-			if !uq.Since.IsZero() && t.Timestamp.Before(uq.Since) {
+			if !turnMatchesQuery(t, uq, roleSet, terms) {
 				continue
-			}
-			if !uq.Until.IsZero() && t.Timestamp.After(uq.Until) {
-				continue
-			}
-			// Text filter.
-			if !matchesAllTerms(t.Text, terms) {
-				continue
-			}
-			// Fragment filter.
-			if uq.Fragment != nil {
-				if !matchesFragment(t, uq.Fragment) {
-					continue
-				}
-			}
-			// v0.2 component= filter: filter records that carry a component
-			// class. Records ingested before v0.2 have an empty Component
-			// field and are included when component= is set (the filter is
-			// applied as a best-effort: if the field is unpopulated, it is
-			// treated as session.turn per v0.1 invariant).
-			if uq.ComponentClass != "" {
-				effectiveClass := t.Component
-				if effectiveClass == "" {
-					effectiveClass = "session.turn" // v0.1 invariant
-				}
-				if effectiveClass != uq.ComponentClass {
-					continue
-				}
 			}
 			allTurns = append(allTurns, t)
+			if need > 0 && len(allTurns) >= need {
+				break
+			}
+		}
+		if need > 0 && len(allTurns) >= need {
+			// sourcesSeen now covers the scanned prefix only (early stop).
+			break
 		}
 	}
 
-	// Order.
-	if uq.Order == "desc" {
-		reverseInPlace(allTurns)
-	}
-
 	// Offset + Limit.
-	total := len(allTurns)
-	_ = total
 	if uq.Offset > 0 {
 		if uq.Offset >= len(allTurns) {
 			allTurns = nil
@@ -552,8 +551,8 @@ func resolveQuery(rawURI string, uq *URIQuery, idx *Index) (*ResolvedSlice, erro
 			allTurns = allTurns[uq.Offset:]
 		}
 	}
-	if uq.Limit > 0 && len(allTurns) > uq.Limit {
-		allTurns = allTurns[:uq.Limit]
+	if effLimit > 0 && len(allTurns) > effLimit {
+		allTurns = allTurns[:effLimit]
 	}
 
 	// Build resolved turns.
@@ -618,6 +617,40 @@ func resolveQuery(rawURI string, uq *URIQuery, idx *Index) (*ResolvedSlice, erro
 	return slice, nil
 }
 
+// turnMatchesQuery applies the turn-level filters of a resolved query: role,
+// since/until, term-AND text match, fragment, and component class.
+func turnMatchesQuery(t Turn, uq *URIQuery, roleSet map[Role]struct{}, terms []string) bool {
+	if roleSet != nil {
+		if _, ok := roleSet[t.Role]; !ok {
+			return false
+		}
+	}
+	if !uq.Since.IsZero() && t.Timestamp.Before(uq.Since) {
+		return false
+	}
+	if !uq.Until.IsZero() && t.Timestamp.After(uq.Until) {
+		return false
+	}
+	if !matchesAllTerms(t.Text, terms) {
+		return false
+	}
+	if uq.Fragment != nil && !matchesFragment(t, uq.Fragment) {
+		return false
+	}
+	// v0.2 component= filter. Records ingested before v0.2 have an empty
+	// Component field and are treated as session.turn (v0.1 invariant).
+	if uq.ComponentClass != "" {
+		effectiveClass := t.Component
+		if effectiveClass == "" {
+			effectiveClass = "session.turn"
+		}
+		if effectiveClass != uq.ComponentClass {
+			return false
+		}
+	}
+	return true
+}
+
 // matchesFragment returns true when the turn satisfies the fragment spec.
 func matchesFragment(t Turn, fs *FragmentSpec) bool {
 	if fs.ID != "" {
@@ -649,13 +682,6 @@ func computeSliceHash(turns []ResolvedTurn) (string, error) {
 	}
 	sum := sha256.Sum256(b)
 	return fmt.Sprintf("%x", sum[:]), nil
-}
-
-// reverseInPlace reverses a Turn slice in place.
-func reverseInPlace(turns []Turn) {
-	for i, j := 0, len(turns)-1; i < j; i, j = i+1, j-1 {
-		turns[i], turns[j] = turns[j], turns[i]
-	}
 }
 
 // sortStrings sorts a string slice in place. (Avoids importing sort at top level.)
