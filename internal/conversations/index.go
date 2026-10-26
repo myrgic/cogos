@@ -145,12 +145,38 @@ func (idx *Index) Load() error {
 		}
 	}
 
-	// Atomically swap in the freshly loaded state. Clearing the cache under
-	// the same lock keeps it consistent with the new sessions map. Turns are
-	// not read here; they load lazily via sessionTurnsShared.
+	// Atomically swap in the freshly loaded state. Cached turns are invalidated
+	// per session, not wholesale: only sessions whose meta entry changed are
+	// dropped, so a peer's write to one session does not evict the rest of the
+	// cache. Turns are not read here; they load lazily via sessionTurnsShared.
+	//
+	// Why meta equality is enough: writers (UpsertSessions) write the turns
+	// file and then commit _meta.json, both under the per-session lock. The
+	// meta entry carries a fresh IndexedAt, stamped by the caller (provider.go,
+	// ingest_watermark.go), so a changed turns file arrives with a changed meta
+	// entry. PRECONDITION: a caller that rewrites turns without advancing
+	// IndexedAt would leave a stale cached entry here. UpsertSessions does not
+	// enforce that stamp itself. SessionMeta has only comparable fields (no
+	// slices or maps), so `!=` is a valid value comparison; adding a slice or
+	// map field to SessionMeta would break this compile-time-safe comparison.
 	idx.mu.Lock()
+	if len(idx.sessions) == 0 {
+		// First Load (or nothing previously known): no per-session diff to
+		// make, so drop everything.
+		idx.cache.clear()
+	} else {
+		for sid, oldMeta := range idx.sessions {
+			if newMeta, ok := sessions[sid]; !ok || newMeta != oldMeta {
+				idx.cache.invalidate(sid)
+			}
+		}
+		for sid := range sessions {
+			if _, ok := idx.sessions[sid]; !ok {
+				idx.cache.invalidate(sid)
+			}
+		}
+	}
 	idx.sessions = sessions
-	idx.cache.clear()
 	idx.lastMetaMtime = metaMtime
 	idx.lastMetaSize = metaSize
 	idx.lastMetaHash = metaHash
