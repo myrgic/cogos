@@ -75,7 +75,7 @@
     },
     {
       "file": "internal/conversations/index.go",
-      "line": 1074,
+      "line": 1099,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "(*Index).writeMetaFileLocked",
@@ -87,7 +87,7 @@
     },
     {
       "file": "internal/conversations/index.go",
-      "line": 1077,
+      "line": 1102,
       "column": 12,
       "primitive": "os.Rename",
       "func": "(*Index).writeMetaFileLocked",
@@ -99,7 +99,7 @@
     },
     {
       "file": "internal/conversations/index.go",
-      "line": 1209,
+      "line": 1234,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "(*Index).writeTurnsFileLocked",
@@ -111,7 +111,7 @@
     },
     {
       "file": "internal/conversations/index.go",
-      "line": 1212,
+      "line": 1237,
       "column": 12,
       "primitive": "os.Rename",
       "func": "(*Index).writeTurnsFileLocked",

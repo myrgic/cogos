@@ -156,9 +156,10 @@ func (idx *Index) Load() error {
 	// ingest_watermark.go), so a changed turns file arrives with a changed meta
 	// entry. PRECONDITION: a caller that rewrites turns without advancing
 	// IndexedAt would leave a stale cached entry here. UpsertSessions does not
-	// enforce that stamp itself. SessionMeta has only comparable fields (no
-	// slices or maps), so `!=` is a valid value comparison; adding a slice or
-	// map field to SessionMeta would break this compile-time-safe comparison.
+	// enforce that stamp itself. The comparison is sessionMetaEqual, not `!=`:
+	// time.Time `==` compares the Location pointer and monotonic reading, so
+	// two decodes of the same bytes (or an in-process time.Now() meta vs its
+	// disk round-trip) would otherwise always look "changed" (cog-review #718).
 	idx.mu.Lock()
 	if len(idx.sessions) == 0 {
 		// First Load (or nothing previously known): no per-session diff to
@@ -166,7 +167,7 @@ func (idx *Index) Load() error {
 		idx.cache.clear()
 	} else {
 		for sid, oldMeta := range idx.sessions {
-			if newMeta, ok := sessions[sid]; !ok || newMeta != oldMeta {
+			if newMeta, ok := sessions[sid]; !ok || !sessionMetaEqual(newMeta, oldMeta) {
 				idx.cache.invalidate(sid)
 			}
 		}
@@ -182,6 +183,30 @@ func (idx *Index) Load() error {
 	idx.lastMetaHash = metaHash
 	idx.mu.Unlock()
 	return nil
+}
+
+// sessionMetaEqual reports whether a and b describe the same session meta.
+// time.Time fields compare with Equal (instant), never ==, which would also
+// compare the Location pointer and monotonic clock reading: two independent
+// JSON decodes of an identical "-04:00" timestamp get distinct *Location
+// values, and an in-memory time.Now() keeps a monotonic reading its disk
+// round-trip lacks. TestSessionMetaEqual_CoversEveryField fails if a field is
+// added to SessionMeta without being compared here.
+func sessionMetaEqual(a, b SessionMeta) bool {
+	return a.SessionID == b.SessionID &&
+		a.Source == b.Source &&
+		a.SourcePath == b.SourcePath &&
+		a.TurnCount == b.TurnCount &&
+		a.FirstTurnAt.Equal(b.FirstTurnAt) &&
+		a.LastTurnAt.Equal(b.LastTurnAt) &&
+		a.IndexedAt.Equal(b.IndexedAt) &&
+		a.SourceMtime.Equal(b.SourceMtime) &&
+		a.SourceSize == b.SourceSize &&
+		a.SourceOffset == b.SourceOffset &&
+		a.SourceTailHash == b.SourceTailHash &&
+		a.Identity == b.Identity &&
+		a.Entrypoint == b.Entrypoint &&
+		a.Title == b.Title
 }
 
 // LoadIfChanged reloads the index from disk only when _meta.json has changed

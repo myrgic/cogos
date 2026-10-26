@@ -264,10 +264,10 @@ These sites write to disk but this tool could not structurally resolve their pat
 | `<call:rbacKindDir>` | writeBindingFile (`os.MkdirAll`) | _legacy/wave4-providers/rbac_provider.go:742 | other |
 | `<call:rbacKindDir>/{action.Name}.yaml` | writeBindingFile (`os.WriteFile`) | _legacy/wave4-providers/rbac_provider.go:750 | other |
 | `<call:os.Getenv>` | (*Harness).RunInference (`os.OpenFile`) | harness/harness.go:455 | harness |
-| `<call:idx.metaPath><call:fmt.Sprintf>` | (*Index).writeMetaFileLocked (`os.WriteFile`) | internal/conversations/index.go:1074 | internal:conversations |
-| `<call:idx.metaPath>` | (*Index).writeMetaFileLocked (`os.Rename`) | internal/conversations/index.go:1077 | internal:conversations |
-| `<call:idx.turnsPath><call:fmt.Sprintf>` | (*Index).writeTurnsFileLocked (`os.WriteFile`) | internal/conversations/index.go:1209 | internal:conversations |
-| `<call:idx.turnsPath>` | (*Index).writeTurnsFileLocked (`os.Rename`) | internal/conversations/index.go:1212 | internal:conversations |
+| `<call:idx.metaPath><call:fmt.Sprintf>` | (*Index).writeMetaFileLocked (`os.WriteFile`) | internal/conversations/index.go:1099 | internal:conversations |
+| `<call:idx.metaPath>` | (*Index).writeMetaFileLocked (`os.Rename`) | internal/conversations/index.go:1102 | internal:conversations |
+| `<call:idx.turnsPath><call:fmt.Sprintf>` | (*Index).writeTurnsFileLocked (`os.WriteFile`) | internal/conversations/index.go:1234 | internal:conversations |
+| `<call:idx.turnsPath>` | (*Index).writeTurnsFileLocked (`os.Rename`) | internal/conversations/index.go:1237 | internal:conversations |
 | `<expr>` | runBlobsCmd (`os.WriteFile`) | internal/engine/blobs_cmd.go:168 | internal:engine |
 | `dirname(<call:bs.blobPath>)` | (*BlobStore).Store (`os.MkdirAll`) | internal/engine/blobstore.go:89 | internal:engine |
 | `<call:bs.blobPath>.tmp` | (*BlobStore).Store (`os.WriteFile`) | internal/engine/blobstore.go:95 | internal:engine |
