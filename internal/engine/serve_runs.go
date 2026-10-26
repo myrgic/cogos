@@ -31,6 +31,7 @@ func (s *Server) registerRunRoutes(mux *http.ServeMux) {
 	s.route(mux, "POST /v1/runs/{id}/end", s.handleRunEnd)
 	s.route(mux, "POST /v1/runs/{id}/delivered", s.handleRunDelivered)
 	s.route(mux, "POST /v1/runs/{id}/cancel", s.handleRunCancel)
+	s.route(mux, "POST /v1/runs/{id}/steer", s.handleRunSteer)
 }
 
 func (s *Server) runBoardOr503(w http.ResponseWriter) *RunBoardStore {

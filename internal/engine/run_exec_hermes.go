@@ -94,6 +94,7 @@ type runExecSession struct {
 
 	cancelled bool   // Cancel landed: the turn's end reads as killed
 	reason    string // the cancel reason, recorded on run.end
+	turnID    string // the run's one turn, once its brief was sent (Steer joins only it)
 
 	// done is closed once run.end has been written and the session let go.
 	// Cancel waits on it, so a caller that cancels a run sees the run ended.
@@ -199,7 +200,8 @@ func (e *HermesRunExecutor) Start(ctx context.Context, runID string, opts Hermes
 		})
 		return fmt.Errorf("run %s: encode brief: %w", runID, err)
 	}
-	if _, err := sess.Prompt(brief); err != nil {
+	turnID, err := sess.Prompt(brief)
+	if err != nil {
 		// The turn never started, so no turn_end will arrive: report the
 		// prompt failure as the run's end (a session that was already dead
 		// reads as the agent process being gone).
@@ -210,8 +212,11 @@ func (e *HermesRunExecutor) Start(ctx context.Context, runID string, opts Hermes
 		e.closeRun(runID, a, end)
 		return fmt.Errorf("run %s: first prompt: %w", runID, err)
 	}
+	e.mu.Lock()
+	a.turnID = turnID // the run's one turn: Steer joins only this one
+	e.mu.Unlock()
 
-	turn, seen, text := e.awaitTurnEnd(ctx, sess, sub, baseline)
+	turn, seen, text := e.awaitTurnEnd(ctx, sess, sub, baseline, turnID)
 	e.mu.Lock()
 	cancelled, reason := a.cancelled, a.reason
 	e.mu.Unlock()
@@ -392,14 +397,14 @@ type runTurnEnd struct {
 // It also returns this turn's agent message text, folded from the same events
 // as they are read (runTurnWatch): the run's report (attachReport). The text
 // of a turn that never reported is "" — there is nothing to report on.
-func (e *HermesRunExecutor) awaitTurnEnd(ctx context.Context, sess *HermesACPSession, sub *RingSubscription, baseline uint64) (runTurnEnd, bool, string) {
+func (e *HermesRunExecutor) awaitTurnEnd(ctx context.Context, sess *HermesACPSession, sub *RingSubscription, baseline uint64, turnID string) (runTurnEnd, bool, string) {
 	watch := runTurnWatch{seq: baseline}
 	dropped := false
 	for {
 		// The subscription's snapshot and live tail, in seq order.
 		for _, ev := range sub.Replay {
 			watch.observe(ev)
-			if ev.Kind == MSEventTurnEnd {
+			if isRunTurnEnd(ev, turnID) {
 				return parseTurnEnd(ev), true, watch.text.String()
 			}
 		}
@@ -411,7 +416,7 @@ func (e *HermesRunExecutor) awaitTurnEnd(ctx context.Context, sess *HermesACPSes
 					continue
 				}
 				watch.observe(ev)
-				if ev.Kind == MSEventTurnEnd {
+				if isRunTurnEnd(ev, turnID) {
 					return parseTurnEnd(ev), true, watch.text.String()
 				}
 			case <-ctx.Done():
@@ -427,7 +432,7 @@ func (e *HermesRunExecutor) awaitTurnEnd(ctx context.Context, sess *HermesACPSes
 		evs, _ := sess.Events().Since(baseline)
 		for _, ev := range evs {
 			watch.observe(ev)
-			if ev.Kind == MSEventTurnEnd {
+			if isRunTurnEnd(ev, turnID) {
 				return parseTurnEnd(ev), true, watch.text.String()
 			}
 		}
@@ -499,6 +504,18 @@ func agentMessageText(data json.RawMessage) string {
 		return ""
 	}
 	return u.Content.Text
+}
+
+// isRunTurnEnd reports whether ev is the turn_end of the run's own turn. A
+// steer the agent ran as a short turn of its own (Redirect's un-acked path)
+// writes a turn_end under the forward's id; that is not the run's turn ending.
+// A turn_end with no turn id (none is written today) is taken as the run's.
+func isRunTurnEnd(ev ManagedSessionEvent, turnID string) bool {
+	if ev.Kind != MSEventTurnEnd {
+		return false
+	}
+	end := parseTurnEnd(ev)
+	return turnID == "" || end.TurnID == "" || end.TurnID == turnID
 }
 
 func parseTurnEnd(ev ManagedSessionEvent) runTurnEnd {
