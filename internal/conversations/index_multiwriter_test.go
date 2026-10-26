@@ -237,17 +237,17 @@ func TestCrossProcessDeleteSurvivesConcurrentUpsert(t *testing.T) {
 // TestPeerWriteDoesNotDesyncSessionsAndTurns is the regression test for the
 // finding cog-review raised on an earlier version of this fix (PR #458):
 // writeMetaFileLocked must never let idx.sessions gain a peer process's
-// session key without idx.turns having that session's turns loaded, because
-// idx.sessions backs ListSessions/GetMeta (used by cog_list_conversations)
-// while idx.turns backs GetTurn/Search (used by cog_get_turn/cog_search) —
-// a split between them means a session is listed but its content is
-// unreachable.
+// session key without its turns being servable, because idx.sessions backs
+// ListSessions/GetMeta (used by cog_list_conversations) while the turns
+// accessor (SessionTurns/GetTurn, lazily read since #716) backs
+// cog_get_turn/cog_search — a split between them means a session is listed
+// but its content is unreachable.
 //
 // Drives two Index instances against the same projDir: idxB writes a session
 // idxA never loads via Load/LoadIfChanged. idxA then performs its own,
 // unrelated UpsertSession (writeMetaFileLocked observes idxB's session on
 // disk while merging). The invariant checked is: for every session_id idxA's
-// in-memory idx.sessions knows about, idx.turns must also know about it —
+// in-memory idx.sessions knows about, SessionTurns must serve its turns —
 // i.e. UpsertSession must never introduce a sessions/turns split-brain as a
 // side effect of coordinating with a peer's write.
 func TestPeerWriteDoesNotDesyncSessionsAndTurns(t *testing.T) {
@@ -295,7 +295,7 @@ func TestPeerWriteDoesNotDesyncSessionsAndTurns(t *testing.T) {
 	}
 
 	// Invariant: every session_id in idxA's in-memory idx.sessions must also
-	// be present in idx.turns. "b-peer-only" must NOT appear in idxA's
+	// have servable turns (SessionTurns non-nil). "b-peer-only" must NOT appear in idxA's
 	// idx.sessions unless idxA has actually loaded its turns (which it
 	// hasn't, since it never called Load/LoadIfChanged after idxB's write).
 	// Scoped explicitly (not deferred) so the RLock is released before the
@@ -346,7 +346,7 @@ func TestPeerWriteDoesNotDesyncSessionsAndTurns(t *testing.T) {
 
 	// A subsequent LoadIfChanged must detect the peer's on-disk addition
 	// (content differs from idxA's own lastMetaHash baseline) and perform a
-	// full reload that backfills idx.turns for "b-peer-only" too.
+	// reload that makes "b-peer-only"'s turns servable too.
 	reloaded, err := idxA.LoadIfChanged()
 	if err != nil {
 		t.Fatalf("LoadIfChanged: %v", err)

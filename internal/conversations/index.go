@@ -448,7 +448,7 @@ func (idx *Index) acquireSessionLocks(ids []string) ([]heldSessionLock, map[stri
 //	also blocked every concurrent GetMeta/ListSessions/GetTurn/Search call
 //	(which take idx.mu.RLock()) on the SAME in-process Index. Disk I/O and
 //	cross-process coordination now happen with idx.mu unheld; only the final
-//	idx.sessions/idx.turns mutation takes the lock, and only briefly.
+//	idx.sessions / turns-cache mutation takes the lock, and only briefly.
 func (idx *Index) UpsertSessions(batch []SessionAndTurns) ([]SessionOpOutcome, error) {
 	if len(batch) == 0 {
 		return nil, nil
@@ -755,35 +755,58 @@ func (idx *Index) peekOrReadTurns(sessionID string) ([]Turn, bool) {
 
 // turnsForSession is the shared body of sessionTurnsShared and peekOrReadTurns.
 func (idx *Index) turnsForSession(sessionID string, insert bool) ([]Turn, bool) {
-	idx.mu.RLock()
-	_, indexed := idx.sessions[sessionID]
-	idx.mu.RUnlock()
-	if !indexed {
-		return nil, false
-	}
+	// Two attempts at most: a second pass only runs when a concurrent writer
+	// replaced the session while the first read was in flight (see below).
+	for attempt := 0; attempt < 2; attempt++ {
+		idx.mu.RLock()
+		_, indexed := idx.sessions[sessionID]
+		idx.mu.RUnlock()
+		if !indexed {
+			return nil, false
+		}
 
-	if turns, ok := idx.cache.get(sessionID); ok {
-		return turns, true
-	}
+		if turns, ok := idx.cache.get(sessionID); ok {
+			return turns, true
+		}
 
-	// Capture the generation BEFORE reading disk so a concurrent writer that
-	// lands during the read invalidates this result.
-	g := idx.cache.gen(sessionID)
-	turns, err := idx.loadTurnsFile(sessionID)
-	if err != nil {
-		// Corrupt turn file — remove from index (in memory only); will be
-		// re-projected.
+		// Capture the generation BEFORE reading disk so a concurrent writer that
+		// lands during the read invalidates this result.
+		g := idx.cache.gen(sessionID)
+		turns, err := idx.loadTurnsFile(sessionID)
+		if err == nil {
+			// Same staleness rule on the success path: if a writer bumped the
+			// generation while we read (e.g. DeleteSessions removed the file,
+			// which reads as nil turns), these bytes are stale — retry once
+			// against the new state instead of returning them.
+			if attempt == 0 && idx.cache.gen(sessionID) != g {
+				continue
+			}
+			if insert {
+				idx.cache.putIfGen(sessionID, turns, g)
+			}
+			return turns, true
+		}
+
+		// Corrupt turn file: remove the session from the index (in memory
+		// only; it will be re-projected) — but only if no writer touched it
+		// since g was captured. Every generation bump for a session
+		// (UpsertSessions' put, DeleteSessions' invalidate, Load's
+		// invalidate/clear) happens with idx.mu held, so checking gen under
+		// idx.mu.Lock is atomic with respect to them. If the generation moved,
+		// the bytes we failed to parse are stale (cog-review #718): do not
+		// delete the freshly committed session; retry against the new state.
 		idx.mu.Lock()
+		if idx.cache.gen(sessionID) != g {
+			idx.mu.Unlock()
+			continue
+		}
 		delete(idx.sessions, sessionID)
 		idx.mu.Unlock()
 		slog.Warn("conversations: corrupt turn file — removed from index; will be re-projected",
 			"session", sessionID, "error", err)
 		return nil, false
 	}
-	if insert {
-		idx.cache.putIfGen(sessionID, turns, g)
-	}
-	return turns, true
+	return nil, false
 }
 
 // sessionMayMatchWindow reports whether a session's turns could fall inside
@@ -1026,10 +1049,13 @@ func (idx *Index) turnsPath(sessionID string) string {
 // file's on-disk stats. An earlier version of this fix did both
 // unconditionally, and cog-review (PR #458) correctly flagged the resulting
 // metadata/turns split-brain: idx.sessions would gain a peer's session key
-// while idx.turns — populated only by this process's own Load/UpsertSession —
-// never got that session's turns, and because lastMetaHash was set to match
-// the bytes just written, the next LoadIfChanged saw "no external change" and
-// skipped the full reload that would otherwise have backfilled idx.turns.
+// while idx.turns (the pre-#716 eager turns map, populated only by this
+// process's own Load/UpsertSession) never got that session's turns, and
+// because lastMetaHash was set to match the bytes just written, the next
+// LoadIfChanged saw "no external change" and skipped the full reload that
+// would otherwise have backfilled idx.turns. (Since #716 turns are read lazily
+// from disk for any session in idx.sessions, but the sessions map must still
+// learn about peer keys through a reload, so the same bookkeeping rule holds.)
 // cog_list_conversations would then list a session that
 // cog_get_turn/cog_search could never actually serve.
 //
@@ -1046,9 +1072,8 @@ func (idx *Index) turnsPath(sessionID string) string {
 // peer's content is present in merged that idx.sessions doesn't have turns
 // for; leave the lastMeta bookkeeping untouched by this call, so the next
 // LoadIfChanged detects the file changed out from under its recorded
-// baseline and performs a full reload — sessions map AND turns map together —
-// keeping the two maps consistent with each other at the cost of that one
-// reload.
+// baseline and performs a reload of the sessions map (invalidating changed
+// sessions' cached turns), at the cost of that one reload.
 //
 // writeMetaFileLockedHook, when non-nil, is invoked once at the start of
 // every writeMetaFileLocked call. Production code never sets it; it exists
@@ -1124,7 +1149,7 @@ func (idx *Index) writeMetaFileLocked(delta metaDelta) error {
 
 	// Only refresh the fast-path bookkeeping when merged exactly matches the
 	// expected post-delta idx.sessions — i.e. no peer content is present that
-	// this process's idx.turns doesn't already cover. See the func comment
+	// this process's idx.sessions doesn't already cover. See the func comment
 	// above for why an unconditional refresh reintroduces the sessions/turns
 	// split-brain cog-review flagged on PR #458. Bookkeeping fields are
 	// mutated under their own short idx.mu.Lock(), separate from the
@@ -1141,7 +1166,7 @@ func (idx *Index) writeMetaFileLocked(delta metaDelta) error {
 	// else: leave lastMeta* exactly as they were, so the next LoadIfChanged's
 	// content-hash check notices the file changed out from under its
 	// recorded baseline (it no longer matches lastMetaHash) and reloads
-	// properly — sessions map AND turns map together.
+	// properly (sessions map, plus per-session turns-cache invalidation).
 	return nil
 }
 
