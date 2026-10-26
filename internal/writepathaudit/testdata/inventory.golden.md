@@ -74,10 +74,10 @@ Total sites: 254  (cog: 107, home: 2, elsewhere: 13, unanchored: 91, dynamic: 41
 | `dirname(<WorkspaceRoot>/.cog/run/proprioceptive.jsonl)` | NewProprioceptiveLogger (`os.MkdirAll`) | internal/engine/proprioceptive.go:54 | internal:engine |
 | `<WorkspaceRoot>/.cog/run/proprioceptive.jsonl` | (*ProprioceptiveLogger).Log (`os.OpenFile`) | internal/engine/proprioceptive.go:72 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/rooms/events.jsonl` | (*RoomBoardStore).appendRoomEntryLocked (`engine.AppendEvent(bucket)`) | internal/engine/room_board.go:466 | internal:engine |
-| `<WorkspaceRoot>/.cog/ledger/runs/events.jsonl` | (*RunBoardStore).commitLocked (`engine.AppendEvent(bucket)`) | internal/engine/run_board.go:373 | internal:engine |
-| `dirname(<WorkspaceRoot>/.cog/run/runs/{runID}/report.md)` | writeRunReport (`os.MkdirAll`) | internal/engine/run_exec_hermes.go:584 | internal:engine |
-| `dirname(<WorkspaceRoot>/.cog/run/runs/{runID}/report.md)` | writeRunReport (`os.CreateTemp`) | internal/engine/run_exec_hermes.go:591 | internal:engine |
-| `<WorkspaceRoot>/.cog/run/runs/{runID}/report.md` | writeRunReport (`os.Rename`) | internal/engine/run_exec_hermes.go:604 | internal:engine |
+| `<WorkspaceRoot>/.cog/ledger/runs/events.jsonl` | (*RunBoardStore).commitLocked (`engine.AppendEvent(bucket)`) | internal/engine/run_board.go:375 | internal:engine |
+| `dirname(<WorkspaceRoot>/.cog/run/runs/{runID}/report.md)` | writeRunReport (`os.MkdirAll`) | internal/engine/run_exec_hermes.go:601 | internal:engine |
+| `dirname(<WorkspaceRoot>/.cog/run/runs/{runID}/report.md)` | writeRunReport (`os.CreateTemp`) | internal/engine/run_exec_hermes.go:608 | internal:engine |
+| `<WorkspaceRoot>/.cog/run/runs/{runID}/report.md` | writeRunReport (`os.Rename`) | internal/engine/run_exec_hermes.go:621 | internal:engine |
 | `<WorkspaceRoot>/.cog/run` | newAttentionLog (`os.MkdirAll`) | internal/engine/serve_attention.go:46 | internal:engine |
 | `<WorkspaceRoot>/.cog/run/attention.jsonl` | (*attentionLog).append (`os.OpenFile`) | internal/engine/serve_attention.go:53 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/identity-grants/events.jsonl` | (*IdentityGrantRegistry).appendExtendEventLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_identity_grants.go:744 | internal:engine |

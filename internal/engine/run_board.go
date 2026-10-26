@@ -181,6 +181,7 @@ type Run struct {
 	Observation string        `json:"observation,omitempty"` // "unknown" when a gateway is unreachable
 	EndedAt     string        `json:"ended_at,omitempty"`    // time of run.end
 	Seq         uint64        `json:"seq"`                   // last folded entry seq
+	Steers      []RunSteer    `json:"steers,omitempty"`      // text sent into the running turn (run.steer)
 
 	setState string // explicit item.set state (processed|done); honored only after run.end
 }
@@ -297,6 +298,7 @@ func cloneRun(r *Run) *Run {
 		d := *r.Delivered
 		cp.Delivered = &d
 	}
+	cp.Steers = cloneRunSteers(r.Steers)
 	return &cp
 }
 
@@ -454,6 +456,8 @@ func (st *RunBoardStore) applyLocked(e *runEntry) {
 		if r.End != nil {
 			r.Archived = true
 		}
+	case runEntrySteer, runEntrySteerResult:
+		foldRunSteer(r, e)
 	}
 	r.State = foldRunState(r)
 }

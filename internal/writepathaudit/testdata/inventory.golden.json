@@ -1587,7 +1587,7 @@
     },
     {
       "file": "internal/engine/run_board.go",
-      "line": 373,
+      "line": 375,
       "column": 13,
       "primitive": "engine.AppendEvent(bucket)",
       "func": "(*RunBoardStore).commitLocked",
@@ -1599,7 +1599,7 @@
     },
     {
       "file": "internal/engine/run_exec_hermes.go",
-      "line": 584,
+      "line": 601,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "writeRunReport",
@@ -1611,7 +1611,7 @@
     },
     {
       "file": "internal/engine/run_exec_hermes.go",
-      "line": 591,
+      "line": 608,
       "column": 14,
       "primitive": "os.CreateTemp",
       "func": "writeRunReport",
@@ -1623,7 +1623,7 @@
     },
     {
       "file": "internal/engine/run_exec_hermes.go",
-      "line": 604,
+      "line": 621,
       "column": 12,
       "primitive": "os.Rename",
       "func": "writeRunReport",
