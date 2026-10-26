@@ -302,13 +302,18 @@ func TestPeerWriteDoesNotDesyncSessionsAndTurns(t *testing.T) {
 	// LoadIfChanged call further down, which takes its own write lock.
 	func() {
 		idxA.mu.RLock()
-		defer idxA.mu.RUnlock()
+		sids := make([]string, 0, len(idxA.sessions))
 		for sid := range idxA.sessions {
-			if _, ok := idxA.turns[sid]; !ok {
-				t.Fatalf("idx.sessions contains %q but idx.turns does not — sessions/turns split-brain (peer-write desync)", sid)
+			sids = append(sids, sid)
+		}
+		_, peerKnown := idxA.sessions["b-peer-only"]
+		idxA.mu.RUnlock()
+		for _, sid := range sids {
+			if idxA.SessionTurns(sid) == nil {
+				t.Fatalf("idx.sessions contains %q but its turns are not resolvable — sessions/turns split-brain (peer-write desync)", sid)
 			}
 		}
-		if _, ok := idxA.sessions["b-peer-only"]; ok {
+		if peerKnown {
 			t.Fatalf("idxA.sessions unexpectedly contains peer-only session %q without ever loading its turns", "b-peer-only")
 		}
 	}()

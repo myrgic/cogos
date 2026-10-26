@@ -429,9 +429,6 @@ func ResolveConversationURIWithOntology(raw string, idx *Index, lo *LoadedOntolo
 
 // resolveQuery executes the validated URIQuery against the index.
 func resolveQuery(rawURI string, uq *URIQuery, idx *Index) (*ResolvedSlice, error) {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-
 	// Build role set for fast lookup.
 	var roleSet map[Role]struct{}
 	if len(uq.Roles) > 0 {
@@ -444,8 +441,12 @@ func resolveQuery(rawURI string, uq *URIQuery, idx *Index) (*ResolvedSlice, erro
 	// Parse search terms.
 	terms := parseSearchQuery(uq.Query)
 
-	// Determine session scope.
+	// Determine session scope. Snapshot candidate sids and their metas under a
+	// single short RLock, then release it: turns are fetched per session below
+	// without holding idx.mu across disk reads.
 	var sids []string
+	metas := make(map[string]SessionMeta)
+	idx.mu.RLock()
 	if uq.SessionID != "" {
 		// One session. Compose the index key: ingest sessions are keyed as
 		// "<source>/<session_id>" when Source is set.
@@ -454,37 +455,38 @@ func resolveQuery(rawURI string, uq *URIQuery, idx *Index) (*ResolvedSlice, erro
 			key = uq.Source + "/" + uq.SessionID
 		}
 		sids = []string{key}
+		if m, ok := idx.sessions[key]; ok {
+			metas[key] = m
+		}
 	} else {
-		for sid := range idx.turns {
+		for sid, m := range idx.sessions {
 			// Source filter.
 			if uq.Source != "" {
-				meta, ok := idx.sessions[sid]
-				if !ok {
-					continue
-				}
 				// CC sessions have empty Source; ingest sessions have Source set.
-				if meta.Source != uq.Source && sid != uq.Source+"/"+sid {
+				if m.Source != uq.Source && sid != uq.Source+"/"+sid {
 					// Check if sid starts with "<source>/".
-					if !strings.HasPrefix(sid, uq.Source+"/") && meta.Source != uq.Source {
+					if !strings.HasPrefix(sid, uq.Source+"/") && m.Source != uq.Source {
 						continue
 					}
 				}
 			}
+			metas[sid] = m
 			sids = append(sids, sid)
 		}
 		sortStrings(sids)
 	}
+	idx.mu.RUnlock()
 
 	// Collect matching turns.
 	var allTurns []Turn
 	sourcesSeen := make(map[string]struct{})
 
 	for _, sid := range sids {
-		turns, ok := idx.turns[sid]
+		turns, ok := idx.peekOrReadTurns(sid)
 		if !ok {
 			continue
 		}
-		meta := idx.sessions[sid]
+		meta := metas[sid]
 
 		// Track sources for response metadata.
 		src := meta.Source
@@ -567,7 +569,7 @@ func resolveQuery(rawURI string, uq *URIQuery, idx *Index) (*ResolvedSlice, erro
 		if !t.Timestamp.IsZero() {
 			rt.Timestamp = t.Timestamp.Format(time.RFC3339)
 		}
-		if meta, ok := idx.sessions[t.SessionID]; ok {
+		if meta, ok := metas[t.SessionID]; ok {
 			rt.Source = meta.Source
 		}
 		switch uq.Res {

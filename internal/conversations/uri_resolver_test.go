@@ -613,11 +613,8 @@ func TestResolveConversationURI_FragmentIDFilter(t *testing.T) {
 
 	// Find a real UUID from the index to use as fragment.
 	var targetUUID string
-	for _, turns := range idx.turns {
-		if len(turns) > 0 {
-			targetUUID = turns[0].UUID
-			break
-		}
+	if turns := idx.SessionTurns("test-session-1"); len(turns) > 0 {
+		targetUUID = turns[0].UUID
 	}
 	if targetUUID == "" {
 		t.Skip("no turns in test index")
@@ -703,10 +700,7 @@ func checkURIMixing(uri string, hasOtherParams bool) error {
 
 func buildTestIndex(t *testing.T) *Index {
 	t.Helper()
-	idx := &Index{
-		sessions: make(map[string]SessionMeta),
-		turns:    make(map[string][]Turn),
-	}
+	idx := newIndexForTest(t)
 	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
 	meta := SessionMeta{
 		SessionID:   "test-session-1",
@@ -721,17 +715,13 @@ func buildTestIndex(t *testing.T) *Index {
 		{UUID: "uuid-2", SessionID: "test-session-1", TurnIndex: 2, Role: RoleUser, Timestamp: now.Add(2 * time.Minute), Text: "what is harness attestation"},
 		{UUID: "uuid-3", SessionID: "test-session-1", TurnIndex: 3, Role: RoleAssistant, Timestamp: now.Add(3 * time.Minute), Text: "harness attestation is about..."},
 	}
-	idx.sessions["test-session-1"] = meta
-	idx.turns["test-session-1"] = turns
+	idx.setTurnsForTest("test-session-1", meta, turns)
 	return idx
 }
 
 func buildIndexWithLongTurn(t *testing.T) *Index {
 	t.Helper()
-	idx := &Index{
-		sessions: make(map[string]SessionMeta),
-		turns:    make(map[string][]Turn),
-	}
+	idx := newIndexForTest(t)
 	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
 	longText := strings.Repeat("x", 1000)
 	meta := SessionMeta{
@@ -743,17 +733,13 @@ func buildIndexWithLongTurn(t *testing.T) *Index {
 	turns := []Turn{
 		{UUID: "uuid-long", SessionID: "long-session", TurnIndex: 0, Role: RoleUser, Timestamp: now, Text: longText},
 	}
-	idx.sessions["long-session"] = meta
-	idx.turns["long-session"] = turns
+	idx.setTurnsForTest("long-session", meta, turns)
 	return idx
 }
 
 func buildTestIndexNTurns(t *testing.T, n int) *Index {
 	t.Helper()
-	idx := &Index{
-		sessions: make(map[string]SessionMeta),
-		turns:    make(map[string][]Turn),
-	}
+	idx := newIndexForTest(t)
 	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
 	turns := make([]Turn, n)
 	for i := 0; i < n; i++ {
@@ -766,12 +752,11 @@ func buildTestIndexNTurns(t *testing.T, n int) *Index {
 			Text:      fmt.Sprintf("turn %d text", i),
 		}
 	}
-	idx.sessions["sess"] = SessionMeta{
+	idx.setTurnsForTest("sess", SessionMeta{
 		SessionID:   "sess",
 		TurnCount:   n,
 		FirstTurnAt: now,
 		LastTurnAt:  now.Add(time.Duration(n) * time.Minute),
-	}
-	idx.turns["sess"] = turns
+	}, turns)
 	return idx
 }
