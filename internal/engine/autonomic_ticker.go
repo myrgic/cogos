@@ -425,6 +425,12 @@ func healDegradedProviders(ctx context.Context) {
 			continue // silently skip — already warned when backoff was set
 		}
 
+		// Heap watermark guard (#716): skip memory-heavy providers while the
+		// heap is above the watermark. No backoff penalty — a skip is not a failure.
+		if heapGuardSkip(p, name) {
+			continue
+		}
+
 		slog.Info("autonomic: self-heal: starting reconcile cycle",
 			"provider", name,
 			"health", string(h.Health),

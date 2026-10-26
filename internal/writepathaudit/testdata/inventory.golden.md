@@ -24,7 +24,7 @@ Total sites: 254  (cog: 107, home: 2, elsewhere: 13, unanchored: 91, dynamic: 41
 
 | pattern | writer func | file:line | subsystem |
 |---|---|---|---|
-| `{root}/.cog/state/conversations` | NewIndex (`os.MkdirAll`) | internal/conversations/index.go:97 | internal:conversations |
+| `{root}/.cog/state/conversations` | NewIndex (`os.MkdirAll`) | internal/conversations/index.go:108 | internal:conversations |
 | `dirname({p.root}/.cog/state/conversations-ingest-watermarks.json)` | saveWatermarks (`os.MkdirAll`) | internal/conversations/ingest_watermark.go:128 | internal:conversations |
 | `{p.root}/.cog/state/conversations-ingest-watermarks.json<call:fmt.Sprintf>` | saveWatermarks (`os.WriteFile`) | internal/conversations/ingest_watermark.go:136 | internal:conversations |
 | `{p.root}/.cog/state/conversations-ingest-watermarks.json` | saveWatermarks (`os.Rename`) | internal/conversations/ingest_watermark.go:139 | internal:conversations |
@@ -264,10 +264,10 @@ These sites write to disk but this tool could not structurally resolve their pat
 | `<call:rbacKindDir>` | writeBindingFile (`os.MkdirAll`) | _legacy/wave4-providers/rbac_provider.go:742 | other |
 | `<call:rbacKindDir>/{action.Name}.yaml` | writeBindingFile (`os.WriteFile`) | _legacy/wave4-providers/rbac_provider.go:750 | other |
 | `<call:os.Getenv>` | (*Harness).RunInference (`os.OpenFile`) | harness/harness.go:455 | harness |
-| `<call:idx.metaPath><call:fmt.Sprintf>` | (*Index).writeMetaFileLocked (`os.WriteFile`) | internal/conversations/index.go:973 | internal:conversations |
-| `<call:idx.metaPath>` | (*Index).writeMetaFileLocked (`os.Rename`) | internal/conversations/index.go:976 | internal:conversations |
-| `<call:idx.turnsPath><call:fmt.Sprintf>` | (*Index).writeTurnsFileLocked (`os.WriteFile`) | internal/conversations/index.go:1108 | internal:conversations |
-| `<call:idx.turnsPath>` | (*Index).writeTurnsFileLocked (`os.Rename`) | internal/conversations/index.go:1111 | internal:conversations |
+| `<call:idx.metaPath><call:fmt.Sprintf>` | (*Index).writeMetaFileLocked (`os.WriteFile`) | internal/conversations/index.go:1124 | internal:conversations |
+| `<call:idx.metaPath>` | (*Index).writeMetaFileLocked (`os.Rename`) | internal/conversations/index.go:1127 | internal:conversations |
+| `<call:idx.turnsPath><call:fmt.Sprintf>` | (*Index).writeTurnsFileLocked (`os.WriteFile`) | internal/conversations/index.go:1259 | internal:conversations |
+| `<call:idx.turnsPath>` | (*Index).writeTurnsFileLocked (`os.Rename`) | internal/conversations/index.go:1262 | internal:conversations |
 | `<expr>` | runBlobsCmd (`os.WriteFile`) | internal/engine/blobs_cmd.go:168 | internal:engine |
 | `dirname(<call:bs.blobPath>)` | (*BlobStore).Store (`os.MkdirAll`) | internal/engine/blobstore.go:89 | internal:engine |
 | `<call:bs.blobPath>.tmp` | (*BlobStore).Store (`os.WriteFile`) | internal/engine/blobstore.go:95 | internal:engine |

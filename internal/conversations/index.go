@@ -12,6 +12,11 @@
 // (~hundreds of sessions, ~tens of thousands of turns total).
 //
 // Embedding-based semantic search is deferred to a follow-on PR.
+//
+// Turns are lazy: only _meta.json is read eagerly. A session's turns file is
+// read on first access and kept in a bounded LRU (turnsCache, turns_cache.go)
+// so resident memory is capped rather than proportional to the whole corpus
+// (issue #716).
 package conversations
 
 import (
@@ -20,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -41,18 +47,23 @@ import (
 // regression test fast; production code never assigns to it.
 var metaLockTimeout = 5 * time.Second
 
-// Index holds all indexed turns in memory plus a reference to the projection
-// directory for persistence.
+// Index holds every session's metadata in memory, plus a bounded cache of
+// turns loaded on demand from the projection directory.
 //
-// All access to the sessions/turns maps is guarded by mu. The reconcile daemon
+// All access to the sessions map is guarded by mu. The reconcile daemon
 // and the autonomic ticker both drive FetchLive concurrently (which calls
 // Load), and MCP tool handlers read the index concurrently with those; without
 // this lock those paths raced on the maps and crashed the kernel with
 // "fatal error: concurrent map writes".
+//
+// Turns are NOT held for every session. They are read from the per-session
+// file via sessionTurnsShared and cached in cache (LRU, bounded by entries and
+// bytes). cache has its own mutex and is a leaf lock: it may be called with mu
+// held, but it never takes mu.
 type Index struct {
-	// mu guards sessions and turns. Use RLock for read-only methods and Lock
-	// for methods that mutate the maps. Disk I/O is performed outside the lock
-	// where possible (see Load).
+	// mu guards sessions. Use RLock for read-only methods and Lock for methods
+	// that mutate the map. Disk I/O is performed outside the lock where
+	// possible (see Load and sessionTurnsShared).
 	mu sync.RWMutex
 
 	projDir string
@@ -60,8 +71,8 @@ type Index struct {
 	// sessions maps session_id → SessionMeta.
 	sessions map[string]SessionMeta
 
-	// turns maps session_id → []Turn (in turn-index order).
-	turns map[string][]Turn
+	// cache holds recently used per-session turns (see turns_cache.go).
+	cache *turnsCache
 
 	// lastMeta{Mtime,Size,Hash} record the (mtime, size, content hash) of
 	// _meta.json as of the last Load or local write. LoadIfChanged uses them to
@@ -100,18 +111,19 @@ func NewIndex(projDir string) (*Index, error) {
 	idx := &Index{
 		projDir:  projDir,
 		sessions: make(map[string]SessionMeta),
-		turns:    make(map[string][]Turn),
+		cache:    newTurnsCache(),
 	}
 	return idx, nil
 }
 
-// Load reads all projection files from projDir into memory.
-// Call once at startup (FetchLive). Subsequent operations keep state in sync.
+// Load reads _meta.json from projDir into memory. It does NOT read any
+// per-session turns file: those are loaded lazily on first access (see
+// sessionTurnsShared). Call once at startup (FetchLive). Subsequent operations
+// keep state in sync.
 //
-// Disk reads are performed into freshly-allocated local maps with no lock held,
-// then swapped into the index under a single write lock. This keeps the
-// (potentially slow) file I/O off the lock while still making the visible map
-// state mutation atomic with respect to concurrent readers and other Loads.
+// The disk read is performed into a freshly-allocated local map with no lock
+// held, then swapped into the index under a single write lock. The turns cache
+// is cleared so no turns read against the previous index state survive.
 func (idx *Index) Load() error {
 	// Stat before reading so a write racing this load at worst causes a
 	// redundant reload next cycle (recorded mtime older than content), never a
@@ -133,27 +145,68 @@ func (idx *Index) Load() error {
 		}
 	}
 
-	// Load turns for each known session into a local map.
-	turns := make(map[string][]Turn, len(sessions))
-	for sid := range sessions {
-		t, err := idx.loadTurnsFile(sid)
-		if err != nil {
-			// Corrupt turn file — remove from index; will be re-projected.
-			delete(sessions, sid)
-			continue
-		}
-		turns[sid] = t
-	}
-
-	// Atomically swap in the freshly loaded state.
+	// Atomically swap in the freshly loaded state. Cached turns are invalidated
+	// per session, not wholesale: only sessions whose meta entry changed are
+	// dropped, so a peer's write to one session does not evict the rest of the
+	// cache. Turns are not read here; they load lazily via sessionTurnsShared.
+	//
+	// Why meta equality is enough: writers (UpsertSessions) write the turns
+	// file and then commit _meta.json, both under the per-session lock. The
+	// meta entry carries a fresh IndexedAt, stamped by the caller (provider.go,
+	// ingest_watermark.go), so a changed turns file arrives with a changed meta
+	// entry. PRECONDITION: a caller that rewrites turns without advancing
+	// IndexedAt would leave a stale cached entry here. UpsertSessions does not
+	// enforce that stamp itself. The comparison is sessionMetaEqual, not `!=`:
+	// time.Time `==` compares the Location pointer and monotonic reading, so
+	// two decodes of the same bytes (or an in-process time.Now() meta vs its
+	// disk round-trip) would otherwise always look "changed" (cog-review #718).
 	idx.mu.Lock()
+	if len(idx.sessions) == 0 {
+		// First Load (or nothing previously known): no per-session diff to
+		// make, so drop everything.
+		idx.cache.clear()
+	} else {
+		for sid, oldMeta := range idx.sessions {
+			if newMeta, ok := sessions[sid]; !ok || !sessionMetaEqual(newMeta, oldMeta) {
+				idx.cache.invalidate(sid)
+			}
+		}
+		for sid := range sessions {
+			if _, ok := idx.sessions[sid]; !ok {
+				idx.cache.invalidate(sid)
+			}
+		}
+	}
 	idx.sessions = sessions
-	idx.turns = turns
 	idx.lastMetaMtime = metaMtime
 	idx.lastMetaSize = metaSize
 	idx.lastMetaHash = metaHash
 	idx.mu.Unlock()
 	return nil
+}
+
+// sessionMetaEqual reports whether a and b describe the same session meta.
+// time.Time fields compare with Equal (instant), never ==, which would also
+// compare the Location pointer and monotonic clock reading: two independent
+// JSON decodes of an identical "-04:00" timestamp get distinct *Location
+// values, and an in-memory time.Now() keeps a monotonic reading its disk
+// round-trip lacks. TestSessionMetaEqual_CoversEveryField fails if a field is
+// added to SessionMeta without being compared here.
+func sessionMetaEqual(a, b SessionMeta) bool {
+	return a.SessionID == b.SessionID &&
+		a.Source == b.Source &&
+		a.SourcePath == b.SourcePath &&
+		a.TurnCount == b.TurnCount &&
+		a.FirstTurnAt.Equal(b.FirstTurnAt) &&
+		a.LastTurnAt.Equal(b.LastTurnAt) &&
+		a.IndexedAt.Equal(b.IndexedAt) &&
+		a.SourceMtime.Equal(b.SourceMtime) &&
+		a.SourceSize == b.SourceSize &&
+		a.SourceOffset == b.SourceOffset &&
+		a.SourceTailHash == b.SourceTailHash &&
+		a.Identity == b.Identity &&
+		a.Entrypoint == b.Entrypoint &&
+		a.Title == b.Title
 }
 
 // LoadIfChanged reloads the index from disk only when _meta.json has changed
@@ -395,7 +448,7 @@ func (idx *Index) acquireSessionLocks(ids []string) ([]heldSessionLock, map[stri
 //	also blocked every concurrent GetMeta/ListSessions/GetTurn/Search call
 //	(which take idx.mu.RLock()) on the SAME in-process Index. Disk I/O and
 //	cross-process coordination now happen with idx.mu unheld; only the final
-//	idx.sessions/idx.turns mutation takes the lock, and only briefly.
+//	idx.sessions / turns-cache mutation takes the lock, and only briefly.
 func (idx *Index) UpsertSessions(batch []SessionAndTurns) ([]SessionOpOutcome, error) {
 	if len(batch) == 0 {
 		return nil, nil
@@ -469,7 +522,7 @@ func (idx *Index) UpsertSessions(batch []SessionAndTurns) ([]SessionOpOutcome, e
 		for _, sid := range committed {
 			item := dedup[sid]
 			idx.sessions[sid] = item.Meta
-			idx.turns[sid] = item.Turns
+			idx.cache.put(sid, item.Turns)
 		}
 		idx.mu.Unlock()
 	}
@@ -568,7 +621,7 @@ func (idx *Index) DeleteSessions(sessionIDs []string) ([]SessionOpOutcome, error
 		idx.mu.Lock()
 		for _, sid := range committed {
 			delete(idx.sessions, sid)
-			delete(idx.turns, sid)
+			idx.cache.invalidate(sid)
 		}
 		idx.mu.Unlock()
 	}
@@ -654,10 +707,7 @@ func (idx *Index) SessionIDsBySource() map[string][]string {
 
 // GetTurn returns the Turn at turnIndex within session, or false.
 func (idx *Index) GetTurn(sessionID string, turnIndex int) (Turn, bool) {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-
-	turns, ok := idx.turns[sessionID]
+	turns, ok := idx.sessionTurnsShared(sessionID)
 	if !ok || turnIndex < 0 || turnIndex >= len(turns) {
 		return Turn{}, false
 	}
@@ -668,23 +718,110 @@ func (idx *Index) GetTurn(sessionID string, turnIndex int) (Turn, bool) {
 // indexed for sessionID, or nil if the session is not indexed. Used by
 // ApplyPlan's incremental-parse path (issue #558) to seed the
 // already-indexed prefix of a session before appending newly parsed tail
-// turns, without re-reading the turns projection file from disk (idx.turns
-// is this process's live in-memory copy, kept in sync with disk by
-// Load/UpsertSession(s)).
+// turns. Turns are served from the bounded turns cache, or read from the
+// session's projection file on a miss (see sessionTurnsShared).
 //
 // Returns a copy so callers can freely append to it without racing a
-// concurrent Load/UpsertSession mutation of the index's own slice.
+// concurrent Load/UpsertSession mutation of the cached slice.
 func (idx *Index) SessionTurns(sessionID string) []Turn {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-
-	turns, ok := idx.turns[sessionID]
+	turns, ok := idx.sessionTurnsShared(sessionID)
 	if !ok {
 		return nil
 	}
 	out := make([]Turn, len(turns))
 	copy(out, turns)
 	return out
+}
+
+// sessionTurnsShared returns the session's turns and whether the session is
+// indexed. The returned slice is SHARED with the cache: callers MUST NOT
+// mutate it. A cache hit returns directly. A miss reads the turns file from
+// disk with no idx.mu held, then stores it with putIfGen so a concurrent
+// writer's fresher value is never overwritten by this stale read.
+//
+// Must not be called with idx.mu held.
+func (idx *Index) sessionTurnsShared(sessionID string) ([]Turn, bool) {
+	return idx.turnsForSession(sessionID, true)
+}
+
+// peekOrReadTurns is sessionTurnsShared without cache insertion on a miss: the
+// disk read result is returned but not stored. It is for all-sessions scans,
+// which would otherwise churn the cache. Same contract as sessionTurnsShared.
+//
+// Must not be called with idx.mu held.
+func (idx *Index) peekOrReadTurns(sessionID string) ([]Turn, bool) {
+	return idx.turnsForSession(sessionID, false)
+}
+
+// turnsForSession is the shared body of sessionTurnsShared and peekOrReadTurns.
+func (idx *Index) turnsForSession(sessionID string, insert bool) ([]Turn, bool) {
+	// Two attempts at most: a second pass only runs when a concurrent writer
+	// replaced the session while the first read was in flight (see below).
+	for attempt := 0; attempt < 2; attempt++ {
+		idx.mu.RLock()
+		_, indexed := idx.sessions[sessionID]
+		idx.mu.RUnlock()
+		if !indexed {
+			return nil, false
+		}
+
+		if turns, ok := idx.cache.get(sessionID); ok {
+			return turns, true
+		}
+
+		// Capture the generation BEFORE reading disk so a concurrent writer that
+		// lands during the read invalidates this result.
+		g := idx.cache.gen(sessionID)
+		turns, err := idx.loadTurnsFile(sessionID)
+		if err == nil {
+			// Same staleness rule on the success path: if a writer bumped the
+			// generation while we read (e.g. DeleteSessions removed the file,
+			// which reads as nil turns), these bytes are stale — retry once
+			// against the new state instead of returning them.
+			if attempt == 0 && idx.cache.gen(sessionID) != g {
+				continue
+			}
+			if insert {
+				idx.cache.putIfGen(sessionID, turns, g)
+			}
+			return turns, true
+		}
+
+		// Corrupt turn file: remove the session from the index (in memory
+		// only; it will be re-projected) — but only if no writer touched it
+		// since g was captured. Every generation bump for a session
+		// (UpsertSessions' put, DeleteSessions' invalidate, Load's
+		// invalidate/clear) happens with idx.mu held, so checking gen under
+		// idx.mu.Lock is atomic with respect to them. If the generation moved,
+		// the bytes we failed to parse are stale (cog-review #718): do not
+		// delete the freshly committed session; retry against the new state.
+		idx.mu.Lock()
+		if idx.cache.gen(sessionID) != g {
+			idx.mu.Unlock()
+			continue
+		}
+		delete(idx.sessions, sessionID)
+		idx.mu.Unlock()
+		slog.Warn("conversations: corrupt turn file — removed from index; will be re-projected",
+			"session", sessionID, "error", err)
+		return nil, false
+	}
+	return nil, false
+}
+
+// sessionMayMatchWindow reports whether a session's turns could fall inside
+// [since, until] according to its meta bounds alone. It is a pre-filter: a
+// false result proves no turn can match, so the turns file need not be read.
+// Zero bounds (unset filter, or unknown session bounds) never exclude.
+// Turn-level timestamp filters still apply to every turn that is read (#716).
+func sessionMayMatchWindow(meta SessionMeta, since, until time.Time) bool {
+	if !since.IsZero() && !meta.LastTurnAt.IsZero() && meta.LastTurnAt.Before(since) {
+		return false
+	}
+	if !until.IsZero() && !meta.FirstTurnAt.IsZero() && meta.FirstTurnAt.After(until) {
+		return false
+	}
+	return true
 }
 
 // Search performs a case-insensitive multi-term search over all indexed turns.
@@ -699,30 +836,42 @@ func (idx *Index) SessionTurns(sessionID string) []Turn {
 // Filters: since/until bound timestamps; sessionID restricts to one session;
 // identity filters by session identity; limit caps results (0 = no limit).
 func (idx *Index) Search(query string, since, until time.Time, sessionID, identity string, limit int) []SearchHit {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-
 	terms := parseSearchQuery(query)
 	var hits []SearchHit
 
-	// Collect sessions to search.
-	var sids []string
-	if sessionID != "" {
-		sids = []string{sessionID}
-	} else {
-		for sid := range idx.turns {
-			sids = append(sids, sid)
-		}
-		sort.Strings(sids)
+	// Snapshot the candidate sids + metas under RLock, then release it before
+	// any disk reads (turns are fetched lazily per session).
+	type candidate struct {
+		sid     string
+		meta    SessionMeta
+		hasMeta bool
 	}
+	var cands []candidate
+	idx.mu.RLock()
+	if sessionID != "" {
+		meta, hasMeta := idx.sessions[sessionID]
+		cands = append(cands, candidate{sid: sessionID, meta: meta, hasMeta: hasMeta})
+	} else {
+		for sid, meta := range idx.sessions {
+			cands = append(cands, candidate{sid: sid, meta: meta, hasMeta: true})
+		}
+		sort.Slice(cands, func(i, j int) bool { return cands[i].sid < cands[j].sid })
+	}
+	idx.mu.RUnlock()
 
-	for _, sid := range sids {
-		meta, hasMeta := idx.sessions[sid]
+	for _, c := range cands {
+		sid, meta, hasMeta := c.sid, c.meta, c.hasMeta
 		if identity != "" && hasMeta && !strings.EqualFold(meta.Identity, identity) {
 			continue
 		}
+		if hasMeta && !sessionMayMatchWindow(meta, since, until) {
+			continue
+		}
 
-		turns := idx.turns[sid]
+		turns, ok := idx.peekOrReadTurns(sid)
+		if !ok {
+			continue
+		}
 		for _, t := range turns {
 			if !since.IsZero() && t.Timestamp.Before(since) {
 				continue
@@ -900,10 +1049,13 @@ func (idx *Index) turnsPath(sessionID string) string {
 // file's on-disk stats. An earlier version of this fix did both
 // unconditionally, and cog-review (PR #458) correctly flagged the resulting
 // metadata/turns split-brain: idx.sessions would gain a peer's session key
-// while idx.turns — populated only by this process's own Load/UpsertSession —
-// never got that session's turns, and because lastMetaHash was set to match
-// the bytes just written, the next LoadIfChanged saw "no external change" and
-// skipped the full reload that would otherwise have backfilled idx.turns.
+// while idx.turns (the pre-#716 eager turns map, populated only by this
+// process's own Load/UpsertSession) never got that session's turns, and
+// because lastMetaHash was set to match the bytes just written, the next
+// LoadIfChanged saw "no external change" and skipped the full reload that
+// would otherwise have backfilled idx.turns. (Since #716 turns are read lazily
+// from disk for any session in idx.sessions, but the sessions map must still
+// learn about peer keys through a reload, so the same bookkeeping rule holds.)
 // cog_list_conversations would then list a session that
 // cog_get_turn/cog_search could never actually serve.
 //
@@ -920,9 +1072,8 @@ func (idx *Index) turnsPath(sessionID string) string {
 // peer's content is present in merged that idx.sessions doesn't have turns
 // for; leave the lastMeta bookkeeping untouched by this call, so the next
 // LoadIfChanged detects the file changed out from under its recorded
-// baseline and performs a full reload — sessions map AND turns map together —
-// keeping the two maps consistent with each other at the cost of that one
-// reload.
+// baseline and performs a reload of the sessions map (invalidating changed
+// sessions' cached turns), at the cost of that one reload.
 //
 // writeMetaFileLockedHook, when non-nil, is invoked once at the start of
 // every writeMetaFileLocked call. Production code never sets it; it exists
@@ -998,7 +1149,7 @@ func (idx *Index) writeMetaFileLocked(delta metaDelta) error {
 
 	// Only refresh the fast-path bookkeeping when merged exactly matches the
 	// expected post-delta idx.sessions — i.e. no peer content is present that
-	// this process's idx.turns doesn't already cover. See the func comment
+	// this process's idx.sessions doesn't already cover. See the func comment
 	// above for why an unconditional refresh reintroduces the sessions/turns
 	// split-brain cog-review flagged on PR #458. Bookkeeping fields are
 	// mutated under their own short idx.mu.Lock(), separate from the
@@ -1015,7 +1166,7 @@ func (idx *Index) writeMetaFileLocked(delta metaDelta) error {
 	// else: leave lastMeta* exactly as they were, so the next LoadIfChanged's
 	// content-hash check notices the file changed out from under its
 	// recorded baseline (it no longer matches lastMetaHash) and reloads
-	// properly — sessions map AND turns map together.
+	// properly (sessions map, plus per-session turns-cache invalidation).
 	return nil
 }
 
@@ -1115,7 +1266,16 @@ func (idx *Index) writeTurnsFileLocked(sessionID string, turns []Turn) error {
 	return nil
 }
 
+// loadTurnsFileHook, when non-nil, is invoked with the session ID each time a
+// per-session turns file is read from disk. Production code never sets it; it
+// exists so tests can assert how many turns files a code path actually reads
+// (e.g. that Load reads none).
+var loadTurnsFileHook func(sessionID string)
+
 func (idx *Index) loadTurnsFile(sessionID string) ([]Turn, error) {
+	if loadTurnsFileHook != nil {
+		loadTurnsFileHook(sessionID)
+	}
 	data, err := os.ReadFile(idx.turnsPath(sessionID))
 	if err != nil {
 		if os.IsNotExist(err) {
