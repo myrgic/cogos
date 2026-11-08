@@ -322,7 +322,7 @@ Total subprocess sites: 94
 | `{opts.Cwd}` | `exec.CommandContext(ctx, bin, args...)` | internal/acp/claudecli.go:99 | internal:acp |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "git", args...)` | internal/coherence/coherence.go:95 | internal:coherence |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(vctx, kernelHit, "--version")` | internal/engine/cli_doctor_claudecode.go:75 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "/bin/sh", "-c", command)` | internal/engine/cli_doctor_hermesprofile.go:321 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "/bin/sh", "-c", command)` | internal/engine/cli_doctor_hermesprofile.go:325 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, binPath, args...)` | internal/engine/cli_doctor_inference.go:339 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("plutil", "-convert", "xml1", "-o", "-", f)` | internal/engine/cli_doctor_kernelpath.go:187 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("launchctl", "list", label)` | internal/engine/cli_doctor_kernelpath.go:205 | internal:engine |

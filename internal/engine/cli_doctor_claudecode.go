@@ -88,8 +88,8 @@ func doctorClaudeCode(g *DoctorGroup, root string, opts DoctorOptions) {
 	if !kp.Start.IsZero() {
 		if bt := claudeBinaryModTime(kernelHit); bt.After(kp.Start) {
 			g.add(name, StatusWarn, detail+fmt.Sprintf(
-				"; the binary changed at %s, after the kernel process started at %s. The kernel reads the client version once at startup, so it is still sending what it detected then (possibly claudeCodeVersionFallback %s). "+
-					"Fix: restart the kernel. Detail: provider_claudeoauth.go getClaudeCodeVersion (sync.Once)",
+				"; the binary changed at %s, after the kernel process started at %s. The kernel detects the client version once, at its first claude-oauth request, and keeps it until restart; if that request came before the change it is still sending the earlier version (claudeCodeVersionFallback %s if claude was missing then). "+
+					"Fix: restart the kernel if a model is refused for its Claude Code version (doctor --live probes this). Detail: provider_claudeoauth.go getClaudeCodeVersion (sync.Once)",
 				bt.Format(time.RFC3339), kp.Start.Format(time.RFC3339), claudeCodeVersionFallback))
 			return
 		}
