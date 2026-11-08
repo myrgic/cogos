@@ -495,6 +495,9 @@ func doctorInstallIntegrity(report *DoctorReport, root string, opts DoctorOption
 
 	// -- Standalone Syncthing beside the kernel's own BEP engine ----------
 	doctorBEPAndSyncthing(g, root)
+
+	// -- Claude Code CLI (declared prerequisite; drives claude-oauth client version) --
+	doctorClaudeCode(g)
 }
 
 // lookPathAll resolves name against every directory on PATH, returning every
