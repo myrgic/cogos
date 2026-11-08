@@ -2,7 +2,7 @@
 // that placement does not declare always_on (a laptop).
 //
 // Observed 2026-11-08: cog-node's stage.env pointed STAGE_TTS/STAGE_UPSTREAM at
-// Darkstar (a laptop) and providers.yaml named an lmstudio-darkstar endpoint.
+// Laptop (a laptop) and providers.yaml named an lmstudio-laptop endpoint.
 // Declared intent lives in <workspace>/.cog/config/placement.yaml (always_on);
 // node addresses live in .cog/conf/registry/machines/*.yaml (address/hostname),
 // bound to nodes by .cog/config/node/nodes/*.node.yaml, and in

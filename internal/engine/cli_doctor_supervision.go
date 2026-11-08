@@ -42,6 +42,11 @@ func doctorServiceSupervision(g *DoctorGroup, root string, opts DoctorOptions) {
 		}
 	}
 	sort.Strings(names)
+	allNames := make([]string, 0, len(m.Services))
+	for n := range m.Services {
+		allNames = append(allNames, n)
+	}
+	sort.Strings(allNames)
 	for _, n := range names {
 		pids := procListenerPIDs(h.procRoot, m.Services[n].Port)
 		if len(pids) == 0 {
@@ -81,6 +86,25 @@ func doctorServiceSupervision(g *DoctorGroup, root string, opts DoctorOptions) {
 			"declared services %s all run inside systemd unit %s; restarting or stopping that unit kills every one of them. "+
 				"Fix: run each under its own unit (e.g. systemd-run --user --unit=cogos-<service> ... or a dedicated .service), then restart. Detail: /proc/%d/cgroup, %s",
 			strings.Join(parts, ", "), u, group[0].pid, mpath))
+	}
+	// A kernel running as another user (or root) has unreadable fds, so its
+	// listener is invisible and the pairwise test above cannot fire. A service
+	// found inside the unit conventionally named for ANOTHER declared service
+	// (cogos-<name>.service) is the same trap.
+	for _, f := range found {
+		for _, other := range allNames {
+			if other == f.svc || f.unit != "cogos-"+other+".service" {
+				continue
+			}
+			if len(byUnit[f.unit]) >= 2 {
+				continue // already reported pairwise
+			}
+			warned = true
+			g.add(name+": "+f.unit, StatusWarn, fmt.Sprintf(
+				"declared service %s (pid %d) runs inside %s, the unit conventionally supervising declared service %s (its own listener is not visible to this user); restarting that unit kills %s. "+
+					"Fix: run %s under its own unit (e.g. systemd-run --user --unit=cogos-%s ...), then restart. Detail: /proc/%d/cgroup, %s",
+				f.svc, f.pid, f.unit, other, f.svc, f.svc, f.svc, f.pid, mpath))
+		}
 	}
 	if !warned {
 		g.add(name, StatusOK, fmt.Sprintf("%d declared service listener(s) inspected (%d in a systemd service unit); none share a unit", checked, len(found)))

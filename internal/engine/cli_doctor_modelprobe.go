@@ -8,9 +8,11 @@
 // the provider's error code. Default runs report UNKNOWN and name the flag.
 //
 // Model sources: Hermes profile model.default, the kernel's alias targets
-// (intentAliases), and STAGE_MODEL_* in stage.env files. Stage per-room
-// preferences (rooms.json prefs.model) are not scanned. The set is capped
-// (modelProbeCap, in source-priority order) and the skipped models are named.
+// (intentAliases), STAGE_MODEL_* in stage.env files, and the stage per-room
+// preferences in rooms.json next to each stage.env (prefs.model,
+// prefs.model_catalog_choice, model_id "custom:cogos:<model>"). The set is
+// capped (modelProbeCap, in source-priority order); skipped models and every
+// source that could not be scanned are named in the output.
 package engine
 
 import (
@@ -20,7 +22,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,7 +42,8 @@ type probeModel struct {
 
 // configuredProbeModels returns the distinct configured models in
 // source-priority order (Hermes, stage, kernel aliases).
-func configuredProbeModels(opts DoctorOptions) []probeModel {
+func configuredProbeModels(opts DoctorOptions) ([]probeModel, []string) {
+	var notes []string
 	h := opts.doctorHostOrDefault()
 	idx := map[string]*probeModel{}
 	var order []*probeModel
@@ -57,7 +63,19 @@ func configuredProbeModels(opts DoctorOptions) []probeModel {
 	for _, p := range loadHermesProfiles(h.home) {
 		add(p.ModelDefault, "hermes profile "+p.Name+" model.default")
 	}
-	for _, f := range stageEnvFiles(h.home) {
+	stageFiles := stageEnvFiles(h.home)
+	if len(stageFiles) == 0 {
+		notes = append(notes, "stage room model preferences (rooms.json): no stage state dir discovered (set STAGE_STATE)")
+	}
+	for _, f := range stageFiles {
+		roomsPath := filepath.Join(filepath.Dir(f), "rooms.json")
+		if rooms, err := os.ReadFile(roomsPath); err != nil {
+			notes = append(notes, "stage room model preferences: "+roomsPath+" not readable")
+		} else {
+			for _, id := range roomModelsFromJSON(rooms) {
+				add(id, "stage room preference in "+roomsPath)
+			}
+		}
 		raw, err := os.ReadFile(f)
 		if err != nil {
 			continue
@@ -88,12 +106,68 @@ func configuredProbeModels(opts DoctorOptions) []probeModel {
 	for _, m := range order {
 		out = append(out, *m)
 	}
+	notes = append(notes, "the kernel's own default model and live alias table (aliases above come from this doctor binary)")
+	return out, notes
+}
+
+// roomModelsFromJSON extracts every model a stage rooms.json selects, in
+// document order and without duplicates: prefs.model, prefs.model_catalog_choice
+// and model_id values ("custom:cogos:" prefix stripped). Short aliases
+// (sonnet/opus/haiku, any kernel alias) map to their intentAliases target.
+func roomModelsFromJSON(data []byte) []string {
+	var doc any
+	if json.Unmarshal(data, &doc) != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	emit := func(v any) {
+		id, ok := v.(string)
+		if !ok {
+			return
+		}
+		id = strings.TrimPrefix(strings.TrimSpace(id), "custom:cogos:")
+		if t := intentAliases[id].ModelOverride; t != "" {
+			id = t
+		}
+		if id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	var walk func(v any, parent string)
+	walk = func(v any, parent string) {
+		switch x := v.(type) {
+		case map[string]any:
+			keys := make([]string, 0, len(x))
+			for k := range x {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				switch {
+				case k == "model" && parent == "prefs", k == "model_catalog_choice", k == "model_id":
+					emit(x[k])
+				}
+				walk(x[k], k)
+			}
+		case []any:
+			for _, e := range x {
+				walk(e, parent)
+			}
+		}
+	}
+	walk(doc, "")
 	return out
 }
 
 func doctorModelProbes(g *DoctorGroup, root string, opts DoctorOptions) {
 	const name = "model probe"
-	models := configuredProbeModels(opts)
+	models, notes := configuredProbeModels(opts)
+	unscanned := ""
+	if len(notes) > 0 {
+		unscanned = " Not scanned: " + strings.Join(notes, "; ") + "."
+	}
 	if !opts.Live {
 		ids := make([]string, 0, len(models))
 		for _, m := range models {
@@ -102,7 +176,7 @@ func doctorModelProbes(g *DoctorGroup, root string, opts DoctorOptions) {
 		g.add(name, StatusUnknown, fmt.Sprintf(
 			"not run: provider refusals (e.g. a Claude Code version too old for a model) only show at call time. %d distinct configured model(s): %s. "+
 				"Fix: cogos doctor --live (sends max_tokens=1 per model through the local kernel; spends a few tokens each)",
-			len(models), strings.Join(ids, ", ")))
+			len(models), strings.Join(ids, ", "))+unscanned)
 		return
 	}
 	if opts.SkipNetwork {
@@ -148,6 +222,9 @@ func doctorModelProbes(g *DoctorGroup, root string, opts DoctorOptions) {
 		}
 		g.add(name+": skipped", StatusUnknown, fmt.Sprintf("probe cap is %d; not probed: %s", modelProbeCap, strings.Join(ids, ", ")))
 	}
+	if unscanned != "" {
+		g.add(name+": coverage", StatusUnknown, strings.TrimSpace(unscanned))
+	}
 }
 
 // probeOneModel sends a max_tokens=1 chat completion for model through the
@@ -180,6 +257,18 @@ func probeOneModel(endpoint, token, model string) (DoctorStatus, string) {
 	if resp.StatusCode == http.StatusUnauthorized {
 		return StatusUnknown, "kernel rejected the doctor's node-root grant (HTTP 401); model not tested. Fix: cogos doctor external-client checks above"
 	}
+	return classifyProbeFailure(resp.StatusCode, rb)
+}
+
+var kernelUpstreamStatusRE = regexp.MustCompile(`status (\d{3})`)
+
+// classifyProbeFailure maps a non-2xx kernel answer to a verdict. The kernel
+// wraps every upstream failure as HTTP 500 {type: server_error, code: null}
+// and carries the provider's status and body inside the message
+// ("claude-oauth: status 400: {...}"), so the provider's own status and error
+// type are recovered from the message. A provider 4xx is a refusal (FAIL);
+// 5xx, 429 and 408 are transient and leave the model UNKNOWN.
+func classifyProbeFailure(httpStatus int, body []byte) (DoctorStatus, string) {
 	var e struct {
 		Error struct {
 			Message string `json:"message"`
@@ -187,14 +276,35 @@ func probeOneModel(endpoint, token, model string) (DoctorStatus, string) {
 			Code    any    `json:"code"`
 		} `json:"error"`
 	}
-	_ = json.Unmarshal(rb, &e)
+	_ = json.Unmarshal(body, &e)
 	msg := e.Error.Message
-	if len(msg) > 200 {
-		msg = msg[:200] + "..."
+	status := httpStatus
+	code := e.Error.Type
+	if e.Error.Code != nil {
+		code = fmt.Sprint(e.Error.Code)
 	}
-	code := fmt.Sprint(e.Error.Code)
-	if e.Error.Code == nil {
-		code = e.Error.Type
+	if m := kernelUpstreamStatusRE.FindStringSubmatch(msg); m != nil {
+		status, _ = strconv.Atoi(m[1])
+		if i := strings.Index(msg, "{"); i >= 0 {
+			var inner struct {
+				Error struct {
+					Type    string `json:"type"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if json.Unmarshal([]byte(msg[i:]), &inner) == nil && inner.Error.Message != "" {
+				msg = inner.Error.Message
+				if inner.Error.Type != "" {
+					code = inner.Error.Type
+				}
+			}
+		}
 	}
-	return StatusFail, fmt.Sprintf("refused: HTTP %d code=%s: %s", resp.StatusCode, code, msg)
+	if len(msg) > 500 {
+		msg = msg[:500] + "..."
+	}
+	if status >= 500 || status == http.StatusTooManyRequests || status == http.StatusRequestTimeout {
+		return StatusUnknown, fmt.Sprintf("inconclusive, transient provider/kernel error: HTTP %d code=%s: %s", status, code, msg)
+	}
+	return StatusFail, fmt.Sprintf("refused: HTTP %d code=%s: %s", status, code, msg)
 }

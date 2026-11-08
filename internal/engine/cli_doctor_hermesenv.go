@@ -37,8 +37,10 @@ func doctorHermesGrantHygiene(g *DoctorGroup, root string, opts DoctorOptions) {
 		if len(refs) == 0 {
 			continue
 		}
-		for _, r := range refs {
-			vars[r[1]] = true
+		// Only the grant (providers.cogos.api_key) is classified against the
+		// grant ledger; other providers' keys are never in it.
+		for _, v := range p.grantVars() {
+			vars[v] = true
 		}
 		checked++
 
@@ -64,7 +66,7 @@ func doctorHermesGrantHygiene(g *DoctorGroup, root string, opts DoctorOptions) {
 				"providers.cogos.base_url in %s targets %s, not this node's kernel, so this kernel's ledger cannot classify its grant", p.label(), host))
 			continue
 		}
-		val, how, unresolved, note := cache.resolve(p, cogos.APIKey)
+		val, how, unresolved, note, shadowed := cache.resolveX(p, cogos.APIKey, false)
 		if len(unresolved) > 0 {
 			g.add("hermes grant provenance: "+p.Name, StatusUnknown, fmt.Sprintf(
 				"providers.cogos.api_key %s in %s not resolvable (%s not in process env%s); cannot classify",
@@ -73,6 +75,18 @@ func doctorHermesGrantHygiene(g *DoctorGroup, root string, opts DoctorOptions) {
 		}
 		if how == "literal" {
 			how = "literal api_key"
+		}
+		if how == "process env" && shadowed {
+			// The verdict would depend on the caller's shell, not the profile.
+			// A service (systemd/launchd) does not inherit it, so judge the
+			// helper's value for the profile and warn about the shell apart.
+			if hv, _, hun, _, _ := cache.resolveX(p, cogos.APIKey, true); len(hun) == 0 {
+				g.add("hermes shell env: "+p.Name, StatusWarn, fmt.Sprintf(
+					"this shell exports %s (sha256:%s) which differs from the secrets.command helper's value; a Hermes started from here would use the shell's. "+
+						"Fix: unset %s in this shell (a service-managed Hermes does not inherit it). Detail: %s",
+					firstVarOf(p), grantFingerprint(val), firstVarOf(p), p.label()))
+				val, how = hv, "secrets.command helper (shell env ignored)"
+			}
 		}
 		c := ledger.classify(val)
 		switch c.Kind {
@@ -95,9 +109,21 @@ func doctorHermesGrantHygiene(g *DoctorGroup, root string, opts DoctorOptions) {
 	doctorStaleInheritedGrants(g, ledger, vars, h)
 }
 
+// grantVars lists the env vars providers.cogos.api_key references, defaulting
+// to COGOS_HERMES_GRANT when the profile does not reference any.
+func (p hermesProfile) grantVars() []string {
+	var out []string
+	if c, ok := p.Providers["cogos"]; ok {
+		for _, m := range hermesEnvRefRE.FindAllStringSubmatch(c.APIKey, -1) {
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
 func firstVarOf(p hermesProfile) string {
-	if r := p.envRefs(); len(r) > 0 {
-		return r[0][1]
+	if v := p.grantVars(); len(v) > 0 {
+		return v[0]
 	}
 	return defaultHermesGrantVar
 }

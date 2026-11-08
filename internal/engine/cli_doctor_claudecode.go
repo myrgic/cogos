@@ -1,11 +1,13 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // doctorClaudeCode reports whether the Claude Code CLI is installed AND
@@ -68,7 +70,9 @@ func doctorClaudeCode(g *DoctorGroup, root string, opts DoctorOptions) {
 			kp.Source, claudeCodeVersionFallback, extra, fixDir))
 		return
 	}
-	out, err := exec.Command(kernelHit, "--version").Output()
+	vctx, vcancel := context.WithTimeout(context.Background(), cliHelpTimeout)
+	defer vcancel()
+	out, err := exec.CommandContext(vctx, kernelHit, "--version").Output()
 	v, ok := parseClaudeCodeVersion(string(out))
 	if err != nil || !ok {
 		g.add(name, StatusWarn, fmt.Sprintf(
@@ -78,11 +82,34 @@ func doctorClaudeCode(g *DoctorGroup, root string, opts DoctorOptions) {
 	}
 	detail := fmt.Sprintf("%s (%s); resolved against the kernel's PATH from %s", v, kernelHit, kp.Source)
 	if v == claudeCodeVersionFallback {
-		g.add(name, StatusWarn, detail+fmt.Sprintf("; this equals claudeCodeVersionFallback %s, the version Anthropic refuses newer models for. Fix: claude update", claudeCodeVersionFallback))
+		g.add(name, StatusWarn, detail+fmt.Sprintf("; this equals claudeCodeVersionFallback %s, the version Anthropic refuses newer models for. Fix: claude update, then restart the kernel", claudeCodeVersionFallback))
 		return
+	}
+	if !kp.Start.IsZero() {
+		if bt := claudeBinaryModTime(kernelHit); bt.After(kp.Start) {
+			g.add(name, StatusWarn, detail+fmt.Sprintf(
+				"; the binary changed at %s, after the kernel process started at %s. The kernel reads the client version once at startup, so it is still sending what it detected then (possibly claudeCodeVersionFallback %s). "+
+					"Fix: restart the kernel. Detail: provider_claudeoauth.go getClaudeCodeVersion (sync.Once)",
+				bt.Format(time.RFC3339), kp.Start.Format(time.RFC3339), claudeCodeVersionFallback))
+			return
+		}
 	}
 	if strings.TrimSpace(callerHit) != "" && callerHit != kernelHit {
 		detail += fmt.Sprintf("; note this shell resolves a different binary (%s)", callerHit)
 	}
 	g.add(name, StatusOK, detail)
+}
+
+// claudeBinaryModTime is the newest mtime among the path itself and the file a
+// symlink resolves to: `claude update` repoints the link and writes a new
+// versioned target.
+func claudeBinaryModTime(path string) time.Time {
+	var t time.Time
+	if st, err := os.Lstat(path); err == nil {
+		t = st.ModTime()
+	}
+	if st, err := os.Stat(path); err == nil && st.ModTime().After(t) {
+		t = st.ModTime()
+	}
+	return t
 }

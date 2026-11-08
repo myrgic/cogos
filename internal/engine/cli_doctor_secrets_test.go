@@ -382,13 +382,16 @@ func TestCredentialHygiene_NoCandidatesIsUnknownNotOK(t *testing.T) {
 		t.Fatal("group missing")
 	}
 	// The contract: nothing scanned must never present as a clean bill of
-	// health. With no candidate files found, the single check this group
-	// emits must be UNKNOWN, never OK.
-	if len(g.Checks) != 1 {
-		t.Fatalf("expected exactly one check when no candidates exist, got %d", len(g.Checks))
+	// health. With no candidate files found the group holds the secret-scan
+	// UNKNOWN plus the two Hermes grant-hygiene UNKNOWNs (no profile, no
+	// scannable /proc); none of them may be OK.
+	if len(g.Checks) != 3 {
+		t.Fatalf("expected 3 checks (secret scan + 2 hermes hygiene) when nothing exists, got %d", len(g.Checks))
 	}
-	if g.Checks[0].Status == StatusOK {
-		t.Error("empty scan reported as OK; must be UNKNOWN (a check that could not run learned nothing)")
+	for _, c := range g.Checks {
+		if c.Status == StatusOK {
+			t.Errorf("%q reported OK with nothing scanned; must be UNKNOWN (a check that could not run learned nothing)", c.Name)
+		}
 	}
 }
 

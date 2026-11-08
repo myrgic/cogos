@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,12 +24,16 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-const hermesHelperTimeout = 3 * time.Second
+const (
+	hermesHelperTimeout = 3 * time.Second
+	hermesHelperMaxOut  = 1 << 20 // Hermes caps helper output at 1 MiB
+)
 
 var hermesEnvRefRE = regexp.MustCompile(`\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}`)
 
@@ -40,6 +45,7 @@ type hermesProfile struct {
 	SecretsEnabled   bool
 	SecretsCommand   string
 	OverrideExisting bool
+	HelperTimeout    time.Duration // secrets.command.helper_timeout_seconds; 0 = default
 	ModelDefault     string
 }
 
@@ -68,9 +74,10 @@ func loadHermesProfiles(home string) []hermesProfile {
 			} `yaml:"providers"`
 			Secrets struct {
 				Command struct {
-					Enabled          bool   `yaml:"enabled"`
-					Command          string `yaml:"command"`
-					OverrideExisting bool   `yaml:"override_existing"`
+					Enabled          bool    `yaml:"enabled"`
+					Command          string  `yaml:"command"`
+					OverrideExisting bool    `yaml:"override_existing"`
+					HelperTimeoutSec float64 `yaml:"helper_timeout_seconds"`
 				} `yaml:"command"`
 			} `yaml:"secrets"`
 			Model yaml.Node `yaml:"model"`
@@ -85,6 +92,9 @@ func loadHermesProfiles(home string) []hermesProfile {
 			SecretsEnabled:   doc.Secrets.Command.Enabled,
 			SecretsCommand:   doc.Secrets.Command.Command,
 			OverrideExisting: doc.Secrets.Command.OverrideExisting,
+		}
+		if t := doc.Secrets.Command.HelperTimeoutSec; t > 0 {
+			p.HelperTimeout = time.Duration(t * float64(time.Second))
 		}
 		for n, pr := range doc.Providers {
 			p.Providers[n] = hermesProvider{BaseURL: pr.BaseURL, APIKey: pr.APIKey}
@@ -128,7 +138,7 @@ type hermesProfileCache struct {
 	mu     sync.Mutex
 	helper map[string]helperResult
 	// run is the helper runner seam; nil = real /bin/sh -c execution.
-	run func(command string) (map[string]string, error)
+	run func(command string, timeout time.Duration) (map[string]string, error)
 	// getenv is the process-env seam; nil = os.Getenv.
 	getenv func(string) string
 }
@@ -168,34 +178,76 @@ func (c *hermesProfileCache) helperValues(p hermesProfile) (map[string]string, e
 	run := c.run
 	if run == nil {
 		run = runHermesSecretsHelper
+		if testing.Testing() && !underTempDir(p.Path) {
+			// A test that reaches here without a runner seam and without a
+			// temp HOME would execute the operator's real ~/.hermes
+			// secrets.command (vault) helper.
+			err := fmt.Errorf("secrets.command helpers outside a temp dir are not run under go test; set hermesProfileCache.run or a temp HOME")
+			c.helper[p.Path] = helperResult{nil, err}
+			return nil, err
+		}
 	}
-	vals, err := run(p.SecretsCommand)
+	vals, err := run(p.SecretsCommand, p.HelperTimeout)
 	c.helper[p.Path] = helperResult{vals, err}
 	return vals, err
 }
 
+// profileDotenv returns the profile's own <profile dir>/.env. Hermes
+// (hermes_cli/env_loader.py) loads it with override=True before any secret
+// source runs, so its values replace the inherited process environment.
+func (p hermesProfile) profileDotenv() map[string]string {
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(p.Path), ".env"))
+	if err != nil {
+		return nil
+	}
+	return parseDotenvMap(string(data))
+}
+
 // resolve expands every ${env:VAR} in raw the way Hermes would for profile p.
-// how names the source of the (last) substituted value; unresolved lists vars
-// that neither the process env nor the helper provides. The helper error (if
-// any) is returned in note so the caller can say why.
+// Precedence (Hermes load_hermes_dotenv, then agent/secret_sources/command.py):
+// the helper wins only with override_existing; otherwise the profile .env, then
+// the process env, then the helper. how names the source of the (last)
+// substituted value; unresolved lists vars nothing provides. The helper error
+// (if any) is returned in note so the caller can say why.
 func (c *hermesProfileCache) resolve(p hermesProfile, raw string) (value, how string, unresolved []string, note string) {
+	value, how, unresolved, note, _ = c.resolveX(p, raw, false)
+	return
+}
+
+// resolveX is resolve plus two controls. ignoreProcEnv drops the doctor
+// process's own environment from the lookup (a service such as Hermes under
+// systemd/launchd does not inherit the operator's shell). procShadowed is true
+// when a process-env value was used although the helper offered a different
+// one, i.e. the verdict depends on the caller's shell.
+func (c *hermesProfileCache) resolveX(p hermesProfile, raw string, ignoreProcEnv bool) (value, how string, unresolved []string, note string, procShadowed bool) {
 	if !hermesEnvRefRE.MatchString(raw) {
-		return raw, "literal", nil, ""
+		return raw, "literal", nil, "", false
 	}
 	helperVals, herr := c.helperValues(p)
 	if herr != nil {
 		note = "secrets.command helper failed: " + herr.Error()
 	}
+	dotenv := p.profileDotenv()
 	value = hermesEnvRefRE.ReplaceAllStringFunc(raw, func(ref string) string {
 		name := hermesEnvRefRE.FindStringSubmatch(ref)[1]
-		fromEnv := c.env(name)
+		fromEnv := ""
+		if !ignoreProcEnv {
+			fromEnv = c.env(name)
+		}
+		fromDotenv := strings.TrimSpace(dotenv[name])
 		fromHelper := strings.TrimSpace(helperVals[name])
 		switch {
 		case p.OverrideExisting && fromHelper != "":
 			how = "secrets.command helper (override_existing)"
 			return fromHelper
+		case fromDotenv != "":
+			how = ".env (" + filepath.Join("~/.hermes/profiles", p.Name, ".env") + ")"
+			return fromDotenv
 		case fromEnv != "":
 			how = "process env"
+			if fromHelper != "" && fromHelper != fromEnv {
+				procShadowed = true
+			}
 			return fromEnv
 		case fromHelper != "":
 			how = "secrets.command helper"
@@ -204,25 +256,49 @@ func (c *hermesProfileCache) resolve(p hermesProfile, raw string) (value, how st
 		unresolved = append(unresolved, name)
 		return ref
 	})
-	return value, how, unresolved, note
+	return value, how, unresolved, note, procShadowed
 }
 
 // runHermesSecretsHelper runs a Hermes secrets.command helper exactly as
 // Hermes does at startup and returns its KEY=VALUE map. Output is held in
 // memory only; stderr is discarded. POSIX only.
-func runHermesSecretsHelper(command string) (map[string]string, error) {
+func runHermesSecretsHelper(command string, timeout time.Duration) (map[string]string, error) {
 	if runtime.GOOS == "windows" {
 		return nil, fmt.Errorf("secrets.command needs /bin/sh (POSIX only)")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hermesHelperTimeout)
+	if timeout <= 0 {
+		timeout = hermesHelperTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
 	cmd.Env = append(os.Environ(), "HERMES_SECRET_KEY=")
+	bindHelperLifetime(cmd)
+	cmd.WaitDelay = time.Second // do not wait on pipes a stray grandchild still holds
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("cannot create pipe")
+	}
+	cmd.Stdout = pw
+	if err := cmd.Start(); err != nil {
+		pr.Close()
+		pw.Close()
+		return nil, fmt.Errorf("exit error (output withheld)")
+	}
+	pw.Close()
 	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&out, io.LimitReader(pr, hermesHelperMaxOut))
+		_, _ = io.Copy(io.Discard, pr) // keep draining so the helper never blocks on a full pipe
+		close(done)
+	}()
+	werr := cmd.Wait()
+	pr.Close() // unblocks the reader even if a grandchild still holds the write end
+	<-done
+	if werr != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("timed out after %s", hermesHelperTimeout)
+			return nil, fmt.Errorf("timed out after %s", timeout)
 		}
 		return nil, fmt.Errorf("exit error (output withheld)")
 	}
@@ -249,4 +325,18 @@ func parseDotenvMap(s string) map[string]string {
 		}
 	}
 	return out
+}
+
+// underTempDir reports whether path lies under the OS temp dir (symlinks
+// resolved), i.e. is a test fixture rather than the operator's real profile.
+func underTempDir(path string) bool {
+	real := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return p
+	}
+	tmp := real(os.TempDir())
+	rel, err := filepath.Rel(tmp, real(path))
+	return err == nil && !strings.HasPrefix(rel, "..")
 }

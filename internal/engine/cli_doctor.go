@@ -528,21 +528,7 @@ func lookPathAll(name string) ([]string, error) {
 	if pathEnv == "" {
 		return nil, fmt.Errorf("PATH is empty")
 	}
-	var matches []string
-	for _, dir := range filepath.SplitList(pathEnv) {
-		if dir == "" {
-			dir = "."
-		}
-		cand := filepath.Join(dir, name)
-		info, err := os.Stat(cand)
-		if err != nil || info.IsDir() {
-			continue
-		}
-		if runtime.GOOS != "windows" && info.Mode()&0111 == 0 {
-			continue // not executable
-		}
-		matches = append(matches, cand)
-	}
+	matches := lookPathIn(name, pathEnv)
 	if len(matches) == 0 {
 		return nil, fmt.Errorf("%s: not found on PATH", name)
 	}

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const fixtureProfile = `providers:
@@ -93,7 +94,9 @@ func TestExternalClient_UnresolvableEnvRefIsUnknownNotFail(t *testing.T) {
 
 func TestResolve_OverrideExistingPrecedence(t *testing.T) {
 	c := &hermesProfileCache{helper: map[string]helperResult{}, getenv: func(string) string { return "from-env" },
-		run: func(string) (map[string]string, error) { return map[string]string{"V": "from-helper"}, nil }}
+		run: func(string, time.Duration) (map[string]string, error) {
+			return map[string]string{"V": "from-helper"}, nil
+		}}
 	p := hermesProfile{Path: "p", SecretsEnabled: true, SecretsCommand: "x"}
 	if v, how, _, _ := c.resolve(p, "${env:V}"); v != "from-env" || how != "process env" {
 		t.Fatalf("default precedence: %q %q", v, how)
