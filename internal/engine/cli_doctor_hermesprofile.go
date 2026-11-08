@@ -292,7 +292,11 @@ func (c *hermesProfileCache) resolveX(p hermesProfile, raw string, ignoreProcEnv
 			return fromDotenv
 		case fromEnv != "":
 			how = "process env"
-			if fromHelper != "" && fromHelper != fromEnv {
+			if fromHelper == fromEnv {
+				// The helper offers the same value: the profile has its own
+				// source, so judge it as the helper's, not as shell-only.
+				how = "secrets.command helper"
+			} else if fromHelper != "" {
 				procShadowed = true
 			}
 			return fromEnv

@@ -45,13 +45,28 @@ type probeModel struct {
 	sources []string
 }
 
-// kernelAliasProbeIDs picks, from the live /v1/models ids, the ones that are
-// kernel aliases (resolved by the running kernel, not this binary's table).
+// kernelAliasProbeIDs picks the kernel aliases to probe (resolved by the
+// running kernel, not this binary's table): the live /v1/models ids that are
+// aliases, plus every override-bearing alias this doctor knows. The kernel
+// accepts haiku/sonnet/opus/fable without advertising them in /v1/models, so
+// catalog membership alone would never exercise them.
 func kernelAliasProbeIDs(catalog []string) []string {
+	seen := map[string]bool{}
 	var out []string
+	add := func(id string) {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
 	for _, id := range catalog {
 		if id == "foreground" || id == "deliberation" || id == "local" || intentAliases[id].ModelOverride != "" {
-			out = append(out, id)
+			add(id)
+		}
+	}
+	for id, r := range intentAliases {
+		if r.ModelOverride != "" {
+			add(id)
 		}
 	}
 	sort.Strings(out)
@@ -59,8 +74,8 @@ func kernelAliasProbeIDs(catalog []string) []string {
 }
 
 // unprobedKernelAliases are kernel alias ids with no intentAliases override
-// that have no single concrete model to probe; they are named in the coverage
-// line when the live catalog advertises them.
+// that have no single concrete model to probe; they are always named in the
+// coverage line (the kernel accepts them without listing them in /v1/models).
 var unprobedKernelAliases = []string{"claude", "codex", "kernel-agent", "ollama"}
 
 // hermesModelKernelRouted reports whether profile p's model.default is sent
@@ -156,19 +171,7 @@ func configuredProbeModels(root string, opts DoctorOptions, catalog []string) ([
 		for _, a := range kernelAliasProbeIDs(catalog) {
 			add(a, "kernel alias "+a+" (live /v1/models)")
 		}
-		inCatalog := map[string]bool{}
-		for _, id := range catalog {
-			inCatalog[id] = true
-		}
-		var skipped []string
-		for _, a := range unprobedKernelAliases {
-			if inCatalog[a] {
-				skipped = append(skipped, a)
-			}
-		}
-		if len(skipped) > 0 {
-			notes = append(notes, "kernel aliases advertised by /v1/models but not probed (no concrete model to exercise): "+strings.Join(skipped, ", "))
-		}
+		notes = append(notes, "kernel aliases accepted but not probed (no concrete model to exercise): "+strings.Join(unprobedKernelAliases, ", "))
 	} else {
 		var aliases []string
 		for a := range intentAliases {

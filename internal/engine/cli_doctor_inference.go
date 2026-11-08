@@ -1031,7 +1031,15 @@ func grantProvenanceClause(t externalClientTarget, ledger *grantLedgerView) stri
 	clause := fmt.Sprintf("; %s%s", c.describe(), src)
 	switch c.Kind {
 	case grantForeign:
-		clause += fmt.Sprintf(". Fix: point the credential source at a grant issued by this kernel for the hermes surface in %s; Detail: %s", t.profile, ledger.path)
+		where := t.profile
+		if where == "" {
+			where = t.source
+		}
+		surface := "this client"
+		if t.profile != "" {
+			surface = "the hermes surface"
+		}
+		clause += fmt.Sprintf(". Fix: point the credential source at a grant issued by this kernel for %s in %s; Detail: %s", surface, where, ledger.path)
 	case grantStale:
 		clause += fmt.Sprintf(". Fix: refresh the credential from the vault and restart the client (a parent process may hold the old value); Detail: %s", ledger.path)
 	case grantLive:
