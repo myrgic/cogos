@@ -51,8 +51,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // doctorInferenceSurface runs the four inference-surface mechanical checks
@@ -61,9 +59,10 @@ func doctorInferenceSurface(report *DoctorReport, root string, opts DoctorOption
 	g := report.addGroup("inference surface")
 
 	doctorProviderEndpoints(g, root, opts)
-	doctorProviderArgvVsCLI(g, opts)
+	doctorProviderArgvVsCLI(g, root, opts)
 	doctorAliasTargetsInCatalog(g, root, opts)
 	doctorExternalClientsToKernel(g, root, opts)
+	doctorModelProbes(g, root, opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -286,13 +285,13 @@ func cliArgvContracts() []cliArgvContract {
 // cliHelpTimeout bounds each `<bin> <subcmd> --help` subprocess call.
 const cliHelpTimeout = 5 * time.Second
 
-func doctorProviderArgvVsCLI(g *DoctorGroup, opts DoctorOptions) {
+func doctorProviderArgvVsCLI(g *DoctorGroup, root string, opts DoctorOptions) {
 	if opts.SkipNetwork {
 		// --help spawns subprocesses; treat like the other external probes.
 		g.add("argv vs CLI", StatusUnknown, "skipped (--skip-network)")
 		return
 	}
-	checkArgvContracts(g, cliArgvContracts())
+	checkArgvContractsOnPath(g, cliArgvContracts(), discoverKernelPATH(root, opts))
 }
 
 // checkArgvContracts is the testable core of doctorProviderArgvVsCLI: it
@@ -300,13 +299,40 @@ func doctorProviderArgvVsCLI(g *DoctorGroup, opts DoctorOptions) {
 // contract pointing at a fake `--help` script instead of depending on the
 // real codex/pi/claude binaries being installed in CI.
 func checkArgvContracts(g *DoctorGroup, contracts []cliArgvContract) {
+	checkArgvContractsOnPath(g, contracts, kernelPathInfo{})
+}
+
+// checkArgvContractsOnPath is checkArgvContracts resolving each CLI against
+// the kernel service's PATH when kp.Found (the kernel is what execs these
+// binaries, not the caller's shell), and saying which PATH was used.
+func checkArgvContractsOnPath(g *DoctorGroup, contracts []cliArgvContract, kp kernelPathInfo) {
 	for _, c := range contracts {
-		paths := resolveCLIBinary(c.bin)
-		if len(paths) == 0 {
+		var binPath, pathNote string
+		callerPaths := resolveCLIBinary(c.bin)
+		if kp.Found {
+			if hits := lookPathIn(c.bin, kp.PATH); len(hits) > 0 {
+				binPath = hits[0]
+				pathNote = " [resolved on the kernel's PATH: " + kp.Source + "]"
+			} else {
+				detail := fmt.Sprintf("%s is not on the kernel's PATH (from %s); a request routed to this provider fails to spawn it.", c.bin, kp.Source)
+				if len(callerPaths) > 0 {
+					detail += fmt.Sprintf(" This shell finds it at %s. Fix: add %s to the kernel unit/plist PATH and restart the kernel.", callerPaths[0], filepath.Dir(callerPaths[0]))
+					g.add("argv vs CLI: "+c.provider, StatusWarn, detail)
+				} else {
+					g.add("argv vs CLI: "+c.provider, StatusUnknown, detail+" Not on this shell's PATH either.")
+				}
+				continue
+			}
+		} else if len(callerPaths) > 0 {
+			binPath = callerPaths[0]
+			pathNote = " [kernel PATH not discoverable (" + kp.Source + "); resolved on this shell's PATH]"
+			if kp.Source == "" {
+				pathNote = ""
+			}
+		} else {
 			g.add("argv vs CLI: "+c.provider, StatusUnknown, fmt.Sprintf("%s not found on PATH or ~/.nvm/versions/node/*/bin", c.bin))
 			continue
 		}
-		binPath := paths[0]
 
 		args := append(append([]string{}, c.subcmd...), "--help")
 		ctx, cancel := context.WithTimeout(context.Background(), cliHelpTimeout)
@@ -328,12 +354,12 @@ func checkArgvContracts(g *DoctorGroup, contracts []cliArgvContract) {
 		if len(missing) > 0 {
 			sort.Strings(missing)
 			g.add("argv vs CLI: "+c.provider, StatusFail,
-				fmt.Sprintf("%s: buildArgs() emits flag(s) not advertised by `%s %s --help`: %s",
-					binPath, c.bin, strings.Join(c.subcmd, " "), strings.Join(missing, ", ")))
+				fmt.Sprintf("%s: buildArgs() emits flag(s) not advertised by `%s %s --help`: %s%s",
+					binPath, c.bin, strings.Join(c.subcmd, " "), strings.Join(missing, ", "), pathNote))
 			continue
 		}
 		g.add("argv vs CLI: "+c.provider, StatusOK,
-			fmt.Sprintf("%s: every buildArgs() flag present in `%s %s --help`", binPath, c.bin, strings.Join(c.subcmd, " ")))
+			fmt.Sprintf("%s: every buildArgs() flag present in `%s %s --help`%s", binPath, c.bin, strings.Join(c.subcmd, " "), pathNote))
 	}
 }
 
@@ -526,6 +552,17 @@ type externalClientTarget struct {
 	source  string // e.g. "~/.claude.json (mcpServers.cogos-kernel)"
 	url     string
 	headers map[string]string // header name -> value (redacted at print time, never stored redacted so the real value is still usable for the auth probe)
+
+	// credRef/credSource/unresolved describe a credential that came from a
+	// ${env:VAR} reference (Hermes api_key): the reference text, where the
+	// value was resolved from, and any variables that could not be resolved.
+	// A target with unresolved variables is never probed (sending the literal
+	// reference text would 401 and read as a false FAIL).
+	credRef    string
+	credSource string
+	unresolved []string
+	credNote   string
+	profile    string // config path, for the fix pointer
 }
 
 func doctorExternalClientsToKernel(g *DoctorGroup, root string, opts DoctorOptions) {
@@ -547,7 +584,8 @@ func doctorExternalClientsToKernelWithHome(g *DoctorGroup, root string, opts Doc
 	var targets []externalClientTarget
 	targets = append(targets, collectClaudeJSONTargets(home)...)
 	targets = append(targets, collectCodexTOMLTargets(home)...)
-	targets = append(targets, collectHermesProfileTargets(home)...)
+	targets = append(targets, collectHermesProfileTargetsWith(home, opts.hermesCache())...)
+	ledger := loadGrantLedger(root)
 
 	if len(targets) == 0 {
 		g.add("external clients -> kernel", StatusUnknown, "no external client config found (~/.claude.json, ~/.codex/config.toml, ~/.hermes/profiles/*/config.yaml)")
@@ -565,6 +603,13 @@ func doctorExternalClientsToKernelWithHome(g *DoctorGroup, root string, opts Doc
 		}
 		localCount++
 		checkName := "external client: " + t.source
+
+		if len(t.unresolved) > 0 {
+			g.add(checkName, StatusUnknown, fmt.Sprintf(
+				"credential %s not resolvable (%s not in process env%s); not probed, so no 401 can be claimed. Fix: export it or configure secrets.command in %s. %s",
+				t.credRef, strings.Join(t.unresolved, ", "), helperClause(t.credNote), t.profile, "Detail: cli_doctor_hermesprofile.go"))
+			continue
+		}
 
 		if opts.SkipNetwork {
 			g.add(checkName, StatusUnknown, "skipped (--skip-network)")
@@ -616,7 +661,8 @@ func doctorExternalClientsToKernelWithHome(g *DoctorGroup, root string, opts Doc
 		if resp.StatusCode == http.StatusUnauthorized {
 			errType := grantErrorType(respBody)
 			g.add(checkName, StatusFail,
-				fmt.Sprintf("kernel auth: %s: HTTP 401 (%s), credential(s) sent: %s", redactMCPTarget(t.url), errType, strings.Join(credDesc, ", ")))
+				fmt.Sprintf("kernel auth: %s: HTTP 401 (%s), credential(s) sent: %s%s",
+					redactMCPTarget(t.url), errType, strings.Join(credDesc, ", "), grantProvenanceClause(t, ledger)))
 			continue
 		}
 		g.add(checkName, StatusOK,
@@ -886,25 +932,17 @@ func codexTargetName(source string) string {
 // scope. Sibling provider entries (local-lms, remote-lms, etc.) are out
 // of scope for this check — it targets client->kernel auth specifically.
 func collectHermesProfileTargets(home string) []externalClientTarget {
-	pattern := filepath.Join(home, ".hermes", "profiles", "*", "config.yaml")
-	matches := globQuiet(pattern)
+	return collectHermesProfileTargetsWith(home, newHermesProfileCache())
+}
 
+// collectHermesProfileTargetsWith resolves each profile's api_key the way
+// Hermes does (${env:VAR}: process env, else the profile's secrets.command
+// helper) before it is used as a credential, so a reference is never sent
+// verbatim as a bearer token.
+func collectHermesProfileTargetsWith(home string, cache *hermesProfileCache) []externalClientTarget {
 	var out []externalClientTarget
-	for _, path := range matches {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var doc struct {
-			Providers map[string]struct {
-				BaseURL string `yaml:"base_url"`
-				APIKey  string `yaml:"api_key"`
-			} `yaml:"providers"`
-		}
-		if err := yaml.Unmarshal(data, &doc); err != nil {
-			continue
-		}
-		cogos, ok := doc.Providers["cogos"]
+	for _, prof := range loadHermesProfiles(home) {
+		cogos, ok := prof.Providers["cogos"]
 		if !ok || cogos.BaseURL == "" {
 			continue
 		}
@@ -917,17 +955,64 @@ func collectHermesProfileTargets(home string) []externalClientTarget {
 		}
 		u.Path = "/mcp"
 		u.RawQuery = ""
+		tgt := externalClientTarget{
+			source:  fmt.Sprintf("%s (providers.cogos)", hermesProfileLabel(prof.Path)),
+			url:     u.String(),
+			profile: prof.Path,
+		}
 		headers := map[string]string{}
 		if cogos.APIKey != "" {
-			headers["Authorization"] = "Bearer " + cogos.APIKey
+			val, how, unresolved, note := cache.resolve(prof, cogos.APIKey)
+			if how != "literal" {
+				tgt.credRef, tgt.credSource, tgt.credNote = cogos.APIKey, how, note
+			}
+			tgt.unresolved = unresolved
+			if len(unresolved) == 0 {
+				headers["Authorization"] = "Bearer " + val
+			}
 		}
-		out = append(out, externalClientTarget{
-			source:  fmt.Sprintf("%s (providers.cogos)", hermesProfileLabel(path)),
-			url:     u.String(),
-			headers: headers,
-		})
+		tgt.headers = headers
+		out = append(out, tgt)
 	}
 	return out
+}
+
+// helperClause renders a helper failure note as a trailing clause.
+func helperClause(note string) string {
+	if note == "" {
+		return ", and no secrets.command helper value"
+	}
+	return "; " + note
+}
+
+// grantProvenanceClause classifies the credential a target sent against the
+// kernel's grant ledger, by fingerprint only, and names the fix.
+func grantProvenanceClause(t externalClientTarget, ledger *grantLedgerView) string {
+	tok := ""
+	for _, hk := range []string{"Authorization", "X-Cogos-Grant"} {
+		if v := t.headers[hk]; v != "" {
+			tok = strings.TrimSpace(strings.TrimPrefix(v, "Bearer "))
+			break
+		}
+	}
+	if tok == "" {
+		return ""
+	}
+	c := ledger.classify(tok)
+	src := ""
+	if t.credSource != "" {
+		src = fmt.Sprintf(" (resolved from %s via %s)", t.credRef, t.credSource)
+	}
+	clause := fmt.Sprintf("; %s%s", c.describe(), src)
+	switch c.Kind {
+	case grantForeign:
+		clause += fmt.Sprintf(". Fix: point the credential source at THIS node's vault (~/.cog/vault/node-root-grant) in %s; Detail: %s", t.profile, ledger.path)
+	case grantStale:
+		clause += fmt.Sprintf(". Fix: refresh the credential from the vault and restart the client (a parent process may hold the old value); Detail: %s", ledger.path)
+	case grantLive:
+		clause += ". The grant is live here, so the 401 comes from elsewhere (wrong kernel port or header scheme)"
+	}
+	return clause
 }
 
 func hermesProfileLabel(configPath string) string {

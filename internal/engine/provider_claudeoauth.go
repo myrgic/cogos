@@ -225,17 +225,21 @@ func detectClaudeCodeVersion() string {
 		if err != nil {
 			continue
 		}
-		s := strings.TrimSpace(string(out))
-		if s == "" {
-			continue
-		}
-		// Output formats: "2.1.74 (Claude Code)" or just "2.1.74"
-		parts := strings.Fields(s)
-		if len(parts) > 0 && len(parts[0]) > 0 && parts[0][0] >= '0' && parts[0][0] <= '9' {
-			return parts[0]
+		if v, ok := parseClaudeCodeVersion(string(out)); ok {
+			return v
 		}
 	}
 	return claudeCodeVersionFallback
+}
+
+// parseClaudeCodeVersion extracts the version from `claude --version` output.
+// Output formats: "2.1.74 (Claude Code)" or just "2.1.74".
+func parseClaudeCodeVersion(out string) (string, bool) {
+	parts := strings.Fields(strings.TrimSpace(out))
+	if len(parts) > 0 && len(parts[0]) > 0 && parts[0][0] >= '0' && parts[0][0] <= '9' {
+		return parts[0], true
+	}
+	return "", false
 }
 
 func getClaudeCodeVersion() string {
