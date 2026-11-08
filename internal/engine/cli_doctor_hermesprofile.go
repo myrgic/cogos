@@ -24,7 +24,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -34,6 +33,10 @@ const (
 	hermesHelperTimeout = 3 * time.Second
 	hermesHelperMaxOut  = 1 << 20 // Hermes caps helper output at 1 MiB
 )
+
+// hermesHelperUnderTest is set from a _test.go init so production code does
+// not import the testing package; see cli_doctor_testguard_test.go.
+var hermesHelperUnderTest bool
 
 var hermesEnvRefRE = regexp.MustCompile(`\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}`)
 
@@ -47,6 +50,8 @@ type hermesProfile struct {
 	OverrideExisting bool
 	HelperTimeout    time.Duration // secrets.command.helper_timeout_seconds; 0 = default
 	ModelDefault     string
+	ModelProvider    string // model.provider ("" when model is a bare string)
+	ModelBaseURL     string // model.base_url
 }
 
 type hermesProvider struct {
@@ -104,8 +109,16 @@ func loadHermesProfiles(home string) []hermesProfile {
 			p.ModelDefault = strings.TrimSpace(doc.Model.Value)
 		case yaml.MappingNode:
 			for i := 0; i+1 < len(doc.Model.Content); i += 2 {
-				if doc.Model.Content[i].Value == "default" {
-					p.ModelDefault = strings.TrimSpace(doc.Model.Content[i+1].Value)
+				v := strings.TrimSpace(doc.Model.Content[i+1].Value)
+				switch doc.Model.Content[i].Value {
+				case "default":
+					p.ModelDefault = v
+				case "provider":
+					p.ModelProvider = v
+				case "base_url":
+					if v != "null" && v != "None" {
+						p.ModelBaseURL = v
+					}
 				}
 			}
 		}
@@ -141,6 +154,9 @@ type hermesProfileCache struct {
 	run func(command string, timeout time.Duration) (map[string]string, error)
 	// getenv is the process-env seam; nil = os.Getenv.
 	getenv func(string) string
+	// skipHelper makes helperValues report errHelperSkipped instead of
+	// running the helper (--skip-network).
+	skipHelper bool
 }
 
 type helperResult struct {
@@ -153,10 +169,35 @@ func newHermesProfileCache() *hermesProfileCache {
 }
 
 func (o DoctorOptions) hermesCache() *hermesProfileCache {
-	if o.hermes != nil {
-		return o.hermes
+	c := o.hermes
+	if c == nil {
+		c = newHermesProfileCache()
 	}
-	return newHermesProfileCache()
+	if o.SkipNetwork {
+		c.skipHelper = true
+	}
+	return c
+}
+
+var errHelperSkipped = fmt.Errorf("secrets.command helper not run under --skip-network (it may contact a vault)")
+
+// redactKeyRef renders a raw api_key config value as its ${env:VAR}
+// references only; literal text (which may be key material, alone or mixed
+// with a reference) is never echoed.
+func redactKeyRef(raw string) string {
+	refs := hermesEnvRefRE.FindAllStringSubmatch(raw, -1)
+	if len(refs) == 0 {
+		return "<literal api_key, not shown>"
+	}
+	var parts []string
+	for _, m := range refs {
+		parts = append(parts, "${env:"+m[1]+"}")
+	}
+	out := strings.Join(parts, "+")
+	if strings.TrimSpace(hermesEnvRefRE.ReplaceAllString(raw, "")) != "" {
+		out += " (plus literal text, not shown)"
+	}
+	return out
 }
 
 func (c *hermesProfileCache) env(k string) string {
@@ -170,6 +211,9 @@ func (c *hermesProfileCache) helperValues(p hermesProfile) (map[string]string, e
 	if !p.SecretsEnabled || strings.TrimSpace(p.SecretsCommand) == "" {
 		return nil, nil
 	}
+	if c.skipHelper {
+		return nil, errHelperSkipped
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if r, ok := c.helper[p.Path]; ok {
@@ -178,7 +222,7 @@ func (c *hermesProfileCache) helperValues(p hermesProfile) (map[string]string, e
 	run := c.run
 	if run == nil {
 		run = runHermesSecretsHelper
-		if testing.Testing() && !underTempDir(p.Path) {
+		if hermesHelperUnderTest && !underTempDir(p.Path) {
 			// A test that reaches here without a runner seam and without a
 			// temp HOME would execute the operator's real ~/.hermes
 			// secrets.command (vault) helper.
@@ -226,6 +270,9 @@ func (c *hermesProfileCache) resolveX(p hermesProfile, raw string, ignoreProcEnv
 	helperVals, herr := c.helperValues(p)
 	if herr != nil {
 		note = "secrets.command helper failed: " + herr.Error()
+		if herr == errHelperSkipped {
+			note = herr.Error()
+		}
 	}
 	dotenv := p.profileDotenv()
 	value = hermesEnvRefRE.ReplaceAllStringFunc(raw, func(ref string) string {

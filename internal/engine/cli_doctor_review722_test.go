@@ -3,8 +3,10 @@
 package engine
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +25,7 @@ func TestConfiguredProbeModels_StageRoomsJSON(t *testing.T) {
 		{"id":"b","prefs":{"model":"opus"},"messages":[{"model_id":"custom:cogos:claude-opus-5-5"}]},
 		{"id":"c","model":"not-a-pref"}]}`, 0o644)
 
-	models, notes := configuredProbeModels(DoctorOptions{host: newFakeProc(t).host(home)})
+	models, notes := configuredProbeModels(t.TempDir(), DoctorOptions{host: newFakeProc(t).host(home)}, nil)
 	got := map[string]string{}
 	for _, m := range models {
 		got[m.id] = strings.Join(m.sources, ";")
@@ -204,7 +206,11 @@ func TestDoctorClaudeCode_KernelOlderThanBinaryWarnsRestart(t *testing.T) {
 	fp := newFakeProc(t)
 	fp.add(100, 1000, "cogos", map[string]string{"PATH": bin}, "/system.slice/cogos-kernel.service", 6931)
 	started := time.Now().Add(-2 * time.Hour)
-	if err := os.Chtimes(filepath.Join(fp.root, "100"), started, started); err != nil {
+	fp.setStart(t, 100, started)
+	// The /proc/<pid> dir mtime is inode creation (later than the real start)
+	// and must not be what decides.
+	late := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(filepath.Join(fp.root, "100"), late, late); err != nil {
 		t.Fatal(err)
 	}
 	opts := DoctorOptions{host: fp.host(home), kernelEndpoint: "http://127.0.0.1:6931"}
@@ -261,5 +267,40 @@ func TestHelperValues_RefusesRealHomeUnderGoTest(t *testing.T) {
 	p := hermesProfile{Path: "/Users/nobody/.hermes/profiles/cog/config.yaml", SecretsEnabled: true, SecretsCommand: "touch /nonexistent-canary"}
 	if _, err := c.helperValues(p); err == nil || !strings.Contains(err.Error(), "not run under go test") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// setStart writes <proc>/<pid>/stat (field 22 starttime) and <proc>/stat
+// (btime) so procStartTime resolves to start.
+func (f *fakeProc) setStart(t *testing.T, pid int, start time.Time) {
+	t.Helper()
+	btime := start.Unix() - 5000
+	ticks := (start.Unix() - btime) * 100
+	stat := fmt.Sprintf("%d (co)gos x) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 %d 0 0\n", pid, ticks)
+	writeFileMode(t, filepath.Join(f.root, strconv.Itoa(pid), "stat"), stat, 0o644)
+	writeFileMode(t, filepath.Join(f.root, "stat"), fmt.Sprintf("cpu 1 2 3\nbtime %d\n", btime), 0o644)
+}
+
+func TestProcStartTime_UsesStatFieldNotDirMtime(t *testing.T) {
+	fp := newFakeProc(t)
+	fp.add(7, 1000, "x", nil, "", 0)
+	want := time.Now().Add(-time.Hour).Truncate(time.Second)
+	fp.setStart(t, 7, want)
+	if got := procStartTime(fp.root, 7); !got.Equal(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	if !procStartTime(fp.root, 8).IsZero() {
+		t.Fatal("missing pid must be zero")
+	}
+}
+
+func TestDiscoverKernelPATH_UnitFileWhenNoPidVisible(t *testing.T) {
+	home := t.TempDir()
+	writeFileMode(t, filepath.Join(home, ".config", "systemd", "user", "cogos-kernel.service"),
+		"[Service]\nEnvironment=\"PATH=/opt/unit/bin:/usr/bin\"\n", 0o644)
+	fp := newFakeProc(t) // nothing listening: kernel runs as another user
+	kp := discoverKernelPATH(t.TempDir(), DoctorOptions{host: fp.host(home), kernelEndpoint: "http://127.0.0.1:6931"})
+	if !kp.Found || kp.PATH != "/opt/unit/bin:/usr/bin" || !strings.Contains(kp.Source, "cogos-kernel.service") {
+		t.Fatalf("got %+v", kp)
 	}
 }

@@ -66,11 +66,18 @@ func doctorHermesGrantHygiene(g *DoctorGroup, root string, opts DoctorOptions) {
 				"providers.cogos.base_url in %s targets %s, not this node's kernel, so this kernel's ledger cannot classify its grant", p.label(), host))
 			continue
 		}
+		if _, port := splitHostPort(cogos.BaseURL); port != "" {
+			if kp := kernelPortForDoctor(root, opts); kp != 0 && port != fmt.Sprint(kp) {
+				g.add("hermes grant provenance: "+p.Name, StatusUnknown, fmt.Sprintf(
+					"providers.cogos.base_url in %s targets local port %s, not this kernel's :%d (another kernel on this host); this kernel's ledger cannot classify its grant", p.label(), port, kp))
+				continue
+			}
+		}
 		val, how, unresolved, note, shadowed := cache.resolveX(p, cogos.APIKey, false)
 		if len(unresolved) > 0 {
 			g.add("hermes grant provenance: "+p.Name, StatusUnknown, fmt.Sprintf(
 				"providers.cogos.api_key %s in %s not resolvable (%s not in process env%s); cannot classify",
-				cogos.APIKey, p.label(), strings.Join(unresolved, ", "), helperClause(note)))
+				redactKeyRef(cogos.APIKey), p.label(), strings.Join(unresolved, ", "), helperClause(note)))
 			continue
 		}
 		if how == "literal" {
@@ -95,6 +102,12 @@ func doctorHermesGrantHygiene(g *DoctorGroup, root string, opts DoctorOptions) {
 		case grantLedgerMissing:
 			g.add("hermes grant provenance: "+p.Name, StatusUnknown, fmt.Sprintf("%s; expected at %s", c.describe(), ledger.path))
 		default:
+			if cfg, err := LoadConfig(root, 0); err == nil && cfg.WriteRouteGrantAuthDisabled {
+				g.add("hermes grant provenance: "+p.Name, StatusUnknown, fmt.Sprintf(
+					"%s, but this kernel runs with disable_write_route_grant_auth so it accepts any token; resolved via %s from %s. Detail: %s",
+					c.describe(), how, p.label(), ledger.path))
+				continue
+			}
 			g.add("hermes grant provenance: "+p.Name, StatusFail, fmt.Sprintf(
 				"%s; resolved via %s from %s. Fix: make the profile's secrets.command helper print this node's grant (~/.cog/vault/node-root-grant) as %s and set override_existing: true. Detail: %s",
 				c.describe(), how, p.label(), firstVarOf(p), ledger.path))

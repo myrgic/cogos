@@ -7,18 +7,23 @@
 // model actually configured for use and reports per-model OK / refused with
 // the provider's error code. Default runs report UNKNOWN and name the flag.
 //
-// Model sources: Hermes profile model.default, the kernel's alias targets
-// (intentAliases), STAGE_MODEL_* in stage.env files, and the stage per-room
-// preferences in rooms.json next to each stage.env (prefs.model,
-// prefs.model_catalog_choice, model_id "custom:cogos:<model>"). The set is
-// capped (modelProbeCap, in source-priority order); skipped models and every
-// source that could not be scanned are named in the output.
+// Model sources: Hermes profile model.default (only when the profile routes
+// through this kernel), the kernel's own alias ids as advertised by the live
+// GET /v1/models (falling back to the compiled intentAliases table, said so),
+// STAGE_MODEL_* in stage.env files, and the CURRENT stage per-room preferences
+// in rooms.json next to each stage.env (rooms[].prefs.model and
+// prefs.model_catalog_choice; never board/work_queue history). Models that
+// run outside the kernel (opencode/*, a Hermes profile on another provider)
+// are not probed and are named. The set is capped (modelProbeCap, in
+// source-priority order); skipped models and every source that could not be
+// scanned are named in the output.
 package engine
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -30,19 +35,54 @@ import (
 	"time"
 )
 
-const (
-	modelProbeCap     = 12
-	modelProbeTimeout = 45 * time.Second
-)
+const modelProbeCap = 12
+
+// modelProbeTimeout is a var so a test can shorten it.
+var modelProbeTimeout = 45 * time.Second
 
 type probeModel struct {
 	id      string
 	sources []string
 }
 
+// kernelAliasProbeIDs picks, from the live /v1/models ids, the ones that are
+// kernel aliases (resolved by the running kernel, not this binary's table).
+func kernelAliasProbeIDs(catalog []string) []string {
+	var out []string
+	for _, id := range catalog {
+		if id == "foreground" || id == "deliberation" || intentAliases[id].ModelOverride != "" {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// hermesModelKernelRouted reports whether profile p's model.default is sent
+// through the kernel at kernelPort: model.provider is cogos, or model.base_url
+// is a local address on the kernel's port. why names the actual route otherwise.
+func hermesModelKernelRouted(p hermesProfile, kernelPort int) (bool, string) {
+	prov := strings.ToLower(strings.TrimSpace(p.ModelProvider))
+	if prov == "cogos" || prov == "custom:cogos" {
+		return true, ""
+	}
+	if bu := strings.TrimSpace(p.ModelBaseURL); bu != "" {
+		host, port := splitHostPort(bu)
+		if n, _ := strconv.Atoi(port); isLocalHost(host) && n == kernelPort {
+			return true, ""
+		}
+		return false, "base_url " + bu
+	}
+	if prov == "" {
+		return false, "no model.provider"
+	}
+	return false, "provider " + prov
+}
+
 // configuredProbeModels returns the distinct configured models in
-// source-priority order (Hermes, stage, kernel aliases).
-func configuredProbeModels(opts DoctorOptions) ([]probeModel, []string) {
+// source-priority order (Hermes, stage, kernel aliases). catalog is the live
+// /v1/models id list (nil when not fetched).
+func configuredProbeModels(root string, opts DoctorOptions, catalog []string) ([]probeModel, []string) {
 	var notes []string
 	h := opts.doctorHostOrDefault()
 	idx := map[string]*probeModel{}
@@ -60,7 +100,16 @@ func configuredProbeModels(opts DoctorOptions) ([]probeModel, []string) {
 		}
 		m.sources = append(m.sources, src)
 	}
+	kport := kernelPortForDoctor(root, opts)
+	var unrouted []string
 	for _, p := range loadHermesProfiles(h.home) {
+		if p.ModelDefault == "" {
+			continue
+		}
+		if ok, why := hermesModelKernelRouted(p, kport); !ok {
+			unrouted = append(unrouted, fmt.Sprintf("hermes profile %s model.default %s (%s)", p.Name, p.ModelDefault, why))
+			continue
+		}
 		add(p.ModelDefault, "hermes profile "+p.Name+" model.default")
 	}
 	stageFiles := stageEnvFiles(h.home)
@@ -72,8 +121,12 @@ func configuredProbeModels(opts DoctorOptions) ([]probeModel, []string) {
 		if rooms, err := os.ReadFile(roomsPath); err != nil {
 			notes = append(notes, "stage room model preferences: "+roomsPath+" not readable")
 		} else {
-			for _, id := range roomModelsFromJSON(rooms) {
+			ids, outside := roomModelsFromJSON(rooms)
+			for _, id := range ids {
 				add(id, "stage room preference in "+roomsPath)
+			}
+			for _, id := range outside {
+				unrouted = append(unrouted, "stage room preference "+id+" (runs outside the kernel)")
 			}
 		}
 		raw, err := os.ReadFile(f)
@@ -92,35 +145,48 @@ func configuredProbeModels(opts DoctorOptions) ([]probeModel, []string) {
 			add(kv[k], k+" in "+f)
 		}
 	}
-	var aliases []string
-	for a := range intentAliases {
-		aliases = append(aliases, a)
-	}
-	sort.Strings(aliases)
-	for _, a := range aliases {
-		if t := intentAliases[a].ModelOverride; t != "" {
-			add(t, "kernel alias "+a)
+	if catalog != nil {
+		// Probe the alias ids themselves: the running kernel resolves them,
+		// so its own default and alias table is what gets exercised.
+		for _, a := range kernelAliasProbeIDs(catalog) {
+			add(a, "kernel alias "+a+" (live /v1/models)")
 		}
+	} else {
+		var aliases []string
+		for a := range intentAliases {
+			aliases = append(aliases, a)
+		}
+		sort.Strings(aliases)
+		for _, a := range aliases {
+			if t := intentAliases[a].ModelOverride; t != "" {
+				add(t, "kernel alias "+a)
+			}
+		}
+		notes = append(notes, "the kernel's own default model and live alias table (aliases above come from this doctor binary; --live reads the running kernel's /v1/models)")
+	}
+	if len(unrouted) > 0 {
+		sort.Strings(unrouted)
+		notes = append(notes, "not kernel-routed, not probed: "+strings.Join(unrouted, ", "))
 	}
 	out := make([]probeModel, 0, len(order))
 	for _, m := range order {
 		out = append(out, *m)
 	}
-	notes = append(notes, "the kernel's own default model and live alias table (aliases above come from this doctor binary)")
 	return out, notes
 }
 
-// roomModelsFromJSON extracts every model a stage rooms.json selects, in
-// document order and without duplicates: prefs.model, prefs.model_catalog_choice
-// and model_id values ("custom:cogos:" prefix stripped). Short aliases
-// (sonnet/opus/haiku, any kernel alias) map to their intentAliases target.
-func roomModelsFromJSON(data []byte) []string {
+// roomModelsFromJSON extracts the models a stage rooms.json CURRENTLY selects,
+// in document order and without duplicates: rooms[].prefs.model and
+// prefs.model_catalog_choice ("custom:cogos:" prefix stripped). Board and
+// work_queue history is ignored. Short aliases (sonnet/opus/haiku, any kernel
+// alias) map to their intentAliases target. Ids that run outside the kernel
+// (opencode/*, opencode's own free tier) are returned apart in outside.
+func roomModelsFromJSON(data []byte) (models, outside []string) {
 	var doc any
 	if json.Unmarshal(data, &doc) != nil {
-		return nil
+		return nil, nil
 	}
 	seen := map[string]bool{}
-	var out []string
 	emit := func(v any) {
 		id, ok := v.(string)
 		if !ok {
@@ -130,10 +196,15 @@ func roomModelsFromJSON(data []byte) []string {
 		if t := intentAliases[id].ModelOverride; t != "" {
 			id = t
 		}
-		if id != "" && !seen[id] {
-			seen[id] = true
-			out = append(out, id)
+		if id == "" || seen[id] {
+			return
 		}
+		seen[id] = true
+		if strings.HasPrefix(id, "opencode/") {
+			outside = append(outside, id)
+			return
+		}
+		models = append(models, id)
 	}
 	var walk func(v any, parent string)
 	walk = func(v any, parent string) {
@@ -145,8 +216,10 @@ func roomModelsFromJSON(data []byte) []string {
 			}
 			sort.Strings(keys)
 			for _, k := range keys {
-				switch {
-				case k == "model" && parent == "prefs", k == "model_catalog_choice", k == "model_id":
+				if k == "board" || k == "work_queue" {
+					continue // task history, not configuration
+				}
+				if parent == "prefs" && (k == "model" || k == "model_catalog_choice") {
 					emit(x[k])
 				}
 				walk(x[k], k)
@@ -158,12 +231,49 @@ func roomModelsFromJSON(data []byte) []string {
 		}
 	}
 	walk(doc, "")
-	return out
+	return models, outside
+}
+
+// kernelCatalogIDs fetches the ids the running kernel advertises at
+// GET /v1/models (nil when unreachable or unparsable).
+func kernelCatalogIDs(endpoint string) []string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(endpoint, "/")+"/v1/models", nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	body, _ := readLimited(resp.Body, 4<<20)
+	if resp.StatusCode/100 != 2 {
+		return nil
+	}
+	var l aliasCatalogEntryList
+	if json.Unmarshal(body, &l) != nil || len(l.Data) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(l.Data))
+	for _, m := range l.Data {
+		ids = append(ids, m.ID)
+	}
+	return ids
 }
 
 func doctorModelProbes(g *DoctorGroup, root string, opts DoctorOptions) {
 	const name = "model probe"
-	models, notes := configuredProbeModels(opts)
+	var catalog []string
+	if opts.Live && !opts.SkipNetwork {
+		ep := opts.kernelEndpoint
+		if ep == "" {
+			ep = kernelEndpointForDoctor(root)
+		}
+		catalog = kernelCatalogIDs(ep)
+	}
+	models, notes := configuredProbeModels(root, opts, catalog)
 	unscanned := ""
 	if len(notes) > 0 {
 		unscanned = " Not scanned: " + strings.Join(notes, "; ") + "."
@@ -247,6 +357,9 @@ func probeOneModel(endpoint, token, model string) (DoctorStatus, string) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return StatusUnknown, fmt.Sprintf("no answer from %s within %s; the kernel or its upstream provider may be hung (not a refusal)", endpoint, modelProbeTimeout)
+		}
 		return StatusUnknown, fmt.Sprintf("kernel unreachable at %s: %v", endpoint, err)
 	}
 	defer resp.Body.Close()

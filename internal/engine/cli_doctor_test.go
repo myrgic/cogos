@@ -105,6 +105,7 @@ func findCheck(t *testing.T, report *DoctorReport, group, name string) *DoctorCh
 // test: a sentinel term derived from an indexed document must return >=1 hit
 // through the real search path, and the check must report OK.
 func TestNegativeControlPassesOnHealthyIndex(t *testing.T) {
+	isolateDoctorHome(t)
 	root := buildFixtureWorkspace(t)
 	report := RunDoctor(root, DoctorOptions{SkipNetwork: true})
 
@@ -118,6 +119,7 @@ func TestNegativeControlPassesOnHealthyIndex(t *testing.T) {
 // discipline: an empty documents table cannot produce a trustworthy sentinel,
 // so the check must be UNKNOWN, never OK, and never silently pass.
 func TestNegativeControlNeverReportsOKOnEmptyDB(t *testing.T) {
+	isolateDoctorHome(t)
 	root := t.TempDir()
 	c, err := constellation.Open(root) // creates an empty, schema-only db
 	if err != nil {
@@ -184,6 +186,7 @@ func TestDoctorAgainstNonexistentWorkspaceNeverReportsOK(t *testing.T) {
 // against the .cog/hooks fixture tree that has files on disk but zero FTS
 // rows — the exact shape of Finding 5 in the issue.
 func TestDocsVsFilesFlagsUnindexedTree(t *testing.T) {
+	isolateDoctorHome(t)
 	root := buildFixtureWorkspace(t)
 	report := RunDoctor(root, DoctorOptions{SkipNetwork: true})
 
@@ -210,6 +213,7 @@ func TestDocsVsFilesFlagsUnindexedTree(t *testing.T) {
 // exactly the failure shape a symlinked workspace mount, NFS home, or macOS
 // /tmp hits in production.
 func TestDocsVsFilesCountsCorrectlyThroughSymlinkedRoot(t *testing.T) {
+	isolateDoctorHome(t)
 	root := t.TempDir() // intentionally NOT resolved -- see comment above
 
 	writeCogdoc(t, root, ".cog/mem/semantic/sentinel.cog.md", "Sentinel", "content")
@@ -309,6 +313,7 @@ func TestLikeEscapeCharDoesNotCollideWithBackslashSeparator(t *testing.T) {
 // characters (".cog/adr" matches ".cog/adr-legacy/..."), merging their
 // document counts and masking a genuinely unindexed tree.
 func TestDocsVsFilesDoesNotMergeSiblingPrefixSubtrees(t *testing.T) {
+	isolateDoctorHome(t)
 	root := t.TempDir()
 	// t.TempDir() on macOS resolves under a /var/folders symlink to
 	// /private/var/folders; the indexer resolves .cog/'s walk root via
@@ -375,6 +380,7 @@ func TestDocsVsFilesDoesNotMergeSiblingPrefixSubtrees(t *testing.T) {
 // subtree (.cog/adr here) after the last reindex must still surface as a
 // freshness gap, not silently OK because .cog/mem itself looks fine.
 func TestIndexFreshnessCatchesStaleNonMemSubtree(t *testing.T) {
+	isolateDoctorHome(t)
 	root := t.TempDir()
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -421,6 +427,7 @@ func TestIndexFreshnessCatchesStaleNonMemSubtree(t *testing.T) {
 // TestStoreLivenessFlagsDeadStore verifies a SQLite store whose mtime is
 // older than the stale threshold is flagged WARN/DEAD, and a fresh one is OK.
 func TestStoreLivenessFlagsDeadStore(t *testing.T) {
+	isolateDoctorHome(t)
 	root := buildFixtureWorkspace(t) // already has a fresh constellation.db
 
 	deadPath := filepath.Join(root, ".cog", ".state", "old_events.db")
@@ -448,6 +455,7 @@ func TestStoreLivenessFlagsDeadStore(t *testing.T) {
 // established (corrupt file here; permission-denied is the same code path)
 // must never render OK, even though its last-write age looks fresh.
 func TestStoreLivenessReportsUnknownOnUnreadableStore(t *testing.T) {
+	isolateDoctorHome(t)
 	root := buildFixtureWorkspace(t)
 
 	corruptPath := filepath.Join(root, ".cog", ".state", "corrupt.db")
@@ -554,6 +562,7 @@ func TestExpandHome(t *testing.T) {
 // detected without requiring an explicit --scan-dir, because it is the
 // doctor target workspace itself, not an arbitrary extra location.
 func TestBinarySprawlScansWorkspaceRootAndDotCog(t *testing.T) {
+	isolateDoctorHome(t)
 	root := t.TempDir()
 	dotCog := filepath.Join(root, ".cog")
 	if err := os.MkdirAll(dotCog, 0755); err != nil {
@@ -583,6 +592,7 @@ func TestBinarySprawlScansWorkspaceRootAndDotCog(t *testing.T) {
 // "cog.md" or an executable named "cogfield" must not be reported as a
 // stray cogos/cog binary.
 func TestBinarySprawlIgnoresNonExecutableAndUnrelatedFiles(t *testing.T) {
+	isolateDoctorHome(t)
 	root := t.TempDir()
 	dotCog := filepath.Join(root, ".cog")
 	if err := os.MkdirAll(dotCog, 0755); err != nil {
@@ -638,6 +648,7 @@ func TestPathLikeRegexIgnoresURLsAndModelIDs(t *testing.T) {
 // binaries must produce a WARN naming both; a single shared binary must
 // produce OK.
 func TestMCPConfigsPointAtOneBinaryDetectsDrift(t *testing.T) {
+	isolateDoctorHome(t)
 	root := t.TempDir()
 	binA := filepath.Join(root, "bin-a", "cogos")
 	binB := filepath.Join(root, "bin-b", "cogos")
@@ -984,6 +995,7 @@ func corruptByteAtOffset(t *testing.T, path string, off int64, n int) {
 // that this never happens unless Deep is explicitly requested (deep off by
 // default: no "quick check:" entry appears at all).
 func TestDeepQuickCheckPassesOnHealthyStore(t *testing.T) {
+	isolateDoctorHome(t)
 	root := t.TempDir()
 	dbDir := filepath.Join(root, ".cog", ".state")
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
@@ -1011,6 +1023,7 @@ func TestDeepQuickCheckPassesOnHealthyStore(t *testing.T) {
 // system is misbehaving, not merely untidy -- and that this FAIL flips the
 // default advisory ExitCode() to 1.
 func TestDeepQuickCheckFailsOnCorruptStore(t *testing.T) {
+	isolateDoctorHome(t)
 	root := t.TempDir()
 	dbDir := filepath.Join(root, ".cog", ".state")
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
@@ -1075,6 +1088,7 @@ func findGroup(t *testing.T, report *DoctorReport, name string) *DoctorGroup {
 // preserved by a corruption-safe reindex-replace must be enumerated as WARN
 // so it does not rot silently, unconditionally (no --deep required).
 func TestCorruptFileEnumerationWarns(t *testing.T) {
+	isolateDoctorHome(t)
 	root := t.TempDir()
 	stateDir := filepath.Join(root, ".cog", ".state")
 	if err := os.MkdirAll(stateDir, 0755); err != nil {
@@ -1099,6 +1113,7 @@ func TestCorruptFileEnumerationWarns(t *testing.T) {
 // otherwise-empty .cog tree must report OK, not WARN, so the check is only
 // ever noisy when there is genuinely something to look at.
 func TestCorruptFileEnumerationOKWhenNoneFound(t *testing.T) {
+	isolateDoctorHome(t)
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".cog"), 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -1118,6 +1133,7 @@ func TestCorruptFileEnumerationOKWhenNoneFound(t *testing.T) {
 // though the walk never actually looked inside that subtree. A partial walk
 // must report UNKNOWN, naming the unreadable path, never OK.
 func TestCorruptFileEnumerationUnknownOnUnreadableSubdir(t *testing.T) {
+	isolateDoctorHome(t)
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: permission bits are not enforced, cannot fixture an unreadable directory")
 	}
@@ -1786,4 +1802,11 @@ func TestDeadHookCommandsOKWhenPathExists(t *testing.T) {
 	if check.Status != StatusOK {
 		t.Fatalf("hook referencing an existing script = %s, want OK; detail=%s", check.Status, check.Detail)
 	}
+}
+
+// isolateDoctorHome points HOME at a temp dir so a RunDoctor test never reads
+// the operator's real ~/.hermes profiles, LaunchAgents, stage state or vault.
+func isolateDoctorHome(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
 }

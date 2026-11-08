@@ -22,6 +22,7 @@ secrets:
     override_existing: %s
 model:
   default: claude-opus-5-5
+  provider: cogos
 `
 
 // writeHermesProfile writes a profile whose secrets helper is a fake script

@@ -69,13 +69,16 @@ func discoverKernelPATHLinux(root string, opts DoctorOptions, h doctorHost) kern
 	}
 	pids := procListenerPIDs(h.procRoot, port)
 	if len(pids) == 0 {
+		// The listener may run as another user (its fds are unreadable here):
+		// the unit file still declares the PATH the service gets.
+		const conventionalUnit = "cogos-kernel.service"
+		if p, file := systemdUnitPATH(h.home, conventionalUnit); file != "" {
+			return kernelPathInfo{PATH: p, Found: true, Source: fmt.Sprintf("Environment= in %s (unit %s; no listener pid visible on :%d, so the running process was not inspected)", file, conventionalUnit, port)}
+		}
 		return kernelPathInfo{Source: fmt.Sprintf("no process visible listening on :%d (kernel not running, or its fds are unreadable by this user)", port)}
 	}
 	pid := pids[0]
-	var start time.Time
-	if st, serr := os.Stat(filepath.Join(h.procRoot, strconv.Itoa(pid))); serr == nil {
-		start = st.ModTime() // /proc/<pid> is created at process start
-	}
+	start := procStartTime(h.procRoot, pid)
 	env, err := procEnviron(h.procRoot, pid)
 	if err == nil {
 		if p, ok := env["PATH"]; ok {
@@ -91,6 +94,44 @@ func discoverKernelPATHLinux(root string, opts DoctorOptions, h doctorHost) kern
 		}
 	}
 	return kernelPathInfo{Source: fmt.Sprintf("/proc/%d/environ unreadable (%v) and no PATH in unit file", pid, err)}
+}
+
+// procStartTime returns when pid started: btime (/proc/stat) plus field 22
+// of /proc/<pid>/stat (starttime, in clock ticks of 1/100 s). The mtime of the
+// /proc/<pid> directory is NOT used: it is the inode creation time, observed
+// ~20 s after the real start. Zero when unreadable.
+func procStartTime(procRoot string, pid int) time.Time {
+	const clkTck = 100 // USER_HZ is 100 on every Linux ABI Go supports
+	stat, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return time.Time{}
+	}
+	i := strings.LastIndexByte(string(stat), ')') // comm may contain spaces and parens
+	if i < 0 {
+		return time.Time{}
+	}
+	f := strings.Fields(string(stat)[i+1:]) // f[0] is field 3 (state)
+	if len(f) < 20 {
+		return time.Time{}
+	}
+	ticks, err := strconv.ParseInt(f[19], 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	all, err := os.ReadFile(filepath.Join(procRoot, "stat"))
+	if err != nil {
+		return time.Time{}
+	}
+	for _, line := range strings.Split(string(all), "\n") {
+		if rest, ok := strings.CutPrefix(line, "btime "); ok {
+			bt, err := strconv.ParseInt(strings.TrimSpace(rest), 10, 64)
+			if err != nil {
+				return time.Time{}
+			}
+			return time.Unix(bt, (ticks%clkTck)*int64(time.Second/clkTck)).Add(time.Duration(ticks/clkTck) * time.Second)
+		}
+	}
+	return time.Time{}
 }
 
 var systemdEnvPathRE = regexp.MustCompile(`(?:^|\s)"?PATH=([^"\s]+)"?`)

@@ -26,6 +26,10 @@ func TestDoctorModelProbes_LiveReportsPerModelRefusal(t *testing.T) {
 	var seen []string
 	var auth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet { // catalog unavailable: compiled alias table is used
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		var req struct {
 			Model     string `json:"model"`
 			MaxTokens int    `json:"max_tokens"`

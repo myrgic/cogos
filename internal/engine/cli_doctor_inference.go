@@ -964,7 +964,7 @@ func collectHermesProfileTargetsWith(home string, cache *hermesProfileCache) []e
 		if cogos.APIKey != "" {
 			val, how, unresolved, note := cache.resolve(prof, cogos.APIKey)
 			if how != "literal" {
-				tgt.credRef, tgt.credSource, tgt.credNote = cogos.APIKey, how, note
+				tgt.credRef, tgt.credSource, tgt.credNote = redactKeyRef(cogos.APIKey), how, note
 			}
 			tgt.unresolved = unresolved
 			if len(unresolved) == 0 {
