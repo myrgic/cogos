@@ -319,7 +319,7 @@ func checkArgvContractsOnPath(g *DoctorGroup, contracts []cliArgvContract, kp ke
 					detail += fmt.Sprintf(" This shell finds it at %s. Fix: add %s to the kernel unit/plist PATH and restart the kernel.", callerPaths[0], filepath.Dir(callerPaths[0]))
 					g.add("argv vs CLI: "+c.provider, StatusWarn, detail)
 				} else {
-					g.add("argv vs CLI: "+c.provider, StatusUnknown, detail+" Not on this shell's PATH either.")
+					g.add("argv vs CLI: "+c.provider, StatusWarn, detail+" Not on this shell's PATH either. Fix: install it where the kernel can exec it, or add its directory to the kernel unit/plist PATH.")
 				}
 				continue
 			}
@@ -563,6 +563,10 @@ type externalClientTarget struct {
 	unresolved []string
 	credNote   string
 	profile    string // config path, for the fix pointer
+	// shellOnly is true when the credential came only from the doctor
+	// process's environment, so a bad verdict describes this shell, not the
+	// profile (a service-managed Hermes does not inherit the shell).
+	shellOnly bool
 }
 
 func doctorExternalClientsToKernel(g *DoctorGroup, root string, opts DoctorOptions) {
@@ -660,9 +664,13 @@ func doctorExternalClientsToKernelWithHome(g *DoctorGroup, root string, opts Doc
 
 		if resp.StatusCode == http.StatusUnauthorized {
 			errType := grantErrorType(respBody)
-			g.add(checkName, StatusFail,
-				fmt.Sprintf("kernel auth: %s: HTTP 401 (%s), credential(s) sent: %s%s",
-					redactMCPTarget(t.url), errType, strings.Join(credDesc, ", "), grantProvenanceClause(t, ledger)))
+			st := StatusFail
+			if t.shellOnly {
+				st = StatusWarn // verdict is about this shell's env var, not the client profile
+			}
+			g.add(checkName, st,
+				fmt.Sprintf("kernel auth: %s: HTTP 401 (%s), credential(s) sent: %s%s%s",
+					redactMCPTarget(t.url), errType, strings.Join(credDesc, ", "), grantProvenanceClause(t, ledger), shellOnlyClause(t)))
 			continue
 		}
 		g.add(checkName, StatusOK,
@@ -962,7 +970,15 @@ func collectHermesProfileTargetsWith(home string, cache *hermesProfileCache) []e
 		}
 		headers := map[string]string{}
 		if cogos.APIKey != "" {
-			val, how, unresolved, note := cache.resolve(prof, cogos.APIKey)
+			val, how, unresolved, note, shadowed := cache.resolveX(prof, cogos.APIKey, false)
+			if how == "process env" && shadowed {
+				// The shell shadows a different helper value; probe with the
+				// helper's, as the hygiene check does (the shell is warned about there).
+				if hv, _, hun, hnote, _ := cache.resolveX(prof, cogos.APIKey, true); len(hun) == 0 {
+					val, how, unresolved, note = hv, "secrets.command helper (shell env ignored)", hun, hnote
+				}
+			}
+			tgt.shellOnly = how == "process env"
 			if how != "literal" {
 				tgt.credRef, tgt.credSource, tgt.credNote = redactKeyRef(cogos.APIKey), how, note
 			}
@@ -983,6 +999,15 @@ func helperClause(note string) string {
 		return ", and no secrets.command helper value"
 	}
 	return "; " + note
+}
+
+// shellOnlyClause scopes a verdict to this shell when the credential came only
+// from the doctor process's environment.
+func shellOnlyClause(t externalClientTarget) string {
+	if !t.shellOnly {
+		return ""
+	}
+	return "; this verdict is about the value exported in THIS shell (the profile has no other source); a service-managed Hermes does not inherit it"
 }
 
 // grantProvenanceClause classifies the credential a target sent against the
@@ -1006,7 +1031,7 @@ func grantProvenanceClause(t externalClientTarget, ledger *grantLedgerView) stri
 	clause := fmt.Sprintf("; %s%s", c.describe(), src)
 	switch c.Kind {
 	case grantForeign:
-		clause += fmt.Sprintf(". Fix: point the credential source at THIS node's vault (~/.cog/vault/node-root-grant) in %s; Detail: %s", t.profile, ledger.path)
+		clause += fmt.Sprintf(". Fix: point the credential source at a grant issued by this kernel for the hermes surface in %s; Detail: %s", t.profile, ledger.path)
 	case grantStale:
 		clause += fmt.Sprintf(". Fix: refresh the credential from the vault and restart the client (a parent process may hold the old value); Detail: %s", ledger.path)
 	case grantLive:

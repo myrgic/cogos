@@ -108,8 +108,17 @@ func doctorHermesGrantHygiene(g *DoctorGroup, root string, opts DoctorOptions) {
 					c.describe(), how, p.label(), ledger.path))
 				continue
 			}
+			if how == "process env" {
+				// Only this shell supplies the value: a service-managed Hermes
+				// does not inherit it, so do not fail the profile for it.
+				g.add("hermes grant provenance: "+p.Name, StatusWarn, fmt.Sprintf(
+					"%s; the value comes only from %s exported in THIS shell (no helper or .env source), so this describes the shell, not the service-managed Hermes. "+
+						"Fix: unset it here, or give %s a secrets.command helper that prints a grant issued by this kernel for the hermes surface. Detail: %s",
+					c.describe(), firstVarOf(p), p.label(), ledger.path))
+				continue
+			}
 			g.add("hermes grant provenance: "+p.Name, StatusFail, fmt.Sprintf(
-				"%s; resolved via %s from %s. Fix: make the profile's secrets.command helper print this node's grant (~/.cog/vault/node-root-grant) as %s and set override_existing: true. Detail: %s",
+				"%s; resolved via %s from %s. Fix: make the profile's secrets.command helper print a grant issued by this kernel for the hermes surface as %s and set override_existing: true. Detail: %s",
 				c.describe(), how, p.label(), firstVarOf(p), ledger.path))
 		}
 	}

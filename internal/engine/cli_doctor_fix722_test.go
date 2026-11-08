@@ -154,3 +154,23 @@ func TestHermesHelper_NotRunUnderSkipNetwork(t *testing.T) {
 		t.Fatalf("got:\n%s", allDetail(g))
 	}
 }
+
+func TestConfiguredProbeModels_LocalProbedAndUnprobedAliasesNamed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("STAGE_STATE", "")
+	models, notes := configuredProbeModels(t.TempDir(), DoctorOptions{host: newFakeProc(t).host(home)}, []string{"foreground", "local", "claude", "codex", "ollama", "kernel-agent"})
+	got := map[string]bool{}
+	for _, m := range models {
+		got[m.id] = true
+	}
+	if !got["local"] || got["claude"] || got["codex"] {
+		t.Errorf("probe set wrong: %v", got)
+	}
+	n := strings.Join(notes, "|")
+	for _, want := range []string{"claude", "codex", "kernel-agent", "ollama", "not probed"} {
+		if !strings.Contains(n, want) {
+			t.Errorf("coverage line missing %q: %s", want, n)
+		}
+	}
+}

@@ -56,3 +56,22 @@ func TestSupervision_SeparateUnitsOKAndNonLinuxUnknown(t *testing.T) {
 		t.Fatalf("got %s", allDetail(g))
 	}
 }
+
+func TestSupervision_KernelInvisibleNonConventionalUnitWarns(t *testing.T) {
+	root := t.TempDir()
+	writeFileMode(t, filepath.Join(root, ".cog", "config", "node", "manifest.yaml"), `apiVersion: cog.os/v1
+kind: NodeManifest
+services:
+  kernel: {port: 6931, command: k, health: /health, restart: always, launchd: cogos.service}
+  stage: {port: 8080, command: s, health: /health, restart: always}
+`, 0o644)
+	fp := newFakeProc(t)
+	// the kernel's listener is not visible; the stage sits inside cogos.service
+	fp.add(101, 1000, "python", nil, "/system.slice/cogos.service", 8080)
+	g := &DoctorGroup{Name: "t"}
+	doctorServiceSupervision(g, root, DoctorOptions{host: fp.host(t.TempDir())})
+	c := groupCheck(g, "service supervision: cogos.service")
+	if c == nil || c.Status != StatusWarn || !strings.Contains(c.Detail, "stage (pid 101)") {
+		t.Fatalf("got %s", allDetail(g))
+	}
+}

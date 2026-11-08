@@ -175,3 +175,91 @@ func TestHermesGrantHygiene_OverrideTrueIsQuietAndForeignProfileGrantFails(t *te
 		t.Errorf("want OK (no holders):\n%s", allDetail(g))
 	}
 }
+
+func envOnly(k, v string) func(string) string {
+	return func(n string) string {
+		if n == k {
+			return v
+		}
+		return ""
+	}
+}
+
+// F2: a shell that shadows the helper's grant must not make the external-client
+// probe FAIL; the probe sends the helper's value like the hygiene check.
+func TestExternalClient_ShellShadowProbesHelperValue(t *testing.T) {
+	const liveTok, staleTok = "live-token-aaaa", "old-token-bbbb"
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		if gotAuth != "Bearer "+liveTok {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"type":"invalid_grant"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeHermesProfile(t, home, srv.URL, liveTok, "false")
+	root := t.TempDir()
+	kernelYAMLFromURL(t, root, srv.URL)
+	writeGrantLedger(t, root, [3]string{"node-root", liveTok, "identity.grant.issued"})
+	opts := DoctorOptions{hermes: &hermesProfileCache{helper: map[string]helperResult{}, getenv: envOnly("COGOS_HERMES_GRANT", staleTok)}}
+	g := &DoctorGroup{Name: "t"}
+	doctorExternalClientsToKernelWithHome(g, root, opts, home)
+	if gotAuth != "Bearer "+liveTok {
+		t.Fatalf("probe sent the shell's value, want the helper's:\n%s", allDetail(g))
+	}
+	for _, c := range g.Checks {
+		if c.Status == StatusFail {
+			t.Fatalf("shell-dependent FAIL:\n%s", allDetail(g))
+		}
+	}
+}
+
+// F2: a value that exists only in this shell yields WARN scoped to the shell.
+func TestExternalClient_ShellOnlyStaleGrantWarns(t *testing.T) {
+	const liveTok, staleTok = "live-token-aaaa", "old-token-bbbb"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"type":"invalid_grant"}}`))
+	}))
+	defer srv.Close()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeFileMode(t, filepath.Join(home, ".hermes", "profiles", "cog", "config.yaml"),
+		"providers:\n  cogos:\n    base_url: "+srv.URL+"/v1\n    api_key: ${env:COGOS_HERMES_GRANT}\n", 0o600)
+	root := t.TempDir()
+	kernelYAMLFromURL(t, root, srv.URL)
+	writeGrantLedger(t, root, [3]string{"node-root", liveTok, "identity.grant.issued"})
+	opts := DoctorOptions{hermes: &hermesProfileCache{helper: map[string]helperResult{}, getenv: envOnly("COGOS_HERMES_GRANT", staleTok)}}
+	g := &DoctorGroup{Name: "t"}
+	doctorExternalClientsToKernelWithHome(g, root, opts, home)
+	c := groupCheck(g, "external client: ~/.hermes")
+	if c == nil || c.Status != StatusWarn || !strings.Contains(c.Detail, "THIS shell") {
+		t.Fatalf("want WARN scoped to this shell:\n%s", allDetail(g))
+	}
+	if strings.Contains(allDetail(g), staleTok) {
+		t.Fatalf("leak")
+	}
+}
+
+// F2: provenance for a shell-only value is WARN, not a profile FAIL.
+func TestHermesGrantHygiene_ShellOnlyValueIsWarnNotFail(t *testing.T) {
+	const liveTok, staleTok = "live-token-aaaa", "old-token-bbbb"
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := t.TempDir()
+	writeGrantLedger(t, root, [3]string{"node-root", liveTok, "identity.grant.issued"})
+	writeFileMode(t, filepath.Join(home, ".hermes", "profiles", "cog", "config.yaml"),
+		"providers:\n  cogos:\n    base_url: http://127.0.0.1:6931/v1\n    api_key: ${env:COGOS_HERMES_GRANT}\n", 0o600)
+	opts := DoctorOptions{host: newFakeProc(t).host(home), hermes: &hermesProfileCache{helper: map[string]helperResult{}, getenv: envOnly("COGOS_HERMES_GRANT", staleTok)}}
+	g := &DoctorGroup{Name: "t"}
+	doctorHermesGrantHygiene(g, root, opts)
+	c := groupCheck(g, "hermes grant provenance: cog")
+	if c == nil || c.Status != StatusWarn || !strings.Contains(c.Detail, "THIS shell") {
+		t.Fatalf("want WARN scoped to this shell:\n%s", allDetail(g))
+	}
+}

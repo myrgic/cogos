@@ -3184,7 +3184,7 @@
     },
     {
       "file": "internal/engine/cli_doctor_hermesprofile.go",
-      "line": 274,
+      "line": 321,
       "column": 9,
       "func": "runHermesSecretsHelper",
       "subsystem": "internal:engine",
@@ -3204,7 +3204,7 @@
     },
     {
       "file": "internal/engine/cli_doctor_kernelpath.go",
-      "line": 146,
+      "line": 187,
       "column": 20,
       "func": "discoverKernelPATHDarwin",
       "subsystem": "internal:engine",
@@ -3214,9 +3214,9 @@
     },
     {
       "file": "internal/engine/cli_doctor_kernelpath.go",
-      "line": 164,
+      "line": 205,
       "column": 14,
-      "func": "func literal (line 163)",
+      "func": "func literal (line 204)",
       "subsystem": "internal:engine",
       "raw": "exec.Command(\"launchctl\", \"list\", label)",
       "dir": "",
@@ -3224,9 +3224,9 @@
     },
     {
       "file": "internal/engine/cli_doctor_kernelpath.go",
-      "line": 172,
+      "line": 213,
       "column": 17,
-      "func": "func literal (line 163)",
+      "func": "func literal (line 204)",
       "subsystem": "internal:engine",
       "raw": "exec.Command(\"ps\", \"-o\", \"lstart=\", \"-p\", string(m[1]))",
       "dir": "",

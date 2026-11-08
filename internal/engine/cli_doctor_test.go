@@ -1809,4 +1809,5 @@ func TestDeadHookCommandsOKWhenPathExists(t *testing.T) {
 func isolateDoctorHome(t *testing.T) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("STAGE_STATE", "") // stageEnvFiles must not read the developer's real stage state
 }

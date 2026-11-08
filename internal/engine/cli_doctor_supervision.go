@@ -91,9 +91,25 @@ func doctorServiceSupervision(g *DoctorGroup, root string, opts DoctorOptions) {
 	// listener is invisible and the pairwise test above cannot fire. A service
 	// found inside the unit conventionally named for ANOTHER declared service
 	// (cogos-<name>.service) is the same trap.
+	// expectedUnits lists the units a declared service is expected to run in:
+	// the manifest's per-service unit field when it names a .service, plus the
+	// cogos-<name>.service convention.
+	expectedUnit := func(svc string) []string {
+		us := []string{"cogos-" + svc + ".service"}
+		if l := strings.TrimSpace(m.Services[svc].Launchd); strings.HasSuffix(l, ".service") {
+			us = append(us, l)
+		}
+		return us
+	}
 	for _, f := range found {
 		for _, other := range allNames {
-			if other == f.svc || f.unit != "cogos-"+other+".service" {
+			match := false
+			for _, u := range expectedUnit(other) {
+				if f.unit == u {
+					match = true
+				}
+			}
+			if other == f.svc || !match {
 				continue
 			}
 			if len(byUnit[f.unit]) >= 2 {

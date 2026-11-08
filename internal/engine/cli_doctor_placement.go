@@ -243,6 +243,9 @@ func doctorPlacementDependencies(g *DoctorGroup, root string, opts DoctorOptions
 			pn = append(pn, n)
 		}
 		sort.Strings(pn)
+		if h := hostOfSetting(p.ModelBaseURL); h != "" {
+			refs = append(refs, endpointRef{fmt.Sprintf("model.base_url in %s", p.label()), h})
+		}
 		for _, n := range pn {
 			if h := hostOfSetting(p.Providers[n].BaseURL); h != "" {
 				refs = append(refs, endpointRef{fmt.Sprintf("providers.%s.base_url in %s", n, p.label()), h})
@@ -267,7 +270,7 @@ func doctorPlacementDependencies(g *DoctorGroup, root string, opts DoctorOptions
 			r.host, node, strings.Join(pl.AlwaysOn, ", "), node, pf))
 	}
 	if flagged == 0 {
-		g.add(name, StatusOK, fmt.Sprintf("%d non-loopback endpoint setting(s) scanned (providers*.yaml, stage.env, Hermes base_urls); none resolve to a node outside always_on [%s]",
+		g.add(name, StatusOK, fmt.Sprintf("%d non-loopback endpoint setting(s) scanned (providers*.yaml, stage.env, Hermes model/provider base_urls); none resolve to a node outside always_on [%s]",
 			scanned, strings.Join(pl.AlwaysOn, ", ")))
 	}
 }

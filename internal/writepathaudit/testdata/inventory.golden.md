@@ -322,11 +322,11 @@ Total subprocess sites: 94
 | `{opts.Cwd}` | `exec.CommandContext(ctx, bin, args...)` | internal/acp/claudecli.go:99 | internal:acp |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "git", args...)` | internal/coherence/coherence.go:95 | internal:coherence |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(vctx, kernelHit, "--version")` | internal/engine/cli_doctor_claudecode.go:75 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "/bin/sh", "-c", command)` | internal/engine/cli_doctor_hermesprofile.go:274 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "/bin/sh", "-c", command)` | internal/engine/cli_doctor_hermesprofile.go:321 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, binPath, args...)` | internal/engine/cli_doctor_inference.go:339 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("plutil", "-convert", "xml1", "-o", "-", f)` | internal/engine/cli_doctor_kernelpath.go:146 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("launchctl", "list", label)` | internal/engine/cli_doctor_kernelpath.go:164 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("ps", "-o", "lstart=", "-p", string(m[1]))` | internal/engine/cli_doctor_kernelpath.go:172 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("plutil", "-convert", "xml1", "-o", "-", f)` | internal/engine/cli_doctor_kernelpath.go:187 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("launchctl", "list", label)` | internal/engine/cli_doctor_kernelpath.go:205 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("ps", "-o", "lstart=", "-p", string(m[1]))` | internal/engine/cli_doctor_kernelpath.go:213 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("git", "-C", dir, "ls-files", "--error-unmatch", filepath.Base(path))` | internal/engine/cli_doctor_secrets.go:382 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("git", "-C", dir, "check-ignore", "-q", filepath.Base(path))` | internal/engine/cli_doctor_secrets.go:389 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("tasklist", "/FI", "IMAGENAME eq syncthing.exe", "/FO", "CSV", "/NH")` | internal/engine/cli_doctor_syncthing.go:85 | internal:engine |

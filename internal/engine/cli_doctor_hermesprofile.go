@@ -341,8 +341,21 @@ func runHermesSecretsHelper(command string, timeout time.Duration) (map[string]s
 		close(done)
 	}()
 	werr := cmd.Wait()
-	pr.Close() // unblocks the reader even if a grandchild still holds the write end
-	<-done
+	// Let the reader reach EOF first: closing pr right after Wait can discard
+	// output the helper already wrote. Close early only if a stray grandchild
+	// still holds the write end past the grace period (or the deadline hits).
+	grace := time.NewTimer(cmd.WaitDelay)
+	select {
+	case <-done:
+	case <-grace.C:
+		pr.Close()
+		<-done
+	case <-ctx.Done():
+		pr.Close()
+		<-done
+	}
+	grace.Stop()
+	pr.Close()
 	if werr != nil {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("timed out after %s", timeout)

@@ -50,13 +50,18 @@ type probeModel struct {
 func kernelAliasProbeIDs(catalog []string) []string {
 	var out []string
 	for _, id := range catalog {
-		if id == "foreground" || id == "deliberation" || intentAliases[id].ModelOverride != "" {
+		if id == "foreground" || id == "deliberation" || id == "local" || intentAliases[id].ModelOverride != "" {
 			out = append(out, id)
 		}
 	}
 	sort.Strings(out)
 	return out
 }
+
+// unprobedKernelAliases are kernel alias ids with no intentAliases override
+// that have no single concrete model to probe; they are named in the coverage
+// line when the live catalog advertises them.
+var unprobedKernelAliases = []string{"claude", "codex", "kernel-agent", "ollama"}
 
 // hermesModelKernelRouted reports whether profile p's model.default is sent
 // through the kernel at kernelPort: model.provider is cogos, or model.base_url
@@ -150,6 +155,19 @@ func configuredProbeModels(root string, opts DoctorOptions, catalog []string) ([
 		// so its own default and alias table is what gets exercised.
 		for _, a := range kernelAliasProbeIDs(catalog) {
 			add(a, "kernel alias "+a+" (live /v1/models)")
+		}
+		inCatalog := map[string]bool{}
+		for _, id := range catalog {
+			inCatalog[id] = true
+		}
+		var skipped []string
+		for _, a := range unprobedKernelAliases {
+			if inCatalog[a] {
+				skipped = append(skipped, a)
+			}
+		}
+		if len(skipped) > 0 {
+			notes = append(notes, "kernel aliases advertised by /v1/models but not probed (no concrete model to exercise): "+strings.Join(skipped, ", "))
 		}
 	} else {
 		var aliases []string

@@ -12,6 +12,7 @@ func placementFixture(t *testing.T) (root, home string) {
 	t.Helper()
 	root, home = t.TempDir(), t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("STAGE_STATE", "")
 	c := filepath.Join(root, ".cog")
 	writeFileMode(t, filepath.Join(c, "config", "placement.yaml"), "always_on: [server]\n", 0o644)
 	writeFileMode(t, filepath.Join(c, "conf", "registry", "machines", "laptop.yaml"), "hostname: Mac.localdomain\naddress: 192.0.2.10\n", 0o644)
@@ -77,5 +78,17 @@ func TestPlacement_CleanAndUnknown(t *testing.T) {
 	doctorPlacementDependencies(g, t.TempDir(), DoctorOptions{host: newFakeProc(t).host(home)})
 	if g.Checks[0].Status != StatusUnknown {
 		t.Fatalf("got %s", allDetail(g))
+	}
+}
+
+func TestPlacement_FlagsHermesModelBaseURL(t *testing.T) {
+	root, home := placementFixture(t)
+	writeFileMode(t, filepath.Join(home, ".hermes", "profiles", "cog", "config.yaml"),
+		"model:\n  default: m\n  provider: custom\n  base_url: http://192.0.2.10:1234/v1\n", 0o644)
+	g := &DoctorGroup{Name: "t"}
+	doctorPlacementDependencies(g, root, DoctorOptions{host: newFakeProc(t).host(home)})
+	d := allDetail(g)
+	if !strings.Contains(d, "model.base_url") || !strings.Contains(d, `node "laptop"`) {
+		t.Fatalf("model.base_url not flagged:\n%s", d)
 	}
 }
