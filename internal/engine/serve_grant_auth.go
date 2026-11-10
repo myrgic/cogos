@@ -336,6 +336,11 @@ func requiredScopeForRequest(r *http.Request) string {
 		return ScopeAdmin
 	}
 
+	// Internal OAuth routes (serve_oauth.go): consent, introspect, admin.
+	if isOAuthInternalPath(path) {
+		return oauthRequiredScope(path)
+	}
+
 	// Share-link store (serve_share_links.go): every method, including reads.
 	if path == shareLinkRoutePrefix || strings.HasPrefix(path, shareLinkRoutePrefix+"/") {
 		return ScopeStageKeys
@@ -668,6 +673,16 @@ func isGrantExemptRequest(r *http.Request) bool {
 	// POST /v1/identity/verify already returned true above; that is the one
 	// deliberate hole and it is method- and path-exact.
 	if isIdentityRoutePath(r.URL.Path) {
+		return false
+	}
+	// The public OAuth AS paths (discovery doc, /oauth/*) authenticate inside
+	// their own handlers (serve_oauth.go): the client has no grant to present.
+	if isOAuthPublicPath(r.URL.Path) {
+		return true
+	}
+	// Internal /v1/oauth/* is gated on every method, GET included (the grant
+	// list must need a grant), like the share-link store below.
+	if isOAuthInternalPath(r.URL.Path) {
 		return false
 	}
 	// The share-link store is gated on every method too.

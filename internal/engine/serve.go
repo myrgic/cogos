@@ -124,6 +124,12 @@ type Server struct {
 	// serve_share_links.go.
 	shareLinks *ShareLinkStore
 
+	// oauth is the ledger-backed OAuth grant/token store (serve_oauth_store.go),
+	// bucket identity-oauth. Separate from identityGrants on purpose: an OAuth
+	// token must never satisfy the :6932 grant gate. Non-nil after NewServer;
+	// the routes that use it are opt-in (oauth.enabled, serve_oauth.go).
+	oauth *OAuthStore
+
 	// runBoard is the ledger-backed kernel run board (run_board.go), served at
 	// /v1/runs. Non-nil after NewServer.
 	runBoard *RunBoardStore
@@ -258,6 +264,12 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 		shareLinks = NewShareLinkStoreWithLedger(cfg.WorkspaceRoot)
 	}
 	s.shareLinks = shareLinks
+	oauthStore, err := RebuildOAuthStoreFromLedger(cfg.WorkspaceRoot)
+	if err != nil {
+		slog.Warn("serve: oauth ledger rebuild failed; starting with an empty oauth store", "err", err)
+		oauthStore = NewOAuthStoreWithLedger(cfg.WorkspaceRoot)
+	}
+	s.oauth = oauthStore
 	// The run board folds from the `runs` ledger bucket; a partial store from
 	// a failed replay is kept (dropping it would hide recorded runs).
 	runBoard, err := RebuildRunBoardStoreFromLedger(cfg.WorkspaceRoot)
@@ -374,6 +386,7 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 	s.registerRunRoutes(mux)
 	s.registerRoomRoutes(mux)
 	s.registerPairingRoutes(mux)
+	s.registerOAuthRoutes(mux)
 
 	// Phase 1B: peer-awareness packet endpoint (READ side of the 4E
 	// ambient-awareness loop; Phase 1A populates channel.<sid>.activity).

@@ -465,6 +465,7 @@ var loopbackOnlyPrefixes = []string{
 	"/v1/kernel-log",
 	"/v1/ledger",
 	"/v1/messages",
+	"/v1/oauth",
 	"/v1/peer-awareness",
 	"/v1/proprioceptive",
 	"/v1/sessions",

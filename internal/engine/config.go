@@ -271,6 +271,10 @@ type Config struct {
 	// StageUI configures the opt-in Stage UI listener (serve_stage_ui.go).
 	// Zero value (empty Addr) means no listener.
 	StageUI StageUIConfig
+
+	// OAuth configures the OAuth Authorization Server surface (serve_oauth.go).
+	// Zero value (Enabled false) registers none of it.
+	OAuth OAuthConfig
 }
 
 // kernelConfigSection holds settings that can appear at the top level or inside v3:.
@@ -327,6 +331,9 @@ type kernelConfigSection struct {
 
 	// StageUI is the optional `stage_ui:` block (serve_stage_ui.go).
 	StageUI *stageUISection `yaml:"stage_ui"`
+
+	// OAuth is the optional `oauth:` block (serve_oauth.go).
+	OAuth *oauthConfigSection `yaml:"oauth"`
 }
 
 // routingConfig holds the optional `routing:` section of kernel.yaml.
@@ -510,6 +517,7 @@ func applyKernelSection(cfg *Config, s kernelConfigSection) {
 		cfg.Mod3URL = s.Mod3URL
 	}
 	applyStageUISection(cfg, s.StageUI)
+	applyOAuthSection(cfg, s.OAuth)
 	if s.MaxToolOutputBytes != 0 {
 		cfg.MaxToolOutputBytes = s.MaxToolOutputBytes
 	}
