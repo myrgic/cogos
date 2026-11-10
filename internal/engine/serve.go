@@ -129,6 +129,11 @@ type Server struct {
 	// token must never satisfy the :6932 grant gate. Non-nil after NewServer;
 	// the routes that use it are opt-in (oauth.enabled, serve_oauth.go).
 	oauth *OAuthStore
+	// oauthAS holds the in-memory authorization-endpoint state (pending
+	// consent requests, CIMD fetcher; serve_oauth_authorize.go). Built lazily
+	// via asState(); oauthASOnce guards that.
+	oauthAS     *oauthASState
+	oauthASOnce sync.Once
 
 	// runBoard is the ledger-backed kernel run board (run_board.go), served at
 	// /v1/runs. Non-nil after NewServer.

@@ -79,11 +79,9 @@ func TestOAuthASMetadata(t *testing.T) {
 func TestOAuthRoutesPlaceholder501(t *testing.T) {
 	_, mux := newOAuthTestServer(true)
 	cases := []struct{ method, path string }{
-		{"GET", "/oauth/authorize"},
-		{"GET", "/oauth/authorize/status/abc"},
+		// K3 filled /oauth/authorize, /oauth/authorize/status/{id} and
+		// /v1/oauth/requests/{id}/approve|deny; see serve_oauth_authorize_test.go.
 		{"POST", "/oauth/token"},
-		{"POST", "/v1/oauth/requests/abc/approve"},
-		{"POST", "/v1/oauth/requests/abc/deny"},
 		{"POST", "/v1/oauth/introspect"},
 		{"GET", "/v1/oauth/grants"},
 		{"POST", "/v1/oauth/grants/abc/revoke"},

@@ -1,8 +1,9 @@
 // serve_oauth.go — the kernel as an OAuth 2.1 Authorization Server for the
 // stage's MCP connector (Phase 3). This file is the plumbing slice (K2): the
 // resolved oauth: settings, the discovery document, and route registration.
-// The authorization and token logic arrive in later slices (K3 /authorize,
-// K4 /token + introspect + revoke); until then their routes answer a clear
+// The authorization endpoint and the consent approve/deny routes are K3
+// (serve_oauth_authorize.go). /token, introspect and the grant list/revoke
+// arrive in K4; until then their routes answer a clear
 // 501 not_implemented rather than 404, so the route table, the grant-gate
 // classification and the manifest are already the final shape.
 //
@@ -185,13 +186,13 @@ func (s *Server) registerOAuthRoutes(mux *http.ServeMux) {
 	s.route(mux, "GET "+oauthWellKnownASPath, s.handleOAuthASMetadata)
 
 	// Public, self-authenticating (K3/K4).
-	s.route(mux, "GET "+oauthAuthorizePath, s.handleOAuthNotImplemented)
-	s.route(mux, "GET "+oauthAuthorizeStatusPath+"{id}", s.handleOAuthNotImplemented)
-	s.route(mux, "POST "+oauthTokenPath, s.handleOAuthNotImplemented)
+	s.route(mux, "GET "+oauthAuthorizePath, s.handleOAuthAuthorize)                    // K3
+	s.route(mux, "GET "+oauthAuthorizeStatusPath+"{id}", s.handleOAuthAuthorizeStatus) // K3
+	s.route(mux, "POST "+oauthTokenPath, s.handleOAuthNotImplemented)                  // K4
 
 	// Internal, grant-gated, never on the public listener (K3/K4).
-	s.route(mux, "POST "+oauthInternalPrefix+"/requests/{id}/approve", s.handleOAuthNotImplemented)
-	s.route(mux, "POST "+oauthInternalPrefix+"/requests/{id}/deny", s.handleOAuthNotImplemented)
+	s.route(mux, "POST "+oauthInternalPrefix+"/requests/{id}/approve", s.handleOAuthRequestApprove) // K3
+	s.route(mux, "POST "+oauthInternalPrefix+"/requests/{id}/deny", s.handleOAuthRequestDeny)       // K3
 	s.route(mux, "POST "+oauthInternalPrefix+"/introspect", s.handleOAuthNotImplemented)
 	s.route(mux, "GET "+oauthInternalPrefix+"/grants", s.handleOAuthNotImplemented)
 	s.route(mux, "POST "+oauthInternalPrefix+"/grants/{id}/revoke", s.handleOAuthNotImplemented)
