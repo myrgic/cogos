@@ -52,6 +52,7 @@ type EventRing struct {
 	buf    []ManagedSessionEvent // ring storage, len <= size
 	start  int                   // index of oldest event in buf
 	seq    uint64                // seq of the newest event (0 = none yet)
+	lastAt time.Time             // time of the newest event (zero = none yet); the driver's activity clock reads it
 	subs   map[chan ManagedSessionEvent]struct{}
 	closed bool
 
@@ -87,6 +88,7 @@ func (r *EventRing) Append(kind string, data any) ManagedSessionEvent {
 	defer r.mu.Unlock()
 	r.seq++
 	ev := ManagedSessionEvent{Seq: r.seq, SessionID: r.sessionID, Time: time.Now().UTC(), Kind: kind, Data: raw}
+	r.lastAt = ev.Time
 	if len(r.buf) < r.size {
 		r.buf = append(r.buf, ev)
 	} else {
@@ -121,6 +123,13 @@ func (r *EventRing) LastSeq() uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.seq
+}
+
+// LastEventAt returns the time of the newest event (zero if none).
+func (r *EventRing) LastEventAt() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastAt
 }
 
 // oldestLocked returns the seq of the oldest retained event (0 if empty).

@@ -32,10 +32,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -46,6 +48,73 @@ type ManagedSessionsConfig struct {
 	// Per-session vars ({profile}) are added at resolution time.
 	Vars           map[string]string       `yaml:"vars,omitempty"`
 	RuntimeClasses map[string]RuntimeClass `yaml:"runtimeClasses,omitempty"`
+	// IdleTimeout is ADR-093 §4's idle_timeout (managed_session_reaper.go): a
+	// Go duration ("1h", "30m"); "" = the default 1h; "0" or "off" = never
+	// reap for idleness (an expired client lease still reaps).
+	IdleTimeout string `yaml:"idleTimeout,omitempty"`
+	// ReapInterval is how often the reaper looks ("" = 1m; at least 1s).
+	ReapInterval string `yaml:"reapInterval,omitempty"`
+	// SessionRetention keeps the journal and record of a session the kernel
+	// no longer holds for this long after their last write ("30d", "720h";
+	// "" = forever, the default). SweepRetention, managed_session_reaper.go.
+	SessionRetention string `yaml:"sessionRetention,omitempty"`
+}
+
+// retention parses SessionRetention: a Go duration or whole days ("30d").
+// "" or anything that does not parse is 0 (keep forever), and a typo is
+// logged: retention is the one setting here that deletes, so it fails safe.
+func (c *ManagedSessionsConfig) retention() time.Duration {
+	if c == nil {
+		return 0
+	}
+	v := strings.TrimSpace(strings.ToLower(c.SessionRetention))
+	if v == "" {
+		return 0
+	}
+	if n, ok := strings.CutSuffix(v, "d"); ok {
+		if days, err := strconv.Atoi(n); err == nil && days > 0 {
+			return time.Duration(days) * 24 * time.Hour
+		}
+	} else if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return d
+	}
+	slog.Error("managedSessions.sessionRetention invalid; keeping session files forever", "value", c.SessionRetention)
+	return 0
+}
+
+// reaperSettings turns the kernel.yaml strings into driver settings (0 = the
+// driver's default, negative idle = off). A value that does not parse keeps
+// the default and is logged: a typo must not switch the backstop off.
+func (c *ManagedSessionsConfig) reaperSettings() (idle, interval time.Duration) {
+	if c == nil {
+		return 0, 0
+	}
+	switch v := strings.TrimSpace(strings.ToLower(c.IdleTimeout)); v {
+	case "":
+	case "0", "off", "never", "none":
+		idle = -1
+	default:
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			slog.Error("managedSessions.idleTimeout invalid; using the default", "value", c.IdleTimeout, "default", DefaultManagedSessionIdleTimeout)
+		} else if d == 0 {
+			idle = -1
+		} else {
+			idle = d
+		}
+	}
+	if v := strings.TrimSpace(c.ReapInterval); v != "" {
+		d, err := time.ParseDuration(v)
+		switch {
+		case err != nil || d <= 0:
+			slog.Error("managedSessions.reapInterval invalid; using the default", "value", c.ReapInterval, "default", DefaultManagedSessionReapInterval)
+		case d < time.Second:
+			interval = time.Second
+		default:
+			interval = d
+		}
+	}
+	return idle, interval
 }
 
 // RuntimeClass is one declared class.

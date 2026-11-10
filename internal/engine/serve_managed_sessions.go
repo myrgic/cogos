@@ -1,11 +1,14 @@
 // serve_managed_sessions.go — ADR-093 §7 HTTP surface + event WebSocket for
 // kernel-managed agent sessions (today: the hermes-acp driver).
 //
-//	GET    /v1/managed-sessions[?room=<r>]         list (optionally one room)
-//	POST   /v1/managed-sessions                    create / fork / load  {driver, class, profile, cwd, room, fork_of, load, mcp_servers}
+//	GET    /v1/managed-sessions[?room=<r>]         list (optionally one room), with idle time, owner/lease and process cost
+//	GET    /v1/managed-sessions/summary            count, by state/owner/class, processes, RSS, reaper settings, recent reaps
+//	POST   /v1/managed-sessions                    create / fork / load  {driver, class, profile, cwd, room, fork_of, load, mcp_servers, owner, lease_ttl_secs}
 //	GET    /v1/managed-sessions/{id}               one session
 //	DELETE /v1/managed-sessions/{id}               detach (idempotent)
-//	POST   /v1/managed-sessions/{id}/resume        attach an on-disk session (session/load; idempotent)
+//	POST   /v1/managed-sessions/{id}/resume        attach an on-disk session (session/load; idempotent)  {cwd, mcp_servers, owner, lease_ttl_secs}
+//	POST   /v1/managed-sessions/{id}/lease         renew / set / clear the client lease  {owner, ttl_secs, clear, active}
+//	POST   /v1/managed-sessions/{id}/detach        stop the process, keep the session resumable (record kept; DELETE forgets it)
 //	POST   /v1/managed-sessions/{id}/prompt        {prompt: "text" | [ACP content blocks]} -> 202 {turn_id}
 //	POST   /v1/managed-sessions/{id}/cancel        session/cancel
 //	POST   /v1/managed-sessions/{id}/mode          {mode_id}
@@ -38,6 +41,9 @@ import (
 func (s *Server) registerManagedSessionRoutes(mux *http.ServeMux) {
 	s.route(mux, "GET /v1/managed-sessions", s.handleManagedSessionList)
 	s.route(mux, "GET /v1/managed-sessions/classes", s.handleManagedSessionClasses)
+	s.route(mux, "GET /v1/managed-sessions/summary", s.handleManagedSessionSummary)
+	s.route(mux, "POST /v1/managed-sessions/{id}/lease", s.handleManagedSessionLease)
+	s.route(mux, "POST /v1/managed-sessions/{id}/detach", s.handleManagedSessionDetach)
 	s.route(mux, "POST /v1/managed-sessions", s.handleManagedSessionCreate)
 	s.route(mux, "GET /v1/managed-sessions/{id}", s.handleManagedSessionGet)
 	s.route(mux, "DELETE /v1/managed-sessions/{id}", s.handleManagedSessionDelete)
@@ -94,7 +100,7 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 func (s *Server) handleManagedSessionList(w http.ResponseWriter, r *http.Request) {
-	sessions := s.managedSessions.List()
+	sessions := s.managedSessions.ListDetailed(r.Context())
 	if allow := managedSessionClassAuthority(r); allow != nil {
 		kept := sessions[:0:0]
 		for _, info := range sessions {
@@ -191,8 +197,57 @@ func (s *Server) handleManagedSessionResume(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) handleManagedSessionGet(w http.ResponseWriter, r *http.Request) {
 	if sess := s.managedSession(w, r); sess != nil {
-		writeJSONResp(w, http.StatusOK, sess.Info())
+		writeJSONResp(w, http.StatusOK, s.managedSessions.InfoDetailed(r.Context(), sess))
 	}
+}
+
+// handleManagedSessionSummary reports what the driver holds and costs. A
+// grant restricted to some runtime classes sees only the counts it could
+// list; everything else is the same read GET /v1/managed-sessions is.
+func (s *Server) handleManagedSessionSummary(w http.ResponseWriter, r *http.Request) {
+	if s.managedSessions == nil {
+		writeJSONResp(w, http.StatusOK, ManagedSessionSummary{ByState: map[string]int{}, ByOwner: map[string]int{}, ByClass: map[string]int{}, RecentReaps: []ReapRecord{}})
+		return
+	}
+	if managedSessionClassAuthority(r) != nil {
+		writeJSONError(w, http.StatusForbidden, "forbidden", "the summary covers every runtime class; a class-scoped grant may list its sessions instead")
+		return
+	}
+	writeJSONResp(w, http.StatusOK, s.managedSessions.Summary(r.Context()))
+}
+
+// handleManagedSessionLease renews the session's lease (no body or {}), sets
+// or moves it ({owner, ttl_secs}), or drops it ({clear: true}). Renewing is
+// not activity: it does not reset the idle clock (managed_session_reaper.go).
+func (s *Server) handleManagedSessionLease(w http.ResponseWriter, r *http.Request) {
+	sess := s.managedSession(w, r)
+	if sess == nil {
+		return
+	}
+	var req struct {
+		Owner   string `json:"owner"`
+		TTLSecs int    `json:"ttl_secs"`
+		Clear   bool   `json:"clear"`
+		Active  bool   `json:"active"` // the owner reports work in the session (a background delegation): activity
+	}
+	if r.ContentLength != 0 && !decodeBody(w, r, &req) {
+		return
+	}
+	if err := sess.RenewLease(req.Owner, time.Duration(req.TTLSecs)*time.Second, req.Clear, req.Active); err != nil {
+		writeManagedSessionError(w, err)
+		return
+	}
+	writeJSONResp(w, http.StatusOK, sess.Info())
+}
+
+// handleManagedSessionDetach is ADR-093 Detach for a client: the process goes,
+// the session stays resumable (its record is kept, unlike DELETE).
+func (s *Server) handleManagedSessionDetach(w http.ResponseWriter, r *http.Request) {
+	if err := s.managedSessions.DetachAuthorized(r.PathValue("id"), managedSessionClassAuthority(r)); err != nil {
+		writeManagedSessionError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleManagedSessionDelete(w http.ResponseWriter, r *http.Request) {
@@ -374,6 +429,9 @@ func (s *Server) handleManagedSessionEvents(w http.ResponseWriter, r *http.Reque
 	}
 	defer c.CloseNow()
 	ctx := c.CloseRead(r.Context()) // the stream is server→client only
+	// Attaching is activity; holding the stream open afterwards is not
+	// (a client keeps one per session for its whole life).
+	sess.touch()
 
 	sub := sess.Events().Subscribe(since, 1024)
 	defer sess.Events().Unsubscribe(sub)

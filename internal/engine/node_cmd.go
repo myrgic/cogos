@@ -108,17 +108,9 @@ func probeService(svc ServiceDef) (health, pid, uptime string) {
 		return "unknown", pid, uptime
 	}
 
-	url := fmt.Sprintf("http://localhost:%d%s", svc.Port, svc.Health)
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(url)
-	if err == nil {
-		resp.Body.Close()
-		if resp.StatusCode == 200 {
-			health = "healthy"
-		} else {
-			health = "degraded"
-		}
-	}
+	// The watcher's own probe and classification (refused = down, a timeout or
+	// non-200 = degraded), so the CLI and /health never disagree about a node.
+	health = probeNodeService(&http.Client{Timeout: DefaultNodeProbeTimeout}, svc, time.Now()).Status
 
 	foundPID := findPIDOnPort(svc.Port)
 	if foundPID != "" {

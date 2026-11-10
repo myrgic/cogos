@@ -8,12 +8,21 @@
 // the built-in default class. A cold resume of such a session may not name a
 // class (it would be a different class than recorded) and runs the default
 // environment, which is what it was created under.
+//
+// The record also keeps the session's resume shape: the profile and cwd it was
+// created with and the last mode and model a client set. The idle reaper
+// (managed_session_reaper.go) frees a session's process, not its conversation,
+// and a cold resume restores what the reap let go of: a request that names no
+// profile runs the recorded one (not whatever the agent's active profile is
+// today), and the recorded mode and model are put back after session/load, as
+// a crash-restart already does (reapplySettings).
 package engine
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -27,6 +36,12 @@ type managedSessionRecord struct {
 	SessionID string    `json:"session_id"`
 	Class     string    `json:"class,omitempty"` // "" = the built-in default class
 	CreatedAt time.Time `json:"created_at"`
+	// Resume shape (see the file comment). Never secrets: mcp_servers are not
+	// kept (they can carry tokens); the resuming client sends its own.
+	Profile string `json:"profile,omitempty"`
+	Cwd     string `json:"cwd,omitempty"`
+	Mode    string `json:"mode,omitempty"`
+	Model   string `json:"model,omitempty"`
 }
 
 // managedSessionRecordPath addresses a record by a hash of the id: the id is
@@ -74,5 +89,32 @@ func (d *HermesACPDriver) saveRecord(rec managedSessionRecord) error {
 func (d *HermesACPDriver) removeRecord(id string) {
 	if d.cfg.RecordDir != "" {
 		_ = os.Remove(d.managedSessionRecordPath(id))
+	}
+}
+
+// sessionRecord is the record a session's current state persists as.
+func (s *HermesACPSession) sessionRecord() managedSessionRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return managedSessionRecord{SessionID: s.id, Class: s.class, CreatedAt: s.createdAt,
+		Profile: s.profile, Cwd: s.cwd, Mode: s.mode, Model: s.model}
+}
+
+// persistSettings rewrites a live session's record after a client changed its
+// mode or model, so a resume after a reap comes back on them. Best effort: the
+// change itself already landed on the agent, and a stale record only costs a
+// resume its settings (the client can set them again). recMu orders the
+// rewrites of one session, each taken from the fields as they are now.
+func (d *HermesACPDriver) persistSettings(s *HermesACPSession) {
+	if d.cfg.RecordDir == "" {
+		return
+	}
+	s.recMu.Lock()
+	defer s.recMu.Unlock()
+	if s.State() != StateLive { // deleted meanwhile: never resurrect a removed record
+		return
+	}
+	if err := d.saveRecord(s.sessionRecord()); err != nil {
+		log.Printf("managed-sessions: persist settings for %s: %v", s.id, err)
 	}
 }

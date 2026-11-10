@@ -77,6 +77,13 @@ type HermesACPOpts struct {
 	// Actor is the person acting, taken from the authenticated grant by the
 	// HTTP layer. json:"-" so a request body can never supply it.
 	Actor string `json:"-"`
+	// Owner and LeaseTTLSecs are the optional client lease (session-eol.md):
+	// Owner labels who holds the session ("stage:room:8a3e29"); a positive
+	// LeaseTTLSecs makes the reaper detach the session once that long passes
+	// with no renewal (POST {id}/lease or any write on the session). On a
+	// resume of a resident session they replace the held lease.
+	Owner        string `json:"owner,omitempty"`
+	LeaseTTLSecs int    `json:"lease_ttl_secs,omitempty"`
 }
 
 // roomIDPattern bounds a managed session's room name.
@@ -124,6 +131,18 @@ type HermesACPDriverConfig struct {
 	// from a successful create) is served before the class is probed again.
 	// Default 60s.
 	ProbeCacheTTL time.Duration
+
+	// IdleTimeout is ADR-093 §4's abandonment bound: Reap detaches a session
+	// with no activity for this long (managed_session_reaper.go). Default 1 h;
+	// negative = never for idleness (an expired lease still reaps).
+	IdleTimeout time.Duration
+	// ReapInterval is how often the serving loop calls Reap. Default 60 s.
+	ReapInterval time.Duration
+	// Retention is how long the per-session files of a session the driver no
+	// longer holds (its journal in JournalDir, its record in RecordDir) are
+	// kept after their last write (SweepRetention). 0 = forever (the default:
+	// the operator turns it on; nothing already on disk is removed unasked).
+	Retention time.Duration
 
 	// now is a test seam for the readiness cache clock; nil = time.Now.
 	now func() time.Time
@@ -175,6 +194,12 @@ func (c *HermesACPDriverConfig) defaults() {
 	if c.ProbeCacheTTL <= 0 {
 		c.ProbeCacheTTL = 60 * time.Second
 	}
+	if c.IdleTimeout == 0 {
+		c.IdleTimeout = DefaultManagedSessionIdleTimeout
+	}
+	if c.ReapInterval <= 0 {
+		c.ReapInterval = DefaultManagedSessionReapInterval
+	}
 }
 
 // HermesACPDriver owns Hermes ACP processes and the sessions inside them.
@@ -189,6 +214,9 @@ type HermesACPDriver struct {
 	classProbeMu       sync.Mutex
 	classProbeCache    map[string]ManagedSessionClassStatus
 	classProbeInflight map[string]*classProbeFlight
+
+	reaps reapLog       // what the reaper detached (managed_session_reaper.go)
+	procs procTreeCache // agent process-tree stats (managed_session_procs.go)
 }
 
 // classProbeFlight is one in-flight class probe. The leader stores res before
@@ -592,6 +620,19 @@ type HermesACPSession struct {
 	turnSeq    atomic.Uint64
 	fwdPending int // forwarded prompts (Redirect) not yet answered or adopted; Prompt refuses (409) until they resolve
 	detached   bool
+
+	// End of life (managed_session_reaper.go). lastActivity is the client
+	// side of the idle clock (the ring's newest event is the agent side);
+	// a lease is held while leaseTTL > 0. reaped is the reason the reaper
+	// took the session ("" = not reaped): once set, every call refuses
+	// with ErrManagedSessionNotFound so the client resumes it.
+	lastActivity time.Time
+	owner        string
+	leaseTTL     time.Duration
+	leaseExpires time.Time
+	reaped       string
+
+	recMu sync.Mutex // orders this session's record rewrites (persistSettings)
 }
 
 type hermesTurn struct {
@@ -625,6 +666,24 @@ type ManagedSessionInfo struct {
 	LastSeq            uint64               `json:"last_seq"`
 	TurnInFlight       string               `json:"turn_in_flight,omitempty"`
 	PendingPermissions []*pendingPermission `json:"pending_permissions"`
+
+	// End of life and cost (session-eol.md). LastActivityAt/IdleSecs are the
+	// reaper's clock; TurnRunning is true while a turn or a forwarded prompt
+	// is running. The process fields describe the agent process this session
+	// runs in (its whole tree: the agent plus its MCP servers); a fork shares
+	// its parent's process, so SharedProcess counts the sessions on it and
+	// the tree's cost is not this session's alone. They are filled by the
+	// list/get handlers (ProcessStats), and are absent when unknown.
+	LastActivityAt time.Time  `json:"last_activity_at"`
+	IdleSecs       int64      `json:"idle_secs"`
+	Owner          string     `json:"owner,omitempty"`
+	LeaseTTLSecs   int64      `json:"lease_ttl_secs,omitempty"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+	TurnRunning    bool       `json:"turn_running"`
+	PID            int        `json:"pid,omitempty"`
+	ProcCount      int        `json:"proc_count,omitempty"`
+	RSSBytes       int64      `json:"rss_bytes,omitempty"`
+	SharedProcess  int        `json:"shared_process,omitempty"`
 }
 
 func (s *HermesACPSession) ID() string         { return s.id }
@@ -681,12 +740,119 @@ func (s *HermesACPSession) Info() ManagedSessionInfo {
 	for _, p := range s.perms {
 		info.PendingPermissions = append(info.PendingPermissions, p)
 	}
+	now := time.Now()
+	last := s.lastActivityLocked()
+	info.LastActivityAt = last.UTC()
+	if idle := now.Sub(last); idle > 0 {
+		info.IdleSecs = int64(idle / time.Second)
+	}
+	info.Owner = s.owner
+	if s.leaseTTL > 0 {
+		info.LeaseTTLSecs = int64(s.leaseTTL / time.Second)
+		exp := s.leaseExpires.UTC()
+		info.LeaseExpiresAt = &exp
+	}
+	info.TurnRunning = s.turn != nil || s.fwdPending > 0
 	return info
+}
+
+// lastActivityLocked is the session's idle clock: the later of the last client
+// activity and the newest event on its ring (agent output, a permission ask, a
+// turn's start or end). Caller holds s.mu; the ring's own lock nests inside it,
+// the order Info already uses.
+func (s *HermesACPSession) lastActivityLocked() time.Time {
+	last := s.lastActivity
+	if s.ring != nil {
+		if at := s.ring.LastEventAt(); at.After(last) {
+			last = at
+		}
+	}
+	if last.IsZero() {
+		last = s.createdAt
+	}
+	return last
+}
+
+// touch records client activity that is not a write: a new event subscription
+// (attach/follow). It resets the idle clock and leaves a lease alone.
+func (s *HermesACPSession) touch() {
+	now := time.Now()
+	s.mu.Lock()
+	s.lastActivity = now
+	s.mu.Unlock()
+}
+
+// noteActivity records a client write on the session (prompt, cancel, mode,
+// model, permission answer, resume): it resets the idle clock and renews a
+// held lease.
+func (s *HermesACPSession) noteActivity() {
+	now := time.Now()
+	s.mu.Lock()
+	s.lastActivity = now
+	if s.leaseTTL > 0 {
+		s.leaseExpires = now.Add(s.leaseTTL)
+	}
+	s.mu.Unlock()
+}
+
+// setLease sets the session's owner (when given) and lease. ttl > 0 holds a
+// lease of that length from now; ttl == 0 renews a held lease at its own
+// length (a no-op without one); clear drops the lease. It is not activity:
+// an owner that renews its leases must not keep an idle session warm.
+func (s *HermesACPSession) setLease(owner string, ttl time.Duration, clear bool) {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if owner != "" {
+		s.owner = owner
+	}
+	switch {
+	case clear:
+		s.leaseTTL, s.leaseExpires = 0, time.Time{}
+	case ttl > 0:
+		s.leaseTTL, s.leaseExpires = ttl, now.Add(ttl)
+	case s.leaseTTL > 0:
+		s.leaseExpires = now.Add(s.leaseTTL)
+	}
+}
+
+// RenewLease is POST /v1/managed-sessions/{id}/lease: renew (or set, or clear)
+// the session's lease. A session the reaper already took is not found.
+//
+// active is the owner reporting that the session is in use even though no
+// call reaches it: work running inside the agent process after the turn ended
+// (a Hermes background delegation). It counts as activity, so it resets the
+// idle clock; a plain renewal does not. An owner sends it only while it can
+// name that work.
+func (s *HermesACPSession) RenewLease(owner string, ttl time.Duration, clear, active bool) error {
+	if ttl < 0 {
+		return fmt.Errorf("%w: ttl_secs must not be negative", ErrInvalidManagedSession)
+	}
+	s.mu.Lock()
+	reaped := s.reaped
+	s.mu.Unlock()
+	if reaped != "" {
+		return fmt.Errorf("%w: session %s was detached (%s); resume it", ErrManagedSessionNotFound, s.id, reaped)
+	}
+	s.setLease(owner, ttl, clear)
+	if active {
+		s.noteActivity()
+	}
+	return nil
 }
 
 func (s *HermesACPSession) live() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.liveLocked()
+}
+
+// liveLocked is live() with s.mu held. A session the reaper took reads as
+// gone, not as a conflict: the client's answer to a 404 is to resume it.
+func (s *HermesACPSession) liveLocked() error {
+	if s.reaped != "" {
+		return fmt.Errorf("%w: session %s was detached (%s); resume it", ErrManagedSessionNotFound, s.id, s.reaped)
+	}
 	if s.state != StateLive {
 		return fmt.Errorf("%w: session %s is %s", ErrSessionNotLive, s.id, s.state)
 	}
@@ -706,10 +872,9 @@ func (s *HermesACPSession) Prompt(content json.RawMessage) (string, error) {
 		blocks, _ = json.Marshal([]map[string]any{{"type": "text", "text": text}})
 	}
 	s.mu.Lock()
-	if s.state != StateLive { // re-check under the lock that registers the turn: it may have changed since live()
-		st := s.state
+	if err := s.liveLocked(); err != nil { // re-check under the lock that registers the turn: it may have changed since live()
 		s.mu.Unlock()
-		return "", fmt.Errorf("%w: session %s is %s", ErrSessionNotLive, s.id, st)
+		return "", err
 	}
 	// A forward not yet answered may still turn out to be a turn of its own (see Redirect): starting one now
 	// would run two on the session and leave the forward untracked.
@@ -719,6 +884,12 @@ func (s *HermesACPSession) Prompt(content json.RawMessage) (string, error) {
 	}
 	turn := &hermesTurn{id: "t" + strconv.FormatUint(s.turnSeq.Add(1), 10), startedAt: time.Now()}
 	s.turn = turn
+	// Registered under the same lock the reaper decides under (reapVerdict):
+	// a session with a turn is never reaped, and one already reaped refused above.
+	s.lastActivity = turn.startedAt
+	if s.leaseTTL > 0 {
+		s.leaseExpires = turn.startedAt.Add(s.leaseTTL)
+	}
 	s.mu.Unlock()
 
 	s.ring.Append(MSEventTurnStart, map[string]any{"turn_id": turn.id, "prompt": blocks})
@@ -820,10 +991,9 @@ func (s *HermesACPSession) Redirect(content json.RawMessage) (string, error) {
 		blocks, _ = json.Marshal([]map[string]any{{"type": "text", "text": text}})
 	}
 	s.mu.Lock()
-	if s.state != StateLive {
-		st := s.state
+	if err := s.liveLocked(); err != nil {
 		s.mu.Unlock()
-		return "", fmt.Errorf("%w: session %s is %s", ErrSessionNotLive, s.id, st)
+		return "", err
 	}
 	turn := s.turn
 	if turn == nil {
@@ -839,6 +1009,10 @@ func (s *HermesACPSession) Redirect(content json.RawMessage) (string, error) {
 		return "", ErrTurnInFlight
 	}
 	s.fwdPending++ // released below, in the same critical section that adopts or resolves the forward
+	s.lastActivity = time.Now()
+	if s.leaseTTL > 0 {
+		s.leaseExpires = s.lastActivity.Add(s.leaseTTL)
+	}
 	s.mu.Unlock()
 	fid := "f" + strconv.FormatUint(s.turnSeq.Add(1), 10)
 	conn := s.proc.currentConn()
@@ -916,6 +1090,7 @@ func (s *HermesACPSession) Cancel() error {
 	if err := s.live(); err != nil {
 		return err
 	}
+	s.noteActivity()
 	s.cancelAllPermissions("turn cancelled")
 	return s.proc.currentConn().Notify("session/cancel", map[string]any{"sessionId": s.id})
 }
@@ -925,12 +1100,14 @@ func (s *HermesACPSession) SetMode(ctx context.Context, modeID string) error {
 	if err := s.live(); err != nil {
 		return err
 	}
+	s.noteActivity()
 	if err := s.proc.currentConn().Call(ctx, "session/set_mode", map[string]any{"sessionId": s.id, "modeId": modeID}, nil); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	s.mode = modeID
 	s.mu.Unlock()
+	s.proc.d.persistSettings(s)
 	return nil
 }
 
@@ -943,12 +1120,14 @@ func (s *HermesACPSession) SetModel(ctx context.Context, modelID string) error {
 	if err := s.live(); err != nil {
 		return err
 	}
+	s.noteActivity()
 	if err := callSetModel(ctx, s.proc.currentConn(), s.id, modelID); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	s.model = modelID
 	s.mu.Unlock()
+	s.proc.d.persistSettings(s)
 	return nil
 }
 
@@ -1031,6 +1210,7 @@ func (s *HermesACPSession) ResolvePermission(requestID, optionID string) error {
 	if pp == nil {
 		return ErrPermissionNotFound
 	}
+	s.noteActivity()
 	outcome := "selected"
 	if optionID == "" {
 		outcome = "cancelled"
@@ -1065,6 +1245,9 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 	if opts.Room != "" && !validRoomID(opts.Room) {
 		return nil, fmt.Errorf("%w: room must match %s", ErrInvalidManagedSession, roomIDPattern)
 	}
+	if opts.LeaseTTLSecs < 0 {
+		return nil, fmt.Errorf("%w: lease_ttl_secs must not be negative", ErrInvalidManagedSession)
+	}
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
@@ -1080,8 +1263,11 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 	}
 	if opts.Load == "" {
 		d.mu.Unlock()
-		return d.create(ctx, opts, parent)
+		return d.create(ctx, opts, parent, nil)
 	}
+	// resume is the durable record of a cold load (the id is not resident):
+	// its recorded mode and model are put back once the load succeeds.
+	var resume *managedSessionRecord
 	// Decided under d.mu so two resumes of one id cannot both start a
 	// process. Live: return it. Starting: the driver's own crash-restart is
 	// in flight; return it too (the caller sees state=starting and tails
@@ -1096,6 +1282,12 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 			// request that names a class other than the session's own.
 			if opts.Class != "" && opts.Class != existing.class {
 				return nil, fmt.Errorf("%w: a resume cannot change a session's class", ErrManagedSessionForbidden)
+			}
+			// An attach is a client using the session: it resets the idle
+			// clock, renews a held lease, and may set (or move) the lease.
+			existing.noteActivity()
+			if opts.Owner != "" || opts.LeaseTTLSecs > 0 {
+				existing.setLease(opts.Owner, time.Duration(opts.LeaseTTLSecs)*time.Second, false)
 			}
 			return existing, nil
 		}
@@ -1112,6 +1304,15 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 			return nil, fmt.Errorf("%w: a resume cannot change a session's class", ErrManagedSessionForbidden)
 		}
 		opts.Class = existing.class
+		// Same resume shape as a cold load, from the registered session.
+		rec := existing.sessionRecord()
+		if opts.Class == "" && opts.Profile == "" {
+			opts.Profile = rec.Profile
+		}
+		if opts.Cwd == "" {
+			opts.Cwd = rec.Cwd
+		}
+		resume = &rec
 	}
 	if d.sessions[opts.Load] == nil && d.loads[opts.Load] == nil {
 		// Cold load: the id is not resident (kernel restart). The recorded
@@ -1134,6 +1335,17 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 			return nil, fmt.Errorf("%w: a resume cannot change a session's class", ErrManagedSessionForbidden)
 		}
 		opts.Class = rec.Class
+		// The recorded creation shape fills what the request left out: a
+		// default-class session comes back under the profile it was created
+		// with (a class owns its profile, so a classed one never takes it
+		// from here), in its cwd.
+		if opts.Class == "" && opts.Profile == "" {
+			opts.Profile = rec.Profile
+		}
+		if opts.Cwd == "" {
+			opts.Cwd = rec.Cwd
+		}
+		resume = &rec
 	}
 	if claim := d.loads[opts.Load]; claim != nil { // a load of this id is in flight: share it
 		d.mu.Unlock()
@@ -1157,7 +1369,7 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 	d.loads[opts.Load] = claim
 	d.mu.Unlock()
 
-	claim.sess, claim.err = d.create(ctx, opts, parent)
+	claim.sess, claim.err = d.create(ctx, opts, parent, resume)
 
 	d.mu.Lock()
 	delete(d.loads, opts.Load)
@@ -1174,8 +1386,9 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 }
 
 // create does the spawning for Create; callers have already resolved the
-// fork parent and (for loads) claimed the id.
-func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent *HermesACPSession) (*HermesACPSession, error) {
+// fork parent and (for loads) claimed the id. resume, for a load, is the
+// session's recorded shape: its mode and model are put back after the load.
+func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent *HermesACPSession, resume *managedSessionRecord) (*HermesACPSession, error) {
 	mcp := opts.McpServers
 	if mcp == nil {
 		mcp = []json.RawMessage{}
@@ -1284,6 +1497,10 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		proc: proc, permTO: d.cfg.PermissionTimeout, mcp: opts.McpServers, state: StateStarting,
 		perms: map[string]*pendingPermission{},
 	}
+	sess.lastActivity = sess.createdAt
+	if opts.Owner != "" || opts.LeaseTTLSecs > 0 {
+		sess.setLease(opts.Owner, time.Duration(opts.LeaseTTLSecs)*time.Second, false)
+	}
 	switch {
 	case parent != nil:
 		var r struct {
@@ -1300,13 +1517,37 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		if hook := d.cfg.afterRingCreate; hook != nil {
 			hook(sess.ring)
 		}
-		if j := newSessionJournalForSession(sess, d.cfg.JournalDir); j != nil {
+		// session/load replays the whole conversation as session/update
+		// events. A session the kernel has never journaled gets that replay
+		// as the start of its record; one it already has (the usual case once
+		// idle sessions are reaped and resumed, session-eol.md) would get a
+		// full copy of its history appended on every resume, so its journal
+		// attaches after the load and records only what happens from here.
+		j := newSessionJournalForSession(sess, d.cfg.JournalDir)
+		if j != nil && !j.HasRecord() {
 			sess.ring.SetJournal(j)
+			j = nil
 		}
 		proc.mu.Lock()
 		proc.sessions[sid] = sess
 		proc.mu.Unlock()
 		err = proc.currentConn().Call(cctx, "session/load", map[string]any{"sessionId": sid, "cwd": opts.Cwd, "mcpServers": mcp}, nil)
+		if j != nil {
+			if err == nil {
+				sess.ring.SetJournal(j)
+			} else {
+				j.Close()
+			}
+		}
+		if err == nil && resume != nil && (resume.Mode != "" || resume.Model != "") {
+			// session/load rebuilds the session on the agent's defaults: put
+			// back the mode and model it had when it was reaped (or crashed),
+			// before anyone can prompt it. Best effort, like a crash-restart.
+			sess.mu.Lock()
+			sess.mode, sess.model = resume.Mode, resume.Model
+			sess.mu.Unlock()
+			sess.reapplySettings(cctx, proc.currentConn())
+		}
 	default:
 		var r struct {
 			SessionID string `json:"sessionId"`
@@ -1356,7 +1597,7 @@ func (d *HermesACPDriver) create(ctx context.Context, opts HermesACPOpts, parent
 		return nil, fmt.Errorf("hermes-acp: create session: agent process exited during session setup")
 	}
 
-	if err := d.saveRecord(managedSessionRecord{SessionID: sid, Class: sess.class, CreatedAt: sess.createdAt}); err != nil && sess.class != "" {
+	if err := d.saveRecord(sess.sessionRecord()); err != nil && sess.class != "" {
 		d.detach(sess)
 		return nil, fmt.Errorf("hermes-acp: persist session class: %w", err)
 	}
@@ -1426,6 +1667,38 @@ func (d *HermesACPDriver) DeleteAuthorized(id string, allow func(class string) b
 	return d.Delete(id)
 }
 
+// DetachAuthorized is ADR-093 §2's Detach for a client (POST {id}/detach):
+// the session's process is let go (stopped once no session runs in it) and
+// the session stays resumable, its durable record kept, unlike Delete. A
+// client that holds a session it is not using right now (an idle room front)
+// detaches it this way; the next resume reloads the conversation with its
+// recorded profile, mode and model. Idempotent: an unknown id is not an error.
+func (d *HermesACPDriver) DetachAuthorized(id string, allow func(class string) bool) error {
+	sess := d.Get(id)
+	if sess == nil {
+		return nil
+	}
+	if allow != nil && !allow(sess.class) {
+		return fmt.Errorf("%w: caller may not detach this session", ErrManagedSessionForbidden)
+	}
+	const why = "detached by client"
+	sess.mu.Lock()
+	if sess.reaped == "" {
+		sess.reaped = why // every later call on it is "not found: resume it"
+	}
+	sess.mu.Unlock()
+	d.mu.Lock()
+	if d.sessions[id] == sess {
+		delete(d.sessions, id)
+	}
+	if claim := d.loads[id]; claim != nil {
+		claim.cancelled = true
+	}
+	d.mu.Unlock()
+	d.detachWith(sess, errors.New(why+"; resume to continue"))
+	return nil
+}
+
 // drop unregisters and detaches a session but keeps its durable record (Close
 // at kernel shutdown must not forget which class a session belongs to).
 func (d *HermesACPDriver) drop(id string) error {
@@ -1445,9 +1718,13 @@ func (d *HermesACPDriver) drop(id string) error {
 
 // detach ends a session that is no longer in (or never made it into) the
 // registry: cancels its turn, leaves its process, and closes its ring.
-func (d *HermesACPDriver) detach(s *HermesACPSession) {
+func (d *HermesACPDriver) detach(s *HermesACPSession) { d.detachWith(s, nil) }
+
+// detachWith is detach with a reason on the final detached state event (the
+// reaper says why it let the session go; nil for a client's DELETE).
+func (d *HermesACPDriver) detachWith(s *HermesACPSession, why error) {
 	if s.State() == StateLive {
-		_ = s.Cancel()
+		_ = s.Cancel() // a reaped session refuses (nothing runs in it to cancel)
 	}
 	p := s.proc
 	p.mu.Lock()
@@ -1456,7 +1733,7 @@ func (d *HermesACPDriver) detach(s *HermesACPSession) {
 	}
 	empty := len(p.sessions) == 0
 	p.mu.Unlock()
-	s.setState(StateDetached, nil)
+	s.setState(StateDetached, why)
 	if empty {
 		p.stop()
 	}
@@ -1688,7 +1965,10 @@ func (d *HermesACPDriver) TurnsInFlight() int {
 	return n
 }
 
-// Close detaches every session and stops every process.
+// Close detaches every session and stops every process, a few at a time:
+// each stop waits up to 3 s for its process to exit, and a kernel holding
+// dozens of sessions (62 on darkstar, 2026-10-24) must not take minutes to
+// shut down.
 func (d *HermesACPDriver) Close() {
 	d.mu.Lock()
 	d.closed = true
@@ -1697,7 +1977,15 @@ func (d *HermesACPDriver) Close() {
 		ids = append(ids, id)
 	}
 	d.mu.Unlock()
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, reapConcurrency)
 	for _, id := range ids {
-		_ = d.drop(id)
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(id string) {
+			defer func() { <-sem; wg.Done() }()
+			_ = d.drop(id)
+		}(id)
 	}
+	wg.Wait()
 }
