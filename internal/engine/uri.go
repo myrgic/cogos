@@ -135,6 +135,15 @@ var projections = map[string]*Projection{
 
 	// ── Hooks ────────────────────────────────────────────────────────────
 	"hooks": {Base: ".cog/hooks/", Pattern: "direct"},
+
+	// ── Registered aliases (URI fix U3) ──────────────────────────────────
+	// cog://memory is the pre-projection name for cog://mem (cogdoc refs).
+	"memory": {Base: ".cog/mem/", Pattern: "direct"},
+	// cog://I/ is the identity card; the path component is ignored.
+	"I": {Base: ".cog/bin/agents/identities/identity_cog_interface.md", Pattern: "singleton"},
+	// cog://architecture and cog://rfc live in the workspace-root architecture tree.
+	"architecture": {ExtBase: "architecture/", Pattern: "direct"},
+	"rfc":          {ExtBase: "architecture/rfcs/", Pattern: "direct"},
 }
 
 // ── Resolution ───────────────────────────────────────────────────────────────

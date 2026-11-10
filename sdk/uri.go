@@ -92,6 +92,12 @@ var Namespaces = map[string]bool{
 	// substrate-addressable records, not hidden name lookups.
 	"voices": true, // cog:voices/* → Voice profile records
 
+	// ── Registered aliases (URI fix U3) ───────────────────────────────────────
+	"memory":       true, // cog://memory/* → alias for cog:mem/*
+	"I":            true, // cog://I/ → Identity card
+	"architecture": true, // cog://architecture/* → architecture/ tree
+	"rfc":          true, // cog://rfc/* → architecture/rfcs/
+
 	// ── Context / signal / thread (SDK-layer namespaces) ──────────────────────
 	"context":   true, // cog:context → 4-tier context assembly
 	"signals":   true, // cog:signals/* → Signal field
