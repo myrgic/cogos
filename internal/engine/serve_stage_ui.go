@@ -180,6 +180,11 @@ type StageUIConfig struct {
 	// grants supplies the identity-grant registry for LocalAuth=enforce. Set
 	// by startStageUI; nil means no grant can verify (the guard fails closed).
 	grants func() *IdentityGrantRegistry
+
+	// oauthPublic supplies the handler for the four public OAuth AS paths
+	// (serve_oauth_public.go). Set by startStageUI; nil (or a nil handler,
+	// when oauth.enabled is off) means those paths are proxied like any other.
+	oauthPublic func() http.Handler
 }
 
 // StageUISupervisorConfig is the resolved stage_ui.supervise block: the command
@@ -411,6 +416,10 @@ func newStageUIHandlerG(c StageUIConfig) (http.Handler, *stageGuard, error) {
 	}
 	owned := c.OwnedPrefixes
 	tally := newStageUITally()
+	var oauthPublic http.Handler
+	if c.oauthPublic != nil {
+		oauthPublic = c.oauthPublic()
+	}
 
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
@@ -457,6 +466,14 @@ func newStageUIHandlerG(c StageUIConfig) (http.Handler, *stageGuard, error) {
 					return
 				}
 			}
+		}
+		// The public OAuth AS paths (K5): answered by the kernel, after the
+		// guard (host/lockout) and before static and the proxy. Exact
+		// allowlist on the raw path; see serve_oauth_public.go. Never the
+		// prefix helper, never /v1/oauth/*.
+		if oauthPublic != nil && isOAuthListenerPath(r.URL.Path) {
+			oauthPublic.ServeHTTP(w, r)
+			return
 		}
 		clean := path.Clean(r.URL.Path)
 		if clean == stageUIStatsPath {
@@ -661,6 +678,7 @@ func (s *Server) startStageUI() {
 		return
 	}
 	c.grants = func() *IdentityGrantRegistry { return s.identityGrants }
+	c.oauthPublic = s.oauthPublicHandler
 	h, g, err := newStageUIHandlerG(c)
 	if err != nil {
 		slog.Error("stage-ui: disabled", "err", err)
