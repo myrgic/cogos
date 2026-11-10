@@ -259,10 +259,12 @@ func (in *OAuthGrantInput) validate() error {
 // OAuthStore is the in-memory, ledger-backed store. Revoked grants (and their
 // tokens) are dropped from memory; the ledger keeps the history.
 type OAuthStore struct {
-	mu            sync.RWMutex
-	grants        map[string]*OAuthGrant
-	tokens        map[string]*OAuthToken // by hash, every kind, rotated refresh included
-	issued        map[string]bool        // grants whose initial pair has been minted
+	mu         sync.RWMutex
+	grants     map[string]*OAuthGrant
+	tokens     map[string]*OAuthToken // by hash, every kind, rotated refresh included
+	tombstones map[string]struct{}    // hashes of tokens dropped with a dead grant (IsToken only)
+	issued     map[string]bool        // grants whose initial pair has been minted
+
 	workspaceRoot string
 	appendEvent   identityGrantAppendFunc
 	now           func() time.Time
@@ -277,6 +279,7 @@ func NewOAuthStoreWithLedger(workspaceRoot string) *OAuthStore {
 	return &OAuthStore{
 		grants:        make(map[string]*OAuthGrant),
 		tokens:        make(map[string]*OAuthToken),
+		tombstones:    make(map[string]struct{}),
 		issued:        make(map[string]bool),
 		workspaceRoot: workspaceRoot,
 		appendEvent:   AppendEvent,
@@ -451,6 +454,28 @@ func (st *OAuthStore) Resolve(token string) (*OAuthTokenInfo, bool) {
 	return st.ResolveHash(sha256Hex(token))
 }
 
+// ResolveRefreshGrant returns the live grant a refresh token belongs to,
+// whether or not that token has already been rotated. It never mutates the
+// store: /token uses it to check client_id before Rotate, so a wrong client
+// cannot burn someone else's refresh token (or trip reuse detection on it).
+func (st *OAuthStore) ResolveRefreshGrant(token string) (*OAuthGrant, bool) {
+	if !strings.HasPrefix(token, OAuthRefreshTokenPrefix) {
+		return nil, false
+	}
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	now := st.now()
+	t, ok := st.tokens[sha256Hex(token)]
+	if !ok || t.Kind != OAuthTokenKindRefresh {
+		return nil, false
+	}
+	g, ok := st.grants[t.GrantID]
+	if !ok || g.expired(now) {
+		return nil, false
+	}
+	return g, true
+}
+
 // ResolveHash is Resolve for a caller that already holds the hash.
 func (st *OAuthStore) ResolveHash(hash string) (*OAuthTokenInfo, bool) {
 	st.mu.RLock()
@@ -467,21 +492,24 @@ func (st *OAuthStore) ResolveHash(hash string) (*OAuthTokenInfo, bool) {
 	return &OAuthTokenInfo{Token: *t, Grant: g}, true
 }
 
-// IsToken reports whether token is a token this store knows (any kind, rotated
-// or not) under a live grant. The grant gate uses it to refuse OAuth tokens
-// presented as kernel credentials, as it does for share links.
+// IsToken reports whether token is a token this store has ever issued (any
+// kind, rotated, or under a grant since revoked). The grant gate uses it to
+// refuse OAuth tokens presented as kernel credentials, as it does for share
+// links. Liveness is deliberately NOT checked: a revoked OAuth token must still
+// get the named refusal, not fall through to a generic invalid_grant that would
+// hide what was presented.
 func (st *OAuthStore) IsToken(token string) bool {
 	if !strings.HasPrefix(token, OAuthAccessTokenPrefix) && !strings.HasPrefix(token, OAuthRefreshTokenPrefix) {
 		return false
 	}
 	st.mu.RLock()
 	defer st.mu.RUnlock()
-	t, ok := st.tokens[sha256Hex(token)]
-	if !ok {
-		return false
+	h := sha256Hex(token)
+	if _, ok := st.tokens[h]; ok {
+		return true
 	}
-	_, live := st.grants[t.GrantID]
-	return live
+	_, dead := st.tombstones[h]
+	return dead
 }
 
 // Revoke ends a grant and, with it, every access and refresh token under it.
@@ -597,13 +625,18 @@ func markRotated(old *OAuthToken, replacedBy string, now time.Time) *OAuthToken 
 	return &c
 }
 
-// dropGrantLocked removes the grant and every token under it.
+// dropGrantLocked removes the grant and every token under it. The dropped token
+// hashes are kept in tombstones (hash only, never the value) so IsToken can
+// still name a revoked OAuth token at the gate instead of degrading to a generic
+// invalid_grant. The ledger already holds the revocation; tombstones are rebuilt
+// on restart from the same events.
 func (st *OAuthStore) dropGrantLocked(grantID string) {
 	delete(st.grants, grantID)
 	delete(st.issued, grantID)
 	for h, t := range st.tokens {
 		if t.GrantID == grantID {
 			delete(st.tokens, h)
+			st.tombstones[h] = struct{}{}
 		}
 	}
 }

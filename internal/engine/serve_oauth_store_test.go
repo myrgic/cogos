@@ -284,8 +284,10 @@ func TestOAuthStore_RevokeKillsEveryChild(t *testing.T) {
 		if _, err := st.Rotate(tok); !errors.Is(err, ErrOAuthInvalidGrant) {
 			t.Errorf("refresh after revoke err = %v", err)
 		}
-		if st.IsToken(tok) {
-			t.Error("IsToken true for a revoked grant's token")
+		// IsToken still names a revoked grant's token (refused by name at the
+		// gate, tombstoned hash only). Resolve/Rotate above are what make it dead.
+		if !st.IsToken(tok) {
+			t.Error("IsToken lost a revoked grant's token: the gate would stop naming it")
 		}
 	}
 	if _, ok := st.Resolve(op.AccessToken); !ok {
