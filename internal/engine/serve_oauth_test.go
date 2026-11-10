@@ -76,11 +76,12 @@ func TestOAuthASMetadata(t *testing.T) {
 	}
 }
 
-func TestOAuthRoutesPlaceholder501(t *testing.T) {
+// K4 replaced the last placeholders: none of these answers 501 any more. They
+// reach their real handlers (unauthenticated here, so the grant gate's 401, or
+// the token endpoint's own 503 with no store), never the placeholder.
+func TestOAuthRoutesK4NoLongerPlaceholders(t *testing.T) {
 	_, mux := newOAuthTestServer(true)
 	cases := []struct{ method, path string }{
-		// K3 filled /oauth/authorize, /oauth/authorize/status/{id} and
-		// /v1/oauth/requests/{id}/approve|deny; see serve_oauth_authorize_test.go.
 		{"POST", "/oauth/token"},
 		{"POST", "/v1/oauth/introspect"},
 		{"GET", "/v1/oauth/grants"},
@@ -89,8 +90,8 @@ func TestOAuthRoutesPlaceholder501(t *testing.T) {
 	for _, c := range cases {
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, httptest.NewRequest(c.method, c.path, nil))
-		if rec.Code != http.StatusNotImplemented {
-			t.Errorf("%s %s = %d, want 501", c.method, c.path, rec.Code)
+		if rec.Code == http.StatusNotImplemented {
+			t.Errorf("%s %s is still a 501 placeholder", c.method, c.path)
 		}
 	}
 }

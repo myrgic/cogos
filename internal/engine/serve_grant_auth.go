@@ -615,6 +615,18 @@ func (s *Server) grantAuthMiddleware(next http.Handler) http.Handler {
 				"a share link cannot act as a grant on this API")
 			return
 		}
+		// An OAuth token (K1 store, identity-oauth bucket) is refused by name
+		// for the same reason: it is the connector's credential, and it must
+		// never satisfy VerifyAny on this API (narrower than the home key, N2/Q7).
+		// The stage's /mcp verifies it by introspection (oauth:introspect), never
+		// by presenting it here. Checked after the share-link refusal and before
+		// VerifyAny, so a live OAuth token gets the named 403 rather than a
+		// generic invalid_grant.
+		if s.oauth != nil && s.oauth.IsToken(token) {
+			writeJSONError(w, http.StatusForbidden, "oauth_token_not_grant",
+				"an OAuth access token cannot act as a grant on this API")
+			return
+		}
 		grant, ok := s.identityGrants.VerifyAny(token)
 		if !ok {
 			writeJSONError(w, http.StatusUnauthorized, "invalid_grant",

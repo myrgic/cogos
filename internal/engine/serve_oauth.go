@@ -188,14 +188,14 @@ func (s *Server) registerOAuthRoutes(mux *http.ServeMux) {
 	// Public, self-authenticating (K3/K4).
 	s.route(mux, "GET "+oauthAuthorizePath, s.handleOAuthAuthorize)                    // K3
 	s.route(mux, "GET "+oauthAuthorizeStatusPath+"{id}", s.handleOAuthAuthorizeStatus) // K3
-	s.route(mux, "POST "+oauthTokenPath, s.handleOAuthNotImplemented)                  // K4
+	s.route(mux, "POST "+oauthTokenPath, s.handleOAuthToken)                           // K4
 
 	// Internal, grant-gated, never on the public listener (K3/K4).
 	s.route(mux, "POST "+oauthInternalPrefix+"/requests/{id}/approve", s.handleOAuthRequestApprove) // K3
 	s.route(mux, "POST "+oauthInternalPrefix+"/requests/{id}/deny", s.handleOAuthRequestDeny)       // K3
-	s.route(mux, "POST "+oauthInternalPrefix+"/introspect", s.handleOAuthNotImplemented)
-	s.route(mux, "GET "+oauthInternalPrefix+"/grants", s.handleOAuthNotImplemented)
-	s.route(mux, "POST "+oauthInternalPrefix+"/grants/{id}/revoke", s.handleOAuthNotImplemented)
+	s.route(mux, "POST "+oauthInternalPrefix+"/introspect", s.handleOAuthIntrospect)                // K4
+	s.route(mux, "GET "+oauthInternalPrefix+"/grants", s.handleOAuthGrantList)                      // K4
+	s.route(mux, "POST "+oauthInternalPrefix+"/grants/{id}/revoke", s.handleOAuthGrantRevoke)       // K4
 }
 
 // handleOAuthASMetadata serves GET /.well-known/oauth-authorization-server.
