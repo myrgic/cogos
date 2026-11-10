@@ -333,7 +333,8 @@ func isProjectionNamespace(s string) bool {
 		"spec", "specs", "status", "canonical", "handoff", "handoffs",
 		"crystal", "role", "roles", "skill", "skills", "agent", "agents",
 		"conf", "config", "ontology", "work", "artifact", "artifacts", "docs",
-		"voices": // cog:voices/* — voice profile records (Primitive 3)
+		"voices",                             // cog:voices/* — voice profile records (Primitive 3)
+		"memory", "I", "architecture", "rfc": // registered aliases (URI fix U3)
 		return true
 	}
 	return false
