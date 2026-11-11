@@ -5,7 +5,7 @@
 // states only).
 //
 // A session's cost is its agent process's whole tree: the agent plus the MCP
-// servers it spawned (on darkstar a Hermes session tree was ~6 processes,
+// servers it spawned (on a busy node a Hermes session tree was ~6 processes,
 // ~146 MB). One `ps -A -o pid=,ppid=,rss=` snapshot serves a whole request and
 // is reused for procStatsTTL, so polling the list or /health does not fork a
 // ps per session or per call. Where ps is unavailable (windows) or fails, the
