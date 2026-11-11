@@ -31,24 +31,40 @@ import (
 var pkgFTSRepairIndexer ConstellationIndexer
 
 // SearchMemory searches the CogDoc corpus using the constellation FTS5 index.
-// Falls back to naive filepath.Walk grep if the constellation DB is unavailable.
+//
+// The grep walk is used ONLY when no constellation DB exists (a fresh
+// workspace that has never been indexed). When the DB exists, an FTS failure
+// is returned as an error — it is never papered over with grep results.
+//
+// That fallback used to run on ANY FTS error, including a query-syntax error
+// produced by our own query builder. The grep path is an unranked walk of the
+// whole memory tree (every hit scores 0, order is filesystem order, and on a
+// large corpus it takes seconds), so a caller received a plausible-looking,
+// unranked result list — or a timeout — and could not tell that the index had
+// never answered. See myrgic/cogos#575.
 func SearchMemory(workspaceRoot, query string, limit int, sector string) (any, error) {
 	dbPath := filepath.Join(workspaceRoot, ".cog", ".state", "constellation.db")
 
-	if _, err := os.Stat(dbPath); err == nil {
+	_, statErr := os.Stat(dbPath)
+	switch {
+	case statErr == nil:
 		results, ftsErr := searchMemoryFTS(dbPath, workspaceRoot, query, limit, sector)
-		if ftsErr == nil {
-			return results, nil
+		if ftsErr != nil {
+			// Corrupt DB, schema mismatch, a binary built without -tags
+			// fts5, or a malformed MATCH expression: all of these are
+			// "the index did not answer", which the caller must see.
+			return nil, fmt.Errorf("memory search: fts query failed: %w", ftsErr)
 		}
-		// FTS failed (e.g. corrupt DB, schema mismatch, or a binary built
-		// without -tags fts5) — fall through to grep, but SAY SO: the grep
-		// path is substring-only, unranked, and returns 0 for any multi-word
-		// query, which is indistinguishable from "no results" to the caller.
-		slog.Warn("memory search: FTS unavailable, falling back to substring grep",
-			"error", ftsErr.Error(), "query", query)
+		return results, nil
+	case os.IsNotExist(statErr):
+		// No index at all: the substring walk is the only option. It
+		// returns only documents that literally contain the query.
+		slog.Warn("memory search: no constellation index, using substring grep",
+			"db", dbPath, "query", query)
+		return searchMemoryGrep(workspaceRoot, query, limit, sector)
+	default:
+		return nil, fmt.Errorf("memory search: stat constellation db: %w", statErr)
 	}
-
-	return searchMemoryGrep(workspaceRoot, query, limit, sector)
 }
 
 // searchMemoryFTSDriftRepair samples up to 100 indexed documents, compares their
@@ -222,7 +238,12 @@ func searchMemoryFTS(dbPath, workspaceRoot, query string, limit int, sector stri
 	// terms default to AND (so multi-word queries stay selective), and a
 	// bare uppercase OR token is honored as the FTS5 OR operator.
 	ftsQuery := buildFTSQuery(query)
-
+	if strings.TrimSpace(ftsQuery) == "" {
+		// Nothing searchable survived sanitising (e.g. the query was just
+		// "OR" or "-"). An empty MATCH is an FTS5 syntax error; the honest
+		// answer is "no document matches", not an error and not filler.
+		return map[string]any{"query": query, "count": 0, "results": []map[string]any(nil)}, nil
+	}
 	// Build SQL with optional sector filter.
 	var (
 		sqlStr string
@@ -235,9 +256,9 @@ func searchMemoryFTS(dbPath, workspaceRoot, query string, limit int, sector stri
 			FROM documents_fts f
 			JOIN documents d ON d.id = f.id
 			WHERE documents_fts MATCH ?
-			  AND d.status != 'deprecated'
+			  AND COALESCE(d.status, '') != 'deprecated'
 			  AND d.sector = ?
-			ORDER BY rank
+			ORDER BY rank, d.path
 			LIMIT ?
 		`
 		args = []any{ftsQuery, sector, limit}
@@ -248,8 +269,8 @@ func searchMemoryFTS(dbPath, workspaceRoot, query string, limit int, sector stri
 			FROM documents_fts f
 			JOIN documents d ON d.id = f.id
 			WHERE documents_fts MATCH ?
-			  AND d.status != 'deprecated'
-			ORDER BY rank
+			  AND COALESCE(d.status, '') != 'deprecated'
+			ORDER BY rank, d.path
 			LIMIT ?
 		`
 		args = []any{ftsQuery, limit}
@@ -316,10 +337,11 @@ type ftsToken struct {
 //   - A bare uppercase OR token between terms is honored as the FTS5 OR
 //     operator, so broadening a search is still possible.
 //   - A lone bare word (no quotes, no OR) is left unquoted, preserving the
-//     original broader single-term token match -- except the literal
-//     (case-sensitive) FTS5 reserved keywords AND/NOT/NEAR, which are
-//     quoted like any other term so a query of exactly "AND" or "NOT"
-//     cannot produce invalid FTS5 syntax (see isFTSReservedBareWord).
+//     original broader single-term token match (and the trailing-'*' prefix
+//     query) -- but only if it is a valid FTS5 bareword (isFTSSafeBareword).
+//     A term with any other character ("serve_compat.go", "v0.16.31",
+//     "foo-bar") or a reserved keyword (AND/NOT/NEAR) is quoted, since
+//     unquoted it is a syntax error or a different query.
 //   - Outside quoted phrases, FTS5 special characters that could produce a
 //     syntax error (leading '-', column-filter ':') are stripped from each
 //     term, and terms are individually double-quoted so stray FTS5 syntax
@@ -358,7 +380,13 @@ func buildFTSQuery(raw string) string {
 		if prevOperand {
 			out = append(out, "AND")
 		}
-		if !t.phrase && operandCount == 1 && !isFTSReservedBareWord(t.text) {
+		if !t.phrase && operandCount == 1 && isFTSSafeBareword(t.text) {
+			// isFTSSafeBareword also rejects any term containing a byte
+			// outside FTS5's bareword alphabet ('.', '-', '+', '/', ...).
+			// Emitting such a term unquoted is a MATCH syntax error
+			// ("serve_compat.go", "v0.16.31") or, worse, a silently
+			// different query ("foo-bar" parses as column "foo" minus
+			// "bar"); see myrgic/cogos#575.
 			// Sole bare term: keep the legacy unquoted, broader token match.
 			// Excludes the literal (case-sensitive) FTS5 reserved keywords
 			// AND/NOT, which are only special unquoted: an unquoted lone
@@ -446,6 +474,37 @@ func sanitizeFTSBareWord(w string) (ftsToken, bool) {
 		return ftsToken{}, false
 	}
 	return ftsToken{text: w}, true
+}
+
+// isFTSSafeBareword reports whether w may be emitted UNQUOTED as the sole
+// term of an FTS5 MATCH expression and mean exactly "match this token".
+//
+// FTS5's bareword alphabet is ASCII letters, digits, '_', 0x1A, and every
+// byte >= 0x80 (https://sqlite.org/fts5.html §3.1). Anything else outside a
+// quoted string is FTS5 syntax: '.' and '+' are syntax errors, '-' is a
+// column-filter/NOT form, '(' ')' '^' '*' are operators. A single trailing '*'
+// on an otherwise safe bareword is allowed, since unquoted `foo*` is the
+// intended FTS5 prefix query and was always honored here. The literal
+// reserved keywords (see isFTSReservedBareWord) are never safe unquoted.
+func isFTSSafeBareword(w string) bool {
+	if isFTSReservedBareWord(w) {
+		return false
+	}
+	w = strings.TrimSuffix(w, "*")
+	if w == "" {
+		return false
+	}
+	for i := 0; i < len(w); i++ {
+		b := w[i]
+		switch {
+		case b >= 0x80, b == '_', b == 0x1A,
+			b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // trimDanglingFTSOperators drops OR tokens that have no operand on both
