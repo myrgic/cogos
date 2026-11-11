@@ -13,7 +13,7 @@ import (
 // memSampleDead are sample links with no file behind them at all; the
 // resolver must not invent a path that exists for them.
 var memSampleResolvable = []struct{ uri, onDisk string }{
-	{"cog://mem/semantic/insights/eclipse-rocm-windows-status", "semantic/insights/eclipse-rocm-windows-status.cog.md"},
+	{"cog://mem/semantic/insights/rocm-windows-status", "semantic/insights/rocm-windows-status.cog.md"},
 	{"cog://mem/semantic/architecture/identity-trust-module", "semantic/architecture/identity-trust-module.cog.md"},
 	{"cog://mem/semantic/insights/multi-head-observer-anticipation.cog.md", "semantic/insights/multi-head-observer-anticipation.cog.md"},
 	{"cog://mem/reflective/2026-06-05-consciousness-as-vestibular-sense-of-temporal-self-alignment", "reflective/2026-06-05-consciousness-as-vestibular-sense-of-temporal-self-alignment.cog.md"},

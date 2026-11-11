@@ -1999,7 +1999,7 @@ func (d *HermesACPDriver) TurnsInFlight() int {
 
 // Close detaches every session and stops every process, a few at a time:
 // each stop waits up to 3 s for its process to exit, and a kernel holding
-// dozens of sessions (62 on darkstar, 2026-10-24) must not take minutes to
+// dozens of sessions (62 on one busy node, 2026-10-24) must not take minutes to
 // shut down.
 func (d *HermesACPDriver) Close() {
 	d.draining.Store(true)
