@@ -559,3 +559,162 @@ func mustJSON(t *testing.T, s string, v any) {
 		t.Fatalf("json: %v: %s", err, s)
 	}
 }
+
+// F1 (K5 follow-up): the read deadline must be armed BEFORE the rate-limit
+// check. An over-limit caller that promises a body and stalls would otherwise
+// pin the connection: net/http drains the unread request body before it writes
+// the 429 header, so with no deadline the 429 never leaves the server.
+func TestOAuthListener_StalledBodyFromRateLimitedIPIsCutOff(t *testing.T) {
+	old := oauthTokenReadTimeout
+	oauthTokenReadTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { oauthTokenReadTimeout = old })
+	env := newK5Env(t, true)
+	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	const ip = "203.0.113.60"
+
+	// A fast request under the limit is unaffected by the early deadline.
+	start := time.Now()
+	if code, body, _ := env.do(t, "POST", oauthTokenPath, ip, form, "grant_type=x"); code == http.StatusTooManyRequests {
+		t.Fatalf("first request limited: %s", body)
+	}
+	if d := time.Since(start); d > oauthTokenReadTimeout {
+		t.Errorf("fast request took %v, longer than the read deadline %v", d, oauthTokenReadTimeout)
+	}
+	// Exhaust the rest of the IP's window.
+	for i := 1; i < oauthTokenIPLimit; i++ {
+		if code, body, _ := env.do(t, "POST", oauthTokenPath, ip, form, "grant_type=x"); code == http.StatusTooManyRequests {
+			t.Fatalf("request %d limited early: %s", i+1, body)
+		}
+	}
+	if code, _, _ := env.do(t, "POST", oauthTokenPath, ip, form, "grant_type=x"); code != http.StatusTooManyRequests {
+		t.Fatalf("setup: ip not rate limited, got %d", code)
+	}
+
+	// Now the over-limit caller sends headers promising a body and stalls.
+	conn, err := net.Dial("tcp", env.listener.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, _ = conn.Write([]byte("POST /oauth/token HTTP/1.1\r\nHost: " + k5PublicHost + "\r\n" +
+		"Cf-Connecting-Ip: " + ip + "\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 100\r\n\r\ngrant_type="))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	start = time.Now()
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("rate-limited stalled request was held open past 5s (deadline %v): %v", oauthTokenReadTimeout, err)
+	}
+	defer resp.Body.Close()
+	t.Logf("rate-limited + stalled body -> %d after %v (read deadline %v)", resp.StatusCode, elapsed.Round(10*time.Millisecond), oauthTokenReadTimeout)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want 429", resp.StatusCode)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("429 delivered after %v, want about the %v deadline", elapsed, oauthTokenReadTimeout)
+	}
+}
+
+// F2 (K5 follow-up): IPv6 callers are bucketed by /64, so one host rotating
+// through its own /64 cannot mint unlimited fresh per-IP buckets and starve the
+// global ceiling. IPv4 stays keyed per full address.
+func TestOAuthPublicLimiter_IPv6KeysOnSlash64(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	mk := func(ipLimit, global int) *oauthPublicLimiter {
+		l := newOAuthPublicLimiter(ipLimit, global, time.Minute, 100)
+		l.now = func() time.Time { return now }
+		return l
+	}
+
+	// Many distinct addresses in one /64 share ONE bucket and exhaust it together.
+	l := mk(3, 1000)
+	same := []string{
+		"2001:db8:1:2::1", "2001:db8:1:2::2", "2001:db8:1:2:aaaa:bbbb:cccc:dddd",
+		"2001:db8:1:2:ffff:ffff:ffff:ffff", "2001:0db8:0001:0002:0000:0000:0000:0003", "2001:DB8:1:2::4",
+	}
+	var allowed int
+	for _, ip := range same {
+		if ok, _ := l.allow(ip); ok {
+			allowed++
+		}
+	}
+	t.Logf("%d addresses in 2001:db8:1:2::/64: %d allowed, %d limited, %d bucket(s) in table", len(same), allowed, len(same)-allowed, len(l.perIP))
+	if allowed != 3 || len(l.perIP) != 1 {
+		t.Errorf("same /64: allowed=%d (want 3) buckets=%d (want 1)", allowed, len(l.perIP))
+	}
+	// Rotating 200 more addresses in the /64 never gets a fresh bucket.
+	for i := 0; i < 200; i++ {
+		if ok, _ := l.allow("2001:db8:1:2:0:0:" + strconv.FormatInt(int64(i), 16) + ":1"); ok {
+			t.Fatalf("rotation %d within the /64 got a fresh allowance", i)
+		}
+	}
+	if len(l.perIP) != 1 {
+		t.Errorf("rotation grew the table to %d", len(l.perIP))
+	}
+	// A different /64 (differs in the 4th hextet), and a v4 address, are independent.
+	if ok, _ := l.allow("2001:db8:1:3::1"); !ok {
+		t.Error("a different /64 shared the exhausted bucket")
+	}
+	if ok, _ := l.allow("198.51.100.1"); !ok {
+		t.Error("an IPv4 address shared the exhausted bucket")
+	}
+	if len(l.perIP) != 3 {
+		t.Errorf("buckets = %d, want 3 (two /64s + one v4)", len(l.perIP))
+	}
+
+	// The starvation case: one /64 can burn at most ONE per-IP allowance of the
+	// global ceiling, leaving the rest for a legitimate client.
+	l = mk(5, 20)
+	for i := 0; i < 500; i++ {
+		l.allow("2001:db8:aaaa:bbbb:" + strconv.FormatInt(int64(i), 16) + "::1")
+	}
+	if ok, _ := l.allow("2001:db8:cccc:dddd::1"); !ok {
+		t.Error("a /64 rotator starved the global ceiling for a legitimate client")
+	}
+
+	// IPv4: still per full address, no grouping by /24.
+	l = mk(2, 1000)
+	for _, ip := range []string{"198.51.100.1", "198.51.100.2", "198.51.100.3"} {
+		if ok, _ := l.allow(ip); !ok {
+			t.Errorf("%s limited on first use", ip)
+		}
+	}
+	if len(l.perIP) != 3 {
+		t.Errorf("IPv4 buckets = %d, want 3 (one per address)", len(l.perIP))
+	}
+	l.allow("198.51.100.1")
+	if ok, _ := l.allow("198.51.100.1"); ok {
+		t.Error("IPv4 address not limited on its own bucket")
+	}
+	// IPv4-mapped IPv6 is the same caller as its IPv4 form, not a /64 group.
+	l = mk(1, 1000)
+	l.allow("203.0.113.9")
+	if ok, _ := l.allow("::ffff:203.0.113.9"); ok {
+		t.Error("IPv4-mapped form got a separate bucket")
+	}
+	if ok, _ := l.allow("::ffff:203.0.113.10"); !ok {
+		t.Error("distinct IPv4-mapped address was folded into another")
+	}
+	// A zone suffix does not mint a new bucket.
+	l = mk(1, 1000)
+	l.allow("fe80::1%eth0")
+	if ok, _ := l.allow("fe80::2%eth1"); ok {
+		t.Error("zone suffix split a /64")
+	}
+}
+
+func TestOAuthLimiterKey(t *testing.T) {
+	for in, want := range map[string]string{
+		"198.51.100.7":                  "198.51.100.7",
+		"2001:db8:1:2:aaaa:bbbb:cccc:d": "2001:db8:1:2::/64",
+		"2001:db8:1:2::":                "2001:db8:1:2::/64",
+		"::ffff:198.51.100.7":           "198.51.100.7",
+		"not-an-ip":                     "not-an-ip",
+		"":                              "",
+		strings.Repeat("x", 100):        strings.Repeat("x", 64),
+	} {
+		if got := oauthLimiterKey(in); got != want {
+			t.Errorf("oauthLimiterKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
