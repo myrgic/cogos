@@ -148,7 +148,7 @@ Total sites: 254  (cog: 107, home: 2, elsewhere: 13, unanchored: 91, dynamic: 41
 | `<TempDir>` | (*modalityProxy).playAudio (`os.CreateTemp`) | internal/engine/mcp_modality_proxy.go:853 | internal:engine |
 | `<TempDir>` | streamFetch (`os.CreateTemp`) | internal/engine/remote_hydrate_spike.go:195 | internal:engine |
 | `<TempDir>` | streamFetch (`io.Copy`) | internal/engine/remote_hydrate_spike.go:204 | internal:engine |
-| `<TempDir>` | (*Server).handleChat (`os.MkdirTemp`) | internal/engine/serve.go:1543 | internal:engine |
+| `<TempDir>` | (*Server).handleChat (`os.MkdirTemp`) | internal/engine/serve.go:1567 | internal:engine |
 | `<TempDir>` | (*Server).handleBlockPut (`os.CreateTemp`) | internal/engine/serve_blocks.go:184 | internal:engine |
 | `<TempDir>` | (*Server).handleBlockPut (`io.Copy`) | internal/engine/serve_blocks.go:195 | internal:engine |
 | `<TempDir>` | writeTempMCPConfig (`os.CreateTemp`) | internal/engine/serve_claude_code.go:460 | internal:engine |
@@ -190,9 +190,9 @@ These sites structurally resolved (the shape of the path is known) but the ROOT 
 | `{dbPath}?mode=ro&_journal_mode=WAL&_busy_timeout=3000` | searchMemoryFTS (`sql.Open(sqlite3)`) | internal/engine/mcp_stubs.go:231 | internal:engine |
 | `dirname({candidate})` | atomicWriteMemoryFile (`os.CreateTemp`) | internal/engine/memory_sections.go:353 | internal:engine |
 | `{candidate}` | atomicWriteMemoryFile (`os.Rename`) | internal/engine/memory_sections.go:375 | internal:engine |
-| `<call:resolvePath>` | syncJSON (`os.WriteFile`) | internal/engine/node_cmd.go:337 | internal:engine |
-| `<call:resolvePath>` | syncSed (`os.WriteFile`) | internal/engine/node_cmd.go:370 | internal:engine |
-| `<call:resolvePath>` | syncPlist (`os.WriteFile`) | internal/engine/node_cmd.go:424 | internal:engine |
+| `<call:resolvePath>` | syncJSON (`os.WriteFile`) | internal/engine/node_cmd.go:329 | internal:engine |
+| `<call:resolvePath>` | syncSed (`os.WriteFile`) | internal/engine/node_cmd.go:362 | internal:engine |
+| `<call:resolvePath>` | syncPlist (`os.WriteFile`) | internal/engine/node_cmd.go:416 | internal:engine |
 | `{dir}` | persistNodeID (`os.MkdirAll`) | internal/engine/node_identity.go:321 | internal:engine |
 | `{dir}/node_id` | persistNodeID (`os.WriteFile`) | internal/engine/node_identity.go:326 | internal:engine |
 | `{dir}/node_id.source` | persistNodeID (`os.WriteFile`) | internal/engine/node_identity.go:335 | internal:engine |
@@ -206,8 +206,8 @@ These sites structurally resolved (the shape of the path is known) but the ROOT 
 | `{path}` | (*rotatingWriter).Write (`os.OpenFile`) | internal/engine/rotating_writer.go:89 | internal:engine |
 | `{path}.1` | (*rotatingWriter).rotateLocked (`os.Rename`) | internal/engine/rotating_writer.go:137 | internal:engine |
 | `{path}` | (*rotatingWriter).rotateLocked (`os.OpenFile`) | internal/engine/rotating_writer.go:141 | internal:engine |
-| `<call:DefaultSessionJournalDir>` | NewSessionJournal (`os.MkdirAll`) | internal/engine/session_journal.go:137 | internal:engine |
-| `<call:DefaultSessionJournalDir>/<call:journalFileName>.jsonl` | NewSessionJournal (`os.OpenFile`) | internal/engine/session_journal.go:140 | internal:engine |
+| `<call:DefaultSessionJournalDir>` | NewSessionJournal (`os.MkdirAll`) | internal/engine/session_journal.go:145 | internal:engine |
+| `<call:DefaultSessionJournalDir>/<call:journalFileName>.jsonl` | NewSessionJournal (`os.OpenFile`) | internal/engine/session_journal.go:148 | internal:engine |
 | `dirname({s.LogFile})` | (*stageUISupervisor).startChild (`os.MkdirAll`) | internal/engine/stage_ui_supervisor.go:548 | internal:engine |
 | `{s.LogFile}` | (*stageUISupervisor).startChild (`os.OpenFile`) | internal/engine/stage_ui_supervisor.go:552 | internal:engine |
 | `dirname({s.PidFile})` | writePidFile (`os.MkdirAll`) | internal/engine/stage_ui_supervisor.go:981 | internal:engine |
@@ -307,7 +307,7 @@ These sites write to disk but this tool could not structurally resolve their pat
 
 v1 counts direct filesystem primitives + sqlite only (see the package doc). A spawned process can write anywhere its own logic chooses, which this tool cannot see without executing it — these sites are enumerated for visibility, with cmd.Dir resolved where possible, but are NOT classified into any bin above and do not contribute to the totals at the top of this document. Non-Go writers (shell/Python scripts this repo runs) are not enumerable by a Go source scanner at all and are not listed here either — see the package doc.
 
-Total subprocess sites: 89
+Total subprocess sites: 91
 
 | cmd.Dir | call | file:line | subsystem |
 |---|---|---|---|
@@ -339,15 +339,17 @@ Total subprocess sites: 89
 | _(not set — inherits the process's own working directory)_ | `exec.Command("taskkill", "/PID", strconv.Itoa(pid))` | internal/engine/daemon_stop_windows.go:37 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))` | internal/engine/daemon_stop_windows.go:56 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH")` | internal/engine/daemon_stop_windows.go:77 | internal:engine |
-| `{cwd}` | `exec.Command(argv[0], argv[1:]...)` | internal/engine/managed_session_hermes.go:277 | internal:engine |
-| `{rc.Cwd}` | `exec.Command(argv[0], argv[1:]...)` | internal/engine/managed_session_hermes.go:1619 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "git", append([]string{"-C", rec.Worktree}, args...)...)` | internal/engine/managed_session_drain.go:338 | internal:engine |
+| `{cwd}` | `exec.Command(argv[0], argv[1:]...)` | internal/engine/managed_session_hermes.go:314 | internal:engine |
+| `{rc.Cwd}` | `exec.Command(argv[0], argv[1:]...)` | internal/engine/managed_session_hermes.go:1928 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "ps", "-A", "-o", "pid=,ppid=,rss=")` | internal/engine/managed_session_procs.go:46 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "python3", cmdArgs...)` | internal/engine/mcp_architecture.go:156 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command(player, args...)` | internal/engine/mcp_modality_proxy.go:879 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, rgPath, args...)` | internal/engine/mcp_server.go:3268 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command(cogScript, "memory", "search", query)` | internal/engine/memory.go:21 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port))` | internal/engine/node_cmd.go:132 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("ps", "-o", "etime=", "-p", pid)` | internal/engine/node_cmd.go:144 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.Command("ps", "-o", "comm=", "-p", pid)` | internal/engine/node_cmd.go:193 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port))` | internal/engine/node_cmd.go:124 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("ps", "-o", "etime=", "-p", pid)` | internal/engine/node_cmd.go:136 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("ps", "-o", "comm=", "-p", pid)` | internal/engine/node_cmd.go:185 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command(p.bin, args...)` | internal/engine/podman_runtime.go:71 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command(p.bin, p.global(args...)...)` | internal/engine/podman_runtime.go:231 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "python3", cogblockPath, "parse", sourcePath)` | internal/engine/projection_compiler.go:388 | internal:engine |
