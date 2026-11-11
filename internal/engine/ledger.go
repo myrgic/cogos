@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	stdhash "hash"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -208,13 +209,39 @@ func AppendEvent(workspaceRoot, sessionID string, envelope *EventEnvelope) error
 		return fmt.Errorf("marshal: %w", err)
 	}
 
-	f, err := os.OpenFile(eventsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(eventsFile, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return fmt.Errorf("open ledger: %w", err)
 	}
 	defer f.Close()
 
+	// k4-followups-review B1: a short write (disk full, quota, etc.) followed by an I/O error can leave a
+	// line fragment on disk with no trailing newline -- the NEXT successful append then glues onto it,
+	// producing one malformed line that boot replay silently skips (GetLastEvent / replay scanners expect
+	// one JSON object per line). Two parts close this:
+	//  1. On a write error below, truncate back to the size we had before this write, so a failed append
+	//     never leaves a partial line for the next append to corrupt.
+	//  2. Before writing, if the file already ends in a torn (non-newline-terminated) tail from an EARLIER
+	//     failure that predates this fix (or from any other writer), heal it by writing a newline first --
+	//     a bare newline on its own line is harmless to append-only JSONL readers, and it isolates our new,
+	//     complete line from whatever partial fragment preceded it.
+	if info, statErr := f.Stat(); statErr == nil && info.Size() > 0 {
+		buf := make([]byte, 1)
+		if _, readErr := f.ReadAt(buf, info.Size()-1); readErr == nil && buf[0] != '\n' {
+			if _, werr := f.Write([]byte("\n")); werr != nil {
+				return fmt.Errorf("heal torn ledger tail: %w", werr)
+			}
+		}
+	}
+	preSize := int64(0)
+	if info, statErr := f.Stat(); statErr == nil {
+		preSize = info.Size()
+	}
 	if _, err = fmt.Fprintf(f, "%s\n", line); err != nil {
+		if truncErr := f.Truncate(preSize); truncErr != nil {
+			slog.Error("ledger: append failed AND truncate-back-to-known-good-size also failed; "+
+				"a torn line fragment may remain on disk", "session", sessionID, "write_err", err, "truncate_err", truncErr)
+		}
 		return err
 	}
 

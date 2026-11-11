@@ -10,6 +10,7 @@ package engine
 //     the next boot replay agrees with memory.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func refreshForm(refresh string) url.Values {
@@ -279,5 +281,51 @@ func TestOAuthStore_RevokeFailClosedDropsBeforeLedger(t *testing.T) {
 	}
 	if n := len(st.UnjournaledRevocations()); n != 1 {
 		t.Errorf("queued = %d, want 1 (a second revoke must not double-queue)", n)
+	}
+}
+
+// ─── S1: a clean shutdown must not skip the last flush ───────────────────────
+
+func TestOAuthK4S1_ShutdownFlushesAnyStillQueuedRevocation(t *testing.T) {
+	// k4-followups-review S1: the flusher only ran oauthFlushJournal() on its 15s ticker, so a CLEAN
+	// restart (ctx cancelled, e.g. by an operator restarting to pick up a ledger fix) inside that window
+	// left a revocation queued -- exactly the scenario the review reproduced resurrecting a dead grant on
+	// boot replay. The fix: one last oauthFlushJournal() on ctx.Done() before the goroutine returns.
+	env := newOAuthAuthzEnv(t)
+	root := env.srv.cfg.WorkspaceRoot
+	code, _ := env.approvedCode(t)
+	_, b := env.tokenPost(t, exchangeForm(code))
+	first := tokenFields(t, b)
+
+	restore := failLedger(env)
+	env.tokenPost(t, exchangeForm(code)) // replay; append fails; queued in memory only
+	if n := len(env.srv.oauth.UnjournaledRevocations()); n != 1 {
+		t.Fatalf("queued = %d, want 1", n)
+	}
+
+	// Ledger recovers, THEN the process is asked to stop before the next 15s tick would have fired --
+	// the real startOAuthJournalFlusher ticker interval is far longer than this test should wait.
+	restore()
+	ctx, cancel := context.WithCancel(context.Background())
+	env.srv.startOAuthJournalFlusher(ctx, time.Hour) // a tick that will never fire naturally in this test
+	cancel()                                         // simulates stopBackground() cancelling the context on shutdown
+	// The flush goroutine runs asynchronously; give it a moment to execute its ctx.Done() branch.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(env.srv.oauth.UnjournaledRevocations()) == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := len(env.srv.oauth.UnjournaledRevocations()); n != 0 {
+		t.Fatalf("still queued after shutdown: %d, want 0 (the shutdown flush should have landed it)", n)
+	}
+
+	rebuilt, err := RebuildOAuthStoreFromLedger(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rebuilt.Resolve(first.AccessToken); ok {
+		t.Fatal("revoked grant resurrected on boot replay: the shutdown flush did not actually journal it")
 	}
 }

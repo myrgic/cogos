@@ -516,3 +516,83 @@ func TestListLedgerSessionsColonFilter(t *testing.T) {
 		t.Fatalf("resolved session dir does not exist: %v", err)
 	}
 }
+
+// TestAppendEvent_HealsTornTailAndTruncatesOnFailedWrite is k4-followups-review B1: a torn (no trailing
+// newline) line fragment from an earlier crash/short-write must not corrupt the NEXT append, and a failed
+// write must not itself leave a new torn fragment behind. Two scenarios in one test:
+//  1. heal: the file already ends in a torn line (simulating an earlier failure, pre-fix) -- the next
+//     successful AppendEvent must isolate its own complete line from that fragment, so a line-by-line JSONL
+//     reader (which is what boot replay/GetLastEvent effectively is) can parse the NEW line cleanly even
+//     though the OLD fragment before it is garbage.
+//  2. truncate-on-error: AppendEvent asked to append to a file it cannot write to (made read-only) returns
+//     an error and the file's size does not grow -- no fresh torn fragment is created by the failed attempt
+//     itself.
+func TestAppendEvent_HealsTornTailAndTruncatesOnFailedWrite(t *testing.T) {
+	t.Cleanup(resetLedgerCacheForTest)
+	root := t.TempDir()
+	sessionID := "b1-heal-session"
+	dir := filepath.Join(root, ".cog", "ledger", pathsafe.SanitizeComponent(sessionID))
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	eventsFile := filepath.Join(dir, "events.jsonl")
+
+	// Simulate a torn tail left by an earlier failure: a line fragment with NO trailing newline.
+	torn := `{"metadata":{"seq":1,"source":"test"},"hashed_payload":{"type":"test.torn","session_id":"` + sessionID + `"`
+	if err := os.WriteFile(eventsFile, []byte(torn), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sizeBefore, _ := os.Stat(eventsFile)
+
+	env := &EventEnvelope{
+		HashedPayload: EventPayload{Type: "test.after.torn", Timestamp: nowISO(), SessionID: sessionID},
+		Metadata:      EventMetadata{Source: "test"},
+	}
+	if err := AppendEvent(root, sessionID, env); err != nil {
+		t.Fatalf("AppendEvent after a torn tail: %v", err)
+	}
+
+	raw, err := os.ReadFile(eventsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected the healing newline to separate the torn fragment from the new line, got %d lines: %q", len(lines), raw)
+	}
+	last := lines[len(lines)-1]
+	var parsed EventEnvelope
+	if err := json.Unmarshal([]byte(last), &parsed); err != nil {
+		t.Fatalf("the new line must parse cleanly on its own even though the file started with a torn fragment: %v\nline: %q", err, last)
+	}
+	if parsed.HashedPayload.Type != "test.after.torn" {
+		t.Fatalf("parsed wrong event: %+v", parsed)
+	}
+	sizeAfterHeal, _ := os.Stat(eventsFile)
+	if sizeAfterHeal.Size() <= sizeBefore.Size() {
+		t.Fatalf("file did not grow after a successful append: before=%d after=%d", sizeBefore.Size(), sizeAfterHeal.Size())
+	}
+
+	// Scenario 2: a write that fails must not leave a fresh torn fragment. Make the file read-only so the
+	// append's write fails; confirm the size is unchanged afterwards (the failed attempt added nothing).
+	if err := os.Chmod(eventsFile, 0444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(eventsFile, 0644) })
+	sizeBeforeFail := sizeAfterHeal.Size()
+	env2 := &EventEnvelope{
+		HashedPayload: EventPayload{Type: "test.should.fail", Timestamp: nowISO(), SessionID: sessionID},
+		Metadata:      EventMetadata{Source: "test"},
+	}
+	if err := AppendEvent(root, sessionID, env2); err == nil {
+		t.Skip("this environment lets root/the test user write a 0444 file (e.g. running as root); cannot exercise the write-failure path here")
+	}
+	sizeAfterFail, statErr := os.Stat(eventsFile)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if sizeAfterFail.Size() != sizeBeforeFail {
+		t.Fatalf("a failed append grew the file: before=%d after=%d (should be unchanged, not left with a fresh torn fragment)",
+			sizeBeforeFail, sizeAfterFail.Size())
+	}
+}

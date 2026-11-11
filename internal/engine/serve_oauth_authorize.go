@@ -258,6 +258,13 @@ func (s *Server) startOAuthJournalFlusher(ctx context.Context, interval time.Dur
 		for {
 			select {
 			case <-ctx.Done():
+				// k4-followups-review S1: a clean shutdown (not just a crash) left any still-queued
+				// revocation unflushed, because only the ticker called oauthFlushJournal. The review's
+				// probe showed a clean restart inside the 15s tick resurrects a dead grant on boot
+				// replay -- exactly the scenario an operator triggers when restarting to pick up a
+				// ledger fix. One last pass here closes that: if the ledger has recovered by the time
+				// we're asked to stop, the revocation lands before the process actually exits.
+				s.oauthFlushJournal()
 				return
 			case <-t.C:
 				s.oauthFlushJournal()
