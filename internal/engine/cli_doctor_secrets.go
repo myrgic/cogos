@@ -407,6 +407,8 @@ func doctorCredentialHygiene(report *DoctorReport, root string, opts DoctorOptio
 		return
 	}
 
+	doctorHermesGrantHygiene(g, root, opts)
+
 	// Candidate files: the same config surfaces the config-coherence group
 	// knows about, plus env-style files, plus anything the caller named.
 	var candidates []string

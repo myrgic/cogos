@@ -150,6 +150,13 @@ like `providers.local.yaml`, stay out of git by design.)
 
 ## Install
 
+**Prerequisite: Claude Code.** A node expects a `claude` binary on the kernel's PATH
+(the claude-oauth provider reads its version; a stale or missing one makes Anthropic
+refuse newer models). `scripts/setup.sh` and `scripts/setup-dev.sh` run an idempotent
+"Ensuring Claude Code" step using the official native installer; to do it by hand:
+`curl -fsSL https://claude.ai/install.sh | bash` (Windows: `irm https://claude.ai/install.ps1 | iex`).
+`cog doctor` warns when it is missing.
+
 ```sh
 make build && ./cogos serve --workspace ~/my-project
 # http://localhost:6931/health

@@ -1,0 +1,264 @@
+// cli_doctor_kernelpath.go: discover the PATH the kernel SERVICE actually runs
+// with, so doctor resolves service-relevant binaries (claude, codex, pi)
+// against it instead of the caller's shell PATH.
+//
+// Observed 2026-11-08 on a Linux node: doctor (run from a login shell) said
+// "claude not found" while the kernel found it, and the reverse is equally
+// possible when the unit's PATH is narrower than the shell's. Discovery order:
+//
+//	Linux : /proc/<pid>/environ of the process listening on the kernel port,
+//	        else Environment= of that pid's systemd unit file.
+//	macOS : EnvironmentVariables.PATH of the kernel's launchd plist (label from
+//	        the node manifest, default com.cogos.kernel); no PATH key means
+//	        launchd's default /usr/bin:/bin:/usr/sbin:/sbin.
+//
+// When nothing is discoverable the result says so and callers fall back to the
+// caller's PATH while stating that they did.
+package engine
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const launchdDefaultPATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+type kernelPathInfo struct {
+	PATH   string // "" when not discovered
+	Source string // human pointer to where PATH came from, or why it was not found
+	Found  bool
+	// Start is when the kernel process started, zero when unknown. The kernel
+	// reads the claude client version once per process, so a binary newer than
+	// this is not what the running kernel is using.
+	Start time.Time
+}
+
+// kernelPortForDoctor returns the kernel's TCP port as doctor would probe it.
+func kernelPortForDoctor(root string, opts DoctorOptions) int {
+	ep := opts.kernelEndpoint
+	if ep == "" {
+		ep = kernelEndpointForDoctor(root)
+	}
+	_, p := splitHostPort(ep)
+	n, _ := strconv.Atoi(p)
+	return n
+}
+
+func discoverKernelPATH(root string, opts DoctorOptions) kernelPathInfo {
+	h := opts.doctorHostOrDefault()
+	switch h.goos {
+	case "linux":
+		return discoverKernelPATHLinux(root, opts, h)
+	case "darwin":
+		return discoverKernelPATHDarwin(root, h)
+	}
+	return kernelPathInfo{Source: fmt.Sprintf("kernel PATH discovery not implemented for %s", h.goos)}
+}
+
+func discoverKernelPATHLinux(root string, opts DoctorOptions, h doctorHost) kernelPathInfo {
+	port := kernelPortForDoctor(root, opts)
+	if port == 0 {
+		return kernelPathInfo{Source: "kernel port unknown"}
+	}
+	pids := procListenerPIDs(h.procRoot, port)
+	if len(pids) == 0 {
+		// The listener may run as another user (its fds are unreadable here):
+		// the unit file still declares the PATH the service gets.
+		const conventionalUnit = "cogos-kernel.service"
+		if p, file := systemdUnitPATH(h.home, conventionalUnit); file != "" {
+			return kernelPathInfo{PATH: p, Found: true, Source: fmt.Sprintf("Environment= in %s (unit %s; no listener pid visible on :%d, so the running process was not inspected)", file, conventionalUnit, port)}
+		}
+		return kernelPathInfo{Source: fmt.Sprintf("no process visible listening on :%d (kernel not running, or its fds are unreadable by this user)", port)}
+	}
+	pid := pids[0]
+	start := procStartTime(h.procRoot, pid)
+	env, err := procEnviron(h.procRoot, pid)
+	if err == nil {
+		if p, ok := env["PATH"]; ok {
+			return kernelPathInfo{PATH: p, Found: true, Start: start, Source: fmt.Sprintf("/proc/%d/environ (kernel pid %d on :%d)", pid, pid, port)}
+		}
+		return kernelPathInfo{Source: fmt.Sprintf("/proc/%d/environ has no PATH", pid)}
+	}
+	// environ unreadable (different user): fall back to the unit file.
+	unit := procCgroupUnit(h.procRoot, pid)
+	if unit != "" {
+		if p, file := systemdUnitPATH(h.home, unit); file != "" {
+			return kernelPathInfo{PATH: p, Found: true, Start: start, Source: fmt.Sprintf("Environment= in %s (unit %s)", file, unit)}
+		}
+	}
+	return kernelPathInfo{Source: fmt.Sprintf("/proc/%d/environ unreadable (%v) and no PATH in unit file", pid, err)}
+}
+
+// procStartTime returns when pid started: btime (/proc/stat) plus field 22
+// of /proc/<pid>/stat (starttime, in clock ticks of 1/100 s). The mtime of the
+// /proc/<pid> directory is NOT used: it is the inode creation time, observed
+// ~20 s after the real start. Zero when unreadable.
+func procStartTime(procRoot string, pid int) time.Time {
+	const clkTck = 100 // USER_HZ is 100 on every Linux ABI Go supports
+	stat, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return time.Time{}
+	}
+	i := strings.LastIndexByte(string(stat), ')') // comm may contain spaces and parens
+	if i < 0 {
+		return time.Time{}
+	}
+	f := strings.Fields(string(stat)[i+1:]) // f[0] is field 3 (state)
+	if len(f) < 20 {
+		return time.Time{}
+	}
+	ticks, err := strconv.ParseInt(f[19], 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	all, err := os.ReadFile(filepath.Join(procRoot, "stat"))
+	if err != nil {
+		return time.Time{}
+	}
+	for _, line := range strings.Split(string(all), "\n") {
+		if rest, ok := strings.CutPrefix(line, "btime "); ok {
+			bt, err := strconv.ParseInt(strings.TrimSpace(rest), 10, 64)
+			if err != nil {
+				return time.Time{}
+			}
+			return time.Unix(bt, (ticks%clkTck)*int64(time.Second/clkTck)).Add(time.Duration(ticks/clkTck) * time.Second)
+		}
+	}
+	return time.Time{}
+}
+
+var systemdEnvPathRE = regexp.MustCompile(`(?:^|\s)"?PATH=([^"\s]+)"?`)
+
+// systemdUnitPATH scans the usual unit directories for unit and returns the
+// PATH from its Environment= lines (last assignment wins) plus the file path.
+func systemdUnitPATH(home, unit string) (path, file string) {
+	dirs := []string{
+		filepath.Join(home, ".config", "systemd", "user"),
+		"/etc/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system",
+	}
+	for _, d := range dirs {
+		f := filepath.Join(d, unit)
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "Environment=") {
+				continue
+			}
+			if m := systemdEnvPathRE.FindStringSubmatch(strings.TrimPrefix(line, "Environment=")); m != nil {
+				path = m[1]
+			}
+		}
+		if path != "" {
+			return path, f
+		}
+	}
+	return "", ""
+}
+
+var plistPathRE = regexp.MustCompile(`(?s)<key>EnvironmentVariables</key>\s*<dict>(.*?)</dict>`)
+var plistPathValRE = regexp.MustCompile(`(?s)<key>PATH</key>\s*<string>(.*?)</string>`)
+
+func discoverKernelPATHDarwin(root string, h doctorHost) kernelPathInfo {
+	label := "com.cogos.kernel"
+	if m, err := LoadManifest(DefaultManifestPath(root)); err == nil {
+		if k, ok := m.Services["kernel"]; ok && k.Launchd != "" {
+			label = k.Launchd
+		}
+	}
+	for _, f := range []string{
+		filepath.Join(h.home, "Library", "LaunchAgents", label+".plist"),
+		filepath.Join("/Library", "LaunchDaemons", label+".plist"),
+	} {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		if strings.HasPrefix(string(data), "bplist") {
+			if out, cerr := exec.Command("plutil", "-convert", "xml1", "-o", "-", f).Output(); cerr == nil {
+				data = out
+			}
+		}
+		if m := plistPathRE.FindSubmatch(data); m != nil {
+			if pm := plistPathValRE.FindSubmatch(m[1]); pm != nil {
+				return kernelPathInfo{PATH: strings.TrimSpace(string(pm[1])), Found: true, Start: kernelStartDarwin(label), Source: fmt.Sprintf("EnvironmentVariables.PATH in %s", f)}
+			}
+		}
+		return kernelPathInfo{PATH: launchdDefaultPATH, Found: true, Start: kernelStartDarwin(label),
+			Source: fmt.Sprintf("launchd default PATH (no EnvironmentVariables.PATH in %s)", f)}
+	}
+	return kernelPathInfo{Source: fmt.Sprintf("no launchd plist for label %s under ~/Library/LaunchAgents or /Library/LaunchDaemons", label)}
+}
+
+// kernelStartDarwin returns the start time of the launchd job's process, zero
+// when it is not running or cannot be read. A var so tests need no launchd.
+var kernelStartDarwin = func(label string) time.Time {
+	out, err := exec.Command("launchctl", "list", label).Output()
+	if err != nil {
+		return time.Time{}
+	}
+	m := regexp.MustCompile(`"PID"\s*=\s*(\d+)`).FindSubmatch(out)
+	if m == nil {
+		return time.Time{}
+	}
+	lstart, err := exec.Command("ps", "-o", "lstart=", "-p", string(m[1])).Output()
+	if err != nil {
+		return time.Time{}
+	}
+	t, err := time.ParseInLocation("Mon Jan _2 15:04:05 2006", strings.TrimSpace(string(lstart)), time.Local)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// lookPathIn resolves name against an explicit PATH string, returning every
+// executable match in order. It is the single PATH walker for doctor (the
+// caller-PATH scan and the kernel-PATH scan both use it).
+func lookPathIn(name, pathEnv string) []string {
+	return lookPathInOS(name, pathEnv, runtime.GOOS, os.Getenv("PATHEXT"))
+}
+
+// lookPathInOS is lookPathIn with the OS and PATHEXT injected. On windows the
+// exec-bit test is skipped and PATHEXT extensions are tried (exec.Command
+// resolves claude.exe / claude.cmd that way); an empty PATH element means ".".
+func lookPathInOS(name, pathEnv, goos, pathext string) []string {
+	names := []string{name}
+	if goos == "windows" && filepath.Ext(name) == "" {
+		if pathext == "" {
+			pathext = ".COM;.EXE;.BAT;.CMD"
+		}
+		for _, e := range strings.Split(pathext, ";") {
+			if e = strings.TrimSpace(e); e != "" {
+				names = append(names, name+strings.ToLower(e))
+			}
+		}
+	}
+	var out []string
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" {
+			dir = "."
+		}
+		for _, n := range names {
+			cand := filepath.Join(dir, n)
+			info, err := os.Stat(cand)
+			if err != nil || info.IsDir() {
+				continue
+			}
+			if goos != "windows" && info.Mode()&0111 == 0 {
+				continue
+			}
+			out = append(out, cand)
+		}
+	}
+	return out
+}

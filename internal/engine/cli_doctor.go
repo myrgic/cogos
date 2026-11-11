@@ -240,6 +240,18 @@ type DoctorOptions struct {
 	// always-loaded context file (context-construction group). Defaults to
 	// 64.
 	ContextBudgetKB int
+	// Live enables the opt-in model probe (inference surface group): one
+	// max_tokens=1 request per distinct configured model through the local
+	// kernel. Off by default because it spends provider quota.
+	Live bool
+
+	// host, kernelEndpoint, grantPath and hermes are test seams (zero value
+	// = production behavior): a fake /proc + OS, a kernel base URL override,
+	// the node-root grant file location, and the shared Hermes helper cache.
+	host           *doctorHost
+	kernelEndpoint string
+	grantPath      string
+	hermes         *hermesProfileCache
 }
 
 func (o *DoctorOptions) normalize() {
@@ -268,6 +280,7 @@ func runDoctorCmd(args []string, defaultWorkspace string) {
 	staleDays := fs.Int("stale-days", 30, "Days since last write before a SQLite store is flagged DEAD")
 	skipNetwork := fs.Bool("skip-network", false, "Skip the published-tag network lookup (report UNKNOWN instead)")
 	releaseRepo := fs.String("release-repo", "myrgic/cogos", "owner/repo GitHub slug used for the published-tag check")
+	live := fs.Bool("live", false, "Send a max_tokens=1 probe through the local kernel for each distinct configured model (spends provider quota; default run reports UNKNOWN)")
 	deep := fs.Bool("deep", false, "Run PRAGMA quick_check against every discovered SQLite store (FAIL on corruption). Off by default: a full page scan is not free against a large store.")
 	contextBudgetKB := fs.Int("context-budget-kb", 64, "WARN threshold, in KB, for a single always-loaded context file")
 	lint := fs.Bool("lint", false, "Lint mode: exit by --severity-min threshold instead of the default any-FAIL contract (see the full exit contract above)")
@@ -345,6 +358,7 @@ func runDoctorCmd(args []string, defaultWorkspace string) {
 		SkipNetwork:      *skipNetwork,
 		ReleaseRepo:      *releaseRepo,
 		Deep:             *deep,
+		Live:             *live,
 		ContextBudgetKB:  *contextBudgetKB,
 	}
 
@@ -431,6 +445,9 @@ func doctorExtraLines(s string) []string {
 // checks to UNKNOWN or FAIL as appropriate, per the output contract.
 func RunDoctor(root string, opts DoctorOptions) *DoctorReport {
 	opts.normalize()
+	if opts.hermes == nil {
+		opts.hermes = newHermesProfileCache()
+	}
 
 	report := &DoctorReport{
 		Workspace:   root,
@@ -495,6 +512,12 @@ func doctorInstallIntegrity(report *DoctorReport, root string, opts DoctorOption
 
 	// -- Standalone Syncthing beside the kernel's own BEP engine ----------
 	doctorBEPAndSyncthing(g, root)
+
+	// -- Claude Code CLI (declared prerequisite; drives claude-oauth client version) --
+	doctorClaudeCode(g, root, opts)
+
+	// -- Supervision: declared services sharing one systemd unit (Linux) --
+	doctorServiceSupervision(g, root, opts)
 }
 
 // lookPathAll resolves name against every directory on PATH, returning every
@@ -505,21 +528,7 @@ func lookPathAll(name string) ([]string, error) {
 	if pathEnv == "" {
 		return nil, fmt.Errorf("PATH is empty")
 	}
-	var matches []string
-	for _, dir := range filepath.SplitList(pathEnv) {
-		if dir == "" {
-			dir = "."
-		}
-		cand := filepath.Join(dir, name)
-		info, err := os.Stat(cand)
-		if err != nil || info.IsDir() {
-			continue
-		}
-		if runtime.GOOS != "windows" && info.Mode()&0111 == 0 {
-			continue // not executable
-		}
-		matches = append(matches, cand)
-	}
+	matches := lookPathIn(name, pathEnv)
 	if len(matches) == 0 {
 		return nil, fmt.Errorf("%s: not found on PATH", name)
 	}
@@ -741,6 +750,9 @@ var mcpServerNameRe = regexp.MustCompile(`mcp__([A-Za-z0-9_-]+)__`)
 func doctorConfigCoherence(report *DoctorReport, root string, opts DoctorOptions) {
 	g := report.addGroup("config coherence")
 	home, _ := os.UserHomeDir()
+
+	// -- Endpoints that depend on a node placement does not declare always_on --
+	doctorPlacementDependencies(g, root, opts)
 
 	var files []string
 	if home != "" {

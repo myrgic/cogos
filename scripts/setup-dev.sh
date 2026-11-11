@@ -12,7 +12,8 @@
 #   3. Installs cogos binary to ~/.cog/bin/cogos
 #   4. Installs cog CLI wrapper to ~/.cog/bin/cog
 #   5. Adds ~/.cog/bin to PATH (shell profile)
-#   6. Verifies the install
+#   6. Installs Claude Code (official native installer) if `claude` is missing
+#   7. Verifies the install
 
 set -euo pipefail
 
@@ -24,6 +25,8 @@ SHELL_NAME="$(basename "$SHELL")"
 # why this is sourced rather than hand-copied (again).
 # shellcheck source=lib/refuse-if-running.sh
 . "$REPO_DIR/scripts/lib/refuse-if-running.sh"
+# shellcheck source=lib/ensure-claude-code.sh
+. "$REPO_DIR/scripts/lib/ensure-claude-code.sh"
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 
@@ -173,6 +176,13 @@ else
     # Also export for this session.
     export PATH="$INSTALL_DIR:$PATH"
 fi
+
+echo ""
+
+# ── Claude Code (declared prerequisite) ───────────────────
+
+info "Ensuring Claude Code (claude binary)..."
+ensure_claude_code
 
 echo ""
 

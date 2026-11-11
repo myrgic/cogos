@@ -45,7 +45,7 @@ Total sites: 254  (cog: 107, home: 2, elsewhere: 13, unanchored: 91, dynamic: 41
 | `<Home>/.cog/vault/node-root-grant` | persistNodeRootGrant (`os.Rename`) | internal/engine/boot_node_root_grant.go:299 | internal:engine |
 | `<WorkspaceRoot>/.cog/run/bus` | (*ConsumerRegistry).persistLocked (`os.MkdirAll`) | internal/engine/bus_consumers.go:161 | internal:engine |
 | `<WorkspaceRoot>/.cog/run/bus/<call:pathsafe.SanitizeComponent>.cursors.jsonl` | (*ConsumerRegistry).persistLocked (`os.OpenFile`) | internal/engine/bus_consumers.go:166 | internal:engine |
-| `{root}/.cog/.state/constellation.db?mode=ro&_journal_mode=WAL&_busy_timeout=3000` | doctorIndexHealth (`sql.Open(sqlite3)`) | internal/engine/cli_doctor.go:1035 | internal:engine |
+| `{root}/.cog/.state/constellation.db?mode=ro&_journal_mode=WAL&_busy_timeout=3000` | doctorIndexHealth (`sql.Open(sqlite3)`) | internal/engine/cli_doctor.go:1047 | internal:engine |
 | `{home}/.cog/bin/cogos` | (*selfUpdater).runApply (`os.Rename`) | internal/engine/cli_selfupdate_unix.go:299 | internal:engine |
 | `{home}/.cog/bin/cogos` | (*selfUpdater).runApply (`os.Rename`) | internal/engine/cli_selfupdate_unix.go:303 | internal:engine |
 | `{home}/.cog/bin/cogos.bak.tmp` | copyFileMode (`os.OpenFile`) | internal/engine/cli_selfupdate_unix.go:730 | internal:engine |
@@ -169,7 +169,7 @@ These sites structurally resolved (the shape of the path is known) but the ROOT 
 | `{path}` | func literal (line 432) (`os.WriteFile`) | internal/engine/blobs_cmd.go:436 | internal:engine |
 | `{path}` | (*BlobStore).WritePointer (`os.WriteFile`) | internal/engine/blobstore.go:273 | internal:engine |
 | `:memory:` | func literal (line 49) (`sql.Open(sqlite3)`) | internal/engine/build_tags.go:50 | internal:engine |
-| `{path}?mode=ro&_busy_timeout=3000` | doctorOneStore (`sql.Open(sqlite3)`) | internal/engine/cli_doctor.go:1420 | internal:engine |
+| `{path}?mode=ro&_busy_timeout=3000` | doctorOneStore (`sql.Open(sqlite3)`) | internal/engine/cli_doctor.go:1432 | internal:engine |
 | `dirname({home}/.zshrc)` | addCogBinToPath (`os.MkdirAll`) | internal/engine/cli_install_unix.go:44 | internal:engine |
 | `{home}/.zshrc` | addCogBinToPath (`os.OpenFile`) | internal/engine/cli_install_unix.go:48 | internal:engine |
 | `{binPath}` | (*selfUpdater).rollback (`os.Rename`) | internal/engine/cli_selfupdate_unix.go:346 | internal:engine |
@@ -307,7 +307,7 @@ These sites write to disk but this tool could not structurally resolve their pat
 
 v1 counts direct filesystem primitives + sqlite only (see the package doc). A spawned process can write anywhere its own logic chooses, which this tool cannot see without executing it — these sites are enumerated for visibility, with cmd.Dir resolved where possible, but are NOT classified into any bin above and do not contribute to the totals at the top of this document. Non-Go writers (shell/Python scripts this repo runs) are not enumerable by a Go source scanner at all and are not listed here either — see the package doc.
 
-Total subprocess sites: 89
+Total subprocess sites: 94
 
 | cmd.Dir | call | file:line | subsystem |
 |---|---|---|---|
@@ -321,7 +321,12 @@ Total subprocess sites: 89
 | `<unresolved>` | `exec.CommandContext(ctx, ClaudeCommand, args...)` | harness/harness.go:856 | harness |
 | `{opts.Cwd}` | `exec.CommandContext(ctx, bin, args...)` | internal/acp/claudecli.go:99 | internal:acp |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "git", args...)` | internal/coherence/coherence.go:95 | internal:coherence |
-| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, binPath, args...)` | internal/engine/cli_doctor_inference.go:313 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(vctx, kernelHit, "--version")` | internal/engine/cli_doctor_claudecode.go:75 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "/bin/sh", "-c", command)` | internal/engine/cli_doctor_hermesprofile.go:325 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, binPath, args...)` | internal/engine/cli_doctor_inference.go:339 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("plutil", "-convert", "xml1", "-o", "-", f)` | internal/engine/cli_doctor_kernelpath.go:187 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("launchctl", "list", label)` | internal/engine/cli_doctor_kernelpath.go:205 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.Command("ps", "-o", "lstart=", "-p", string(m[1]))` | internal/engine/cli_doctor_kernelpath.go:213 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("git", "-C", dir, "ls-files", "--error-unmatch", filepath.Base(path))` | internal/engine/cli_doctor_secrets.go:382 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("git", "-C", dir, "check-ignore", "-q", filepath.Base(path))` | internal/engine/cli_doctor_secrets.go:389 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command("tasklist", "/FI", "IMAGENAME eq syncthing.exe", "/FO", "CSV", "/NH")` | internal/engine/cli_doctor_syncthing.go:85 | internal:engine |
@@ -354,8 +359,8 @@ Total subprocess sites: 89
 | `{home}` | `exec.CommandContext(ctx, binary, "auth", "status", "--json")` | internal/engine/provider_claudecode.go:69 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, p.cliBinary, "--version")` | internal/engine/provider_claudecode.go:208 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.Command(cmd, "--version")` | internal/engine/provider_claudeoauth.go:224 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "security", "find-generic-password", "-s", "Claude Code-credentials", "-w")` | internal/engine/provider_claudeoauth.go:302 | internal:engine |
-| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(runCtx, actuatorPath)` | internal/engine/provider_claudeoauth.go:560 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, "security", "find-generic-password", "-s", "Claude Code-credentials", "-w")` | internal/engine/provider_claudeoauth.go:306 | internal:engine |
+| _(not set — inherits the process's own working directory)_ | `exec.CommandContext(runCtx, actuatorPath)` | internal/engine/provider_claudeoauth.go:564 | internal:engine |
 | `{home}` | `exec.CommandContext(ctx, binary, "login", "status")` | internal/engine/provider_codex.go:132 | internal:engine |
 | _(not set — inherits the process's own working directory)_ | `exec.CommandContext(ctx, binary, "--version")` | internal/engine/provider_codex.go:371 | internal:engine |
 | `{opts.Dir}` | `exec.CommandContext(ctx, binary, args...)` | internal/engine/provider_env.go:44 | internal:engine |

@@ -639,7 +639,7 @@
     },
     {
       "file": "internal/engine/cli_doctor.go",
-      "line": 1035,
+      "line": 1047,
       "column": 13,
       "primitive": "sql.Open(sqlite3)",
       "func": "doctorIndexHealth",
@@ -651,7 +651,7 @@
     },
     {
       "file": "internal/engine/cli_doctor.go",
-      "line": 1420,
+      "line": 1432,
       "column": 13,
       "primitive": "sql.Open(sqlite3)",
       "func": "doctorOneStore",
@@ -3173,12 +3173,62 @@
       "dir_known": false
     },
     {
+      "file": "internal/engine/cli_doctor_claudecode.go",
+      "line": 75,
+      "column": 14,
+      "func": "doctorClaudeCode",
+      "subsystem": "internal:engine",
+      "raw": "exec.CommandContext(vctx, kernelHit, \"--version\")",
+      "dir": "",
+      "dir_known": false
+    },
+    {
+      "file": "internal/engine/cli_doctor_hermesprofile.go",
+      "line": 325,
+      "column": 9,
+      "func": "runHermesSecretsHelper",
+      "subsystem": "internal:engine",
+      "raw": "exec.CommandContext(ctx, \"/bin/sh\", \"-c\", command)",
+      "dir": "",
+      "dir_known": false
+    },
+    {
       "file": "internal/engine/cli_doctor_inference.go",
-      "line": 313,
+      "line": 339,
       "column": 10,
-      "func": "checkArgvContracts",
+      "func": "checkArgvContractsOnPath",
       "subsystem": "internal:engine",
       "raw": "exec.CommandContext(ctx, binPath, args...)",
+      "dir": "",
+      "dir_known": false
+    },
+    {
+      "file": "internal/engine/cli_doctor_kernelpath.go",
+      "line": 187,
+      "column": 20,
+      "func": "discoverKernelPATHDarwin",
+      "subsystem": "internal:engine",
+      "raw": "exec.Command(\"plutil\", \"-convert\", \"xml1\", \"-o\", \"-\", f)",
+      "dir": "",
+      "dir_known": false
+    },
+    {
+      "file": "internal/engine/cli_doctor_kernelpath.go",
+      "line": 205,
+      "column": 14,
+      "func": "func literal (line 204)",
+      "subsystem": "internal:engine",
+      "raw": "exec.Command(\"launchctl\", \"list\", label)",
+      "dir": "",
+      "dir_known": false
+    },
+    {
+      "file": "internal/engine/cli_doctor_kernelpath.go",
+      "line": 213,
+      "column": 17,
+      "func": "func literal (line 204)",
+      "subsystem": "internal:engine",
+      "raw": "exec.Command(\"ps\", \"-o\", \"lstart=\", \"-p\", string(m[1]))",
       "dir": "",
       "dir_known": false
     },
@@ -3504,7 +3554,7 @@
     },
     {
       "file": "internal/engine/provider_claudeoauth.go",
-      "line": 302,
+      "line": 306,
       "column": 14,
       "func": "(*claudeCodeCredentialSource).readKeychain",
       "subsystem": "internal:engine",
@@ -3514,7 +3564,7 @@
     },
     {
       "file": "internal/engine/provider_claudeoauth.go",
-      "line": 560,
+      "line": 564,
       "column": 9,
       "func": "runClaudeTokenRefreshActuator",
       "subsystem": "internal:engine",

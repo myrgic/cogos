@@ -6,6 +6,9 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/myrgic/cogos/main/scripts/setup.sh | sh
 #
+# Steps: detect platform, download release, install cogos + cog, set PATH,
+# install Claude Code if missing (official native installer), verify.
+#
 # Or clone and run locally:
 #   ./scripts/setup.sh
 
@@ -189,6 +192,26 @@ else
 
     export PATH="$INSTALL_DIR:$PATH"
 fi
+
+echo ""
+
+# Claude Code (declared prerequisite): same shared step setup-dev.sh uses.
+# Loaded from the local checkout, else from the release ref being installed.
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/lib/ensure-claude-code.sh" ]; then
+    # shellcheck source=lib/ensure-claude-code.sh
+    . "$SCRIPT_DIR/lib/ensure-claude-code.sh"
+elif curl -fsSL -o "$TMPDIR/ensure-claude-code.sh" \
+        "https://raw.githubusercontent.com/$REPO/$VERSION/scripts/lib/ensure-claude-code.sh" 2>/dev/null; then
+    # shellcheck source=lib/ensure-claude-code.sh
+    . "$TMPDIR/ensure-claude-code.sh"
+else
+    ensure_claude_code() {
+        command -v claude >/dev/null 2>&1 && return 0
+        warn "Claude Code not found; install: curl -fsSL https://claude.ai/install.sh | bash"
+    }
+fi
+info "Ensuring Claude Code (claude binary)..."
+ensure_claude_code
 
 echo ""
 
