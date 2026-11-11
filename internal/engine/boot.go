@@ -189,6 +189,12 @@ func (k *Kernel) BEPEngine() *BEPEngine {
 // within a 10-second deadline. Safe to call multiple times (idempotent after
 // first call; subsequent calls return nil immediately).
 func (k *Kernel) Stop() error {
+	// Drain before cancelling anything: the record of an in-flight turn is
+	// written while the turn is still in flight (idempotent; Server.Shutdown
+	// drains again and Close records whatever this pass did not see).
+	if k.server != nil && k.server.managedSessions != nil {
+		k.server.managedSessions.BeginDrain()
+	}
 	k.cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)

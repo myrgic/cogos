@@ -1070,6 +1070,11 @@ func (s *HermesACPSession) Redirect(content json.RawMessage) (string, error) {
 			s.mu.Unlock()
 			if adopted != nil {
 				s.ring.Append(MSEventTurnStart, map[string]any{"turn_id": adopted.id, "prompt": blocks})
+				// A forward adopted as a turn while the kernel drains is a turn the
+				// drain snapshot never saw: record it before Close cancels it.
+				if s.proc.d.draining.Load() {
+					s.proc.d.recordDrainCancel(s, time.Now().Add(drainBudget))
+				}
 			}
 			o = <-done
 		}

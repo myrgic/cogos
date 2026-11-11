@@ -12,6 +12,19 @@ import (
 	"time"
 )
 
+func waitDrainRecords(t *testing.T, dir string, n int) []DrainCancelRecord {
+	t.Helper()
+	var recs []DrainCancelRecord
+	for i := 0; i < 300; i++ {
+		if recs = readDrainRecords(t, dir); len(recs) >= n {
+			return recs
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("got %d drain records, want %d", len(recs), n)
+	return nil
+}
+
 // drainRepo makes a git worktree with one commit on branch "feat/drain-me" and
 // returns its path and the commit SHA.
 func drainRepo(t *testing.T) (dir, sha string) {
@@ -268,9 +281,9 @@ func TestDrain_ForwardsAreCarried(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitEvent(t, s, 0, kind(MSEventTurnStart))
-	s.mu.Lock()
-	s.turn.forwards = append(s.turn.forwards, json.RawMessage(`[{"type":"text","text":"also do X"}]`))
-	s.mu.Unlock()
+	if _, err := s.Redirect(json.RawMessage(`"also do X"`)); err != nil { // the real Redirect path appends the forward
+		t.Fatal(err)
+	}
 	d.BeginDrain()
 	d.Close()
 	recs := readDrainRecords(t, drainDir)
@@ -290,5 +303,134 @@ func TestDrain_DefaultDirIsSiblingOfRecordDir(t *testing.T) {
 	bare := fakeHermesDriver(t, nil)
 	if bare.drainDir() != "" {
 		t.Fatal("no dirs configured: drainDir must be empty")
+	}
+}
+
+// A record write that fails must not be claimed as written: Close retries, and
+// once the directory is writable the record lands. (Review finding: the
+// once-only claim used to be taken before the write and never released.)
+func TestDrain_FailedWriteIsRetriedByClose(t *testing.T) {
+	d, _ := drainTestDriver(t)
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d.cfg.DrainDir = filepath.Join(blocker, "drain") // a directory under a regular file: unwritable
+	s, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prompt(json.RawMessage(`"slow task"`)); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, s, 0, kind(MSEventTurnStart))
+	if paths := d.BeginDrain(); len(paths) != 0 {
+		t.Fatalf("BeginDrain reported a record on an unwritable dir: %v", paths)
+	}
+	good := t.TempDir()
+	d.cfg.DrainDir = good
+	d.Close()
+	recs := readDrainRecords(t, good)
+	if len(recs) != 1 || recs[0].BriefText != "slow task" {
+		t.Fatalf("Close did not retry the failed record: %+v", recs)
+	}
+}
+
+// With nowhere to write at all the claim is released too (and the turn is still cancelled).
+func TestDrain_NoDirReleasesClaimAndStillCancels(t *testing.T) {
+	d := fakeHermesDriver(t, nil)
+	s, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prompt(json.RawMessage(`"slow task"`)); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, s, 0, kind(MSEventTurnStart))
+	if paths := d.BeginDrain(); len(paths) != 0 {
+		t.Fatalf("paths = %v", paths)
+	}
+	d.mu.Lock()
+	n := len(d.drainRecorded)
+	d.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("%d claims left after a record that was not written", n)
+	}
+	d.Close()
+	if s.Info().TurnInFlight != "" {
+		t.Fatal("the cancel must proceed without a record")
+	}
+}
+
+// An exhausted drain budget still records the turn, minus the git facts, and
+// says why in git_error.
+func TestDrain_BudgetExhaustedStillRecords(t *testing.T) {
+	d := fakeHermesDriver(t, nil)
+	wt, _ := drainRepo(t)
+	rec := DrainCancelRecord{Worktree: wt}
+	d.drainGit(&rec, time.Now().Add(-time.Second))
+	if rec.LastCommit != "" || !strings.Contains(rec.GitError, "budget") {
+		t.Fatalf("rec = %+v", rec)
+	}
+}
+
+// A forward the agent runs as a turn of its own AFTER the drain began is a turn
+// the drain snapshot never saw; it is recorded when adopted, before Close cancels it.
+func TestDrain_ForwardAdoptedDuringDrainIsRecorded(t *testing.T) {
+	old := forwardGrace
+	forwardGrace = 300 * time.Millisecond
+	defer func() { forwardGrace = old }()
+	d, drainDir := drainTestDriver(t)
+	s, err := d.Create(context.Background(), HermesACPOpts{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prompt(json.RawMessage(`"sleep100 first"`)); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, s, 0, kind(MSEventSessionUpdate))
+	if _, err := s.Redirect(json.RawMessage(`"sleep3000 second"`)); err != nil { // a non-redirecting agent: runs as its own turn
+		t.Fatal(err)
+	}
+	waitEvent(t, s, 0, kind(MSEventTurnEnd)) // the first turn is over; the grace window is still open
+	d.BeginDrain()                           // nothing in flight at this instant: nothing recorded yet
+	if recs := readDrainRecords(t, drainDir); len(recs) != 0 {
+		t.Fatalf("records before adoption: %d", len(recs))
+	}
+	recs := waitDrainRecords(t, drainDir, 1) // the grace expires, the forward is adopted as a turn
+	if !strings.Contains(recs[0].BriefText, "sleep3000 second") || recs[0].Outcome != DrainOutcome {
+		t.Fatalf("adopted-turn record = %+v", recs[0])
+	}
+	d.Close()
+	if n := len(readDrainRecords(t, drainDir)); n != 1 {
+		t.Fatalf("%d records after Close, want 1 (recorded once)", n)
+	}
+}
+
+// Server.Shutdown drains: the in-flight turn's record exists after it returns,
+// and a prompt arriving during shutdown is refused. Drives the real shutdown
+// path, not the driver alone.
+func TestDrain_ServerShutdownRecordsInFlightTurn(t *testing.T) {
+	srv := newTestServer(t)
+	drainDir := t.TempDir()
+	srv.managedSessions = fakeHermesDriver(t, func(c *HermesACPDriverConfig) { c.DrainDir = drainDir })
+	wt, sha := drainRepo(t)
+	s, err := srv.managedSessions.Create(context.Background(), HermesACPOpts{Cwd: wt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prompt(json.RawMessage(`"slow ship it"`)); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, s, 0, kind(MSEventTurnStart))
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Logf("shutdown: %v", err) // an unstarted http.Server may report; the drain is what is under test
+	}
+	recs := readDrainRecords(t, drainDir)
+	if len(recs) != 1 || recs[0].LastCommit != sha || recs[0].Branch != "feat/drain-me" || !strings.Contains(recs[0].BriefText, "ship it") {
+		t.Fatalf("records after Server.Shutdown = %+v", recs)
+	}
+	if !srv.managedSessions.Draining() {
+		t.Fatal("driver not draining after Shutdown")
 	}
 }

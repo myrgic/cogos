@@ -51,7 +51,8 @@ const (
 	drainNote    = "Cancelled by kernel drain on shutdown (SIGTERM/restart). NOT a crash and NOT a failure: " +
 		"the work is intact in the worktree at last_commit (plus any dirty_files). Re-dispatch brief_text " +
 		"(then forwards, in order) as a NEW turn in the same worktree/branch to resume."
-	drainGitTimeout = 3 * time.Second
+	drainGitTimeout = 3 * time.Second // per session, across its git calls
+	drainBudget     = 6 * time.Second // whole BeginDrain/Close record pass; sessions past it get a record without git facts
 	drainTailBytes  = 4000
 	drainMaxDirty   = 200
 )
@@ -149,6 +150,11 @@ func (d *HermesACPDriver) BeginDrain() []string {
 }
 
 func (d *HermesACPDriver) recordDrainCancels(all []*HermesACPSession) []string {
+	// One deadline for the whole pass: 60 sessions on a stalled filesystem must
+	// not eat the shutdown budget in 3 s slices. A session past the deadline is
+	// still recorded (brief, worktree, forwards, checkpoint), only without the
+	// git facts, and its git_error says why.
+	deadline := time.Now().Add(drainBudget)
 	var (
 		mu    sync.Mutex
 		wg    sync.WaitGroup
@@ -160,7 +166,7 @@ func (d *HermesACPDriver) recordDrainCancels(all []*HermesACPSession) []string {
 		sem <- struct{}{}
 		go func(s *HermesACPSession) {
 			defer func() { <-sem; wg.Done() }()
-			if p := d.recordDrainCancel(s); p != "" {
+			if p := d.recordDrainCancel(s, deadline); p != "" {
 				mu.Lock()
 				paths = append(paths, p)
 				mu.Unlock()
@@ -175,7 +181,7 @@ func (d *HermesACPDriver) recordDrainCancels(all []*HermesACPSession) []string {
 // the file path, or "" when there is nothing to record (no turn in flight, or
 // already recorded) or the write failed (logged loudly: the cancel proceeds
 // either way, a stuck shutdown helps nobody).
-func (d *HermesACPDriver) recordDrainCancel(s *HermesACPSession) string {
+func (d *HermesACPDriver) recordDrainCancel(s *HermesACPSession, deadline time.Time) string {
 	s.mu.Lock()
 	turn := s.turn
 	var rec DrainCancelRecord
@@ -212,10 +218,18 @@ func (d *HermesACPDriver) recordDrainCancel(s *HermesACPSession) string {
 	rec.CancelledAt = now
 	rec.ElapsedSecs = int64(now.Sub(turn.startedAt).Seconds())
 	rec.LastTool, rec.AgentTail = drainRingCheckpoint(s, turn)
-	d.drainGit(&rec)
+	d.drainGit(&rec, deadline)
 
+	// The claim is released on every failure path below, so the Close pass (or a
+	// later BeginDrain) retries instead of treating a lost record as written.
+	release := func() {
+		d.mu.Lock()
+		delete(d.drainRecorded, key)
+		d.mu.Unlock()
+	}
 	dir := d.drainDir()
 	if dir == "" {
+		release()
 		slog.Error("managed-sessions: DRAIN RECORD NOT WRITTEN (no DrainDir/RecordDir configured); turn is cancelled and its work is not re-dispatchable from a record",
 			"session", s.id, "turn", turn.id, "worktree", rec.Worktree)
 		return ""
@@ -228,6 +242,7 @@ func (d *HermesACPDriver) recordDrainCancel(s *HermesACPSession) string {
 		err = atomicWriteConfigFile(path, append(b, '\n'))
 	}
 	if err != nil {
+		release()
 		slog.Error("managed-sessions: DRAIN RECORD WRITE FAILED; turn will still be cancelled",
 			"session", s.id, "turn", turn.id, "path", path, "err", err)
 		return ""
@@ -303,13 +318,22 @@ func drainRingCheckpoint(s *HermesACPSession, turn *hermesTurn) (*DrainLastTool,
 
 // drainGit fills branch, last commit and dirty files from the worktree. A git
 // failure is recorded in GitError, never fatal: the other fields still carry.
-func (d *HermesACPDriver) drainGit(rec *DrainCancelRecord) {
+func (d *HermesACPDriver) drainGit(rec *DrainCancelRecord, deadline time.Time) {
 	if rec.Worktree == "" {
 		rec.GitError = "session has no cwd"
 		return
 	}
+	if !time.Now().Before(deadline) {
+		rec.GitError = "drain budget exhausted before git was read"
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), drainGitTimeout)
 	defer cancel()
+	if dl, ok := ctx.Deadline(); ok && deadline.Before(dl) {
+		cancel()
+		ctx, cancel = context.WithDeadline(context.Background(), deadline)
+		defer cancel()
+	}
 	git := func(args ...string) (string, error) {
 		out, err := exec.CommandContext(ctx, "git", append([]string{"-C", rec.Worktree}, args...)...).Output()
 		return strings.TrimRight(string(out), "\n"), err
