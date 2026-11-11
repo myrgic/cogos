@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -307,14 +308,18 @@ func TestOAuthK4S1_ShutdownFlushesAnyStillQueuedRevocation(t *testing.T) {
 	// the real startOAuthJournalFlusher ticker interval is far longer than this test should wait.
 	restore()
 	ctx, cancel := context.WithCancel(context.Background())
-	env.srv.startOAuthJournalFlusher(ctx, time.Hour) // a tick that will never fire naturally in this test
+	// k4-delta-review4: a WaitGroup must be created fresh per generation, never shared/reused across
+	// restarts (a shared one panics: "WaitGroup is reused before previous Wait has returned" if a start
+	// races a still-waiting stop). This test creates its own, exactly as the real startBackground now does.
+	wg := new(sync.WaitGroup)
+	env.srv.startOAuthJournalFlusher(ctx, wg, time.Hour) // a tick that will never fire naturally in this test
 	cancel()
 	// k4-delta-review: polling with a timeout HID the real race -- stopBackground() used to return the
 	// instant cancel() fired, before the goroutine's ctx.Done() branch had actually run its flush, so a
-	// real shutdown could exit before the write landed. reaperWG.Wait() is the same join stopBackground()
-	// now does; asserting immediately after it returns (no sleep, no polling) is the synchronous check
-	// that would have caught the original bug.
-	env.srv.reaperWG.Wait()
+	// real shutdown could exit before the write landed. wg.Wait() is the same join stopBackground() now
+	// does (on THIS generation's WaitGroup); asserting immediately after it returns (no sleep, no
+	// polling) is the synchronous check that would have caught the original bug.
+	wg.Wait()
 	if n := len(env.srv.oauth.UnjournaledRevocations()); n != 0 {
 		t.Fatalf("still queued immediately after the flusher's WaitGroup was joined: %d, want 0 (the shutdown flush did not land before the join returned)", n)
 	}
@@ -326,4 +331,36 @@ func TestOAuthK4S1_ShutdownFlushesAnyStillQueuedRevocation(t *testing.T) {
 	if _, ok := rebuilt.Resolve(first.AccessToken); ok {
 		t.Fatal("revoked grant resurrected on boot replay: the shutdown flush did not actually journal it")
 	}
+}
+
+// TestOAuthK4_StartStopBackgroundConcurrentRestartDoesNotPanic is k4-delta-review4: a SINGLE shared
+// WaitGroup reused across restarts panics ("WaitGroup is reused before previous Wait has returned") if a
+// startBackground races a stopBackground still waiting on the PRIOR generation's loops. The fix makes
+// each generation's WaitGroup its own *sync.WaitGroup (bgWG), allocated fresh in startBackground and read
+// once under reaperMu by stopBackground before it unlocks and waits -- so a concurrent restart's new
+// WaitGroup is never the one an in-flight stop is blocked on. Hammer both calls concurrently and confirm
+// neither a panic nor a hang occurs across many iterations (the review reproduced the panic within ~15).
+func TestOAuthK4_StartStopBackgroundConcurrentRestartDoesNotPanic(t *testing.T) {
+	root := makeWorkspace(t)
+	cfg := makeConfig(t, root)
+	cfg.OAuth = OAuthConfig{Enabled: true, Issuer: "https://stage.example.test", Resource: testResource}
+	srv := NewServer(cfg, makeNucleus("Test", "unit-tester"), NewProcess(cfg, makeNucleus("Test", "unit-tester")))
+
+	const iterations = 500
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < iterations; i++ {
+			srv.startBackground()
+		}
+		close(done)
+	}()
+	for i := 0; i < iterations; i++ {
+		srv.stopBackground()
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("startBackground goroutine did not finish -- possible hang from a shared WaitGroup")
+	}
+	srv.stopBackground() // final stop, so no background loop is left running when the test ends
 }

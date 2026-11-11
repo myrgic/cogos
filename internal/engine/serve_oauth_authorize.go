@@ -247,14 +247,18 @@ func (s *Server) oauthRevokeFailClosed(grantID, reason string) error {
 // retried against the ledger.
 const oauthJournalFlushInterval = 15 * time.Second
 
-// startOAuthJournalFlusher retries unjournaled revocations until ctx ends.
-func (s *Server) startOAuthJournalFlusher(ctx context.Context, interval time.Duration) {
+// startOAuthJournalFlusher retries unjournaled revocations until ctx ends. wg is the CALLER's
+// per-generation WaitGroup (k4-delta-review4): Add/Done register against the specific instance passed in,
+// never a shared field, so a concurrent restart's fresh WaitGroup is never touched by this generation's
+// goroutine and vice versa -- the panic/hang from reusing one shared WaitGroup across restarts is
+// structurally impossible here.
+func (s *Server) startOAuthJournalFlusher(ctx context.Context, wg *sync.WaitGroup, interval time.Duration) {
 	if s.oauth == nil || interval <= 0 {
 		return
 	}
-	s.reaperWG.Add(1)
+	wg.Add(1)
 	go func() {
-		defer s.reaperWG.Done()
+		defer wg.Done()
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
@@ -269,7 +273,8 @@ func (s *Server) startOAuthJournalFlusher(ctx context.Context, interval time.Dur
 				//
 				// k4-delta-review follow-up: this flush used to run async with nothing joining it, so
 				// stopBackground could return (and the process could exit) before this write landed.
-				// reaperWG (added/Done here, waited on in stopBackground) closes that race.
+				// wg (added/Done here, waited on in stopBackground against the SAME instance) closes
+				// that race without the shared-WaitGroup reuse panic k4-delta-review4 found.
 				s.oauthFlushJournal()
 				return
 			case <-t.C:

@@ -69,11 +69,14 @@ type Server struct {
 	// reaperStop ends the session reaper started by Start (nil until then).
 	reaperMu   sync.Mutex
 	reaperStop context.CancelFunc
-	// reaperWG is joined by stopBackground so a shutdown waits for every background loop's current
-	// pass to finish -- specifically the OAuth journal flusher's final flush (k4-delta-review S1): without
-	// this, stopBackground returns the instant the context is cancelled, the goroutine's ctx.Done() branch
-	// runs its last oauthFlushJournal() asynchronously, and the process can exit before that write lands.
-	reaperWG sync.WaitGroup
+	// bgWG is a PER-GENERATION WaitGroup (k4-delta-review4: a single shared sync.WaitGroup reused across
+	// restarts panics -- "WaitGroup is reused before previous Wait has returned" -- if a startBackground
+	// races a stopBackground still waiting on the prior generation's loops). startBackground allocates a
+	// fresh *sync.WaitGroup under reaperMu each time it (re)starts the background loops; stopBackground
+	// reads it under the lock, releases the lock, then Waits on THAT instance only -- never on whatever a
+	// concurrent restart might allocate next. Joined so a shutdown waits for every background loop's final
+	// pass, in particular the OAuth journal flusher's shutdown flush (k4-followups-review S1).
+	bgWG *sync.WaitGroup
 	// Stage UI listener (serve_stage_ui.go); nil unless stage_ui.addr is set.
 	stageUIMu    sync.Mutex
 	stageUISrv   *http.Server
@@ -686,9 +689,11 @@ func (s *Server) startBackground() {
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	s.reaperStop = stop
+	wg := new(sync.WaitGroup) // this generation's WaitGroup; see bgWG's doc comment
+	s.bgWG = wg
 	s.startSessionReaper(ctx, defaultSessionReapTTL, defaultSessionReapInterval)
 	s.startRunExecutorLocked(ctx)
-	s.startOAuthJournalFlusher(ctx, oauthJournalFlushInterval)
+	s.startOAuthJournalFlusher(ctx, wg, oauthJournalFlushInterval)
 	// ADR-093 §4: the managed-session reaper (idle_timeout + client leases),
 	// the kernel's backstop for session end-of-life (managed_session_reaper.go).
 	if s.managedSessions != nil {
@@ -757,12 +762,15 @@ func (s *Server) backgroundRunning() bool {
 // ledger before this call returns, instead of racing process exit.
 func (s *Server) stopBackground() {
 	s.reaperMu.Lock()
+	wg := s.bgWG
 	if s.reaperStop != nil {
 		s.reaperStop()
 		s.reaperStop = nil
 	}
 	s.reaperMu.Unlock()
-	s.reaperWG.Wait()
+	if wg != nil {
+		wg.Wait() // waits on THIS generation only -- a concurrent restart's new WaitGroup is untouched
+	}
 }
 
 // Handler returns the HTTP handler, useful for httptest.NewServer in tests.
