@@ -211,13 +211,74 @@ func (st *oauthASState) pruneLocked(revoke func(grantID, reason string)) {
 	}
 }
 
+// oauthRevokeUnredeemed is the pruneLocked / redeemCode callback shape; it drops
+// the error because those callers have nobody to report it to. Every failure is
+// still loud (oauthRevokeFailClosed logs at Error) and still queued for retry.
 func (s *Server) oauthRevokeUnredeemed(grantID, reason string) {
+	_ = s.oauthRevokeFailClosed(grantID, reason)
+}
+
+// oauthRevokeFailClosed revokes a grant the KERNEL decided to kill (code
+// replay, failed exchange, unredeemed code, failed token issue). The grant is
+// dead in memory before the ledger is touched (OAuthStore.RevokeFailClosed), so
+// a ledger hiccup can never leave it live. An append failure is returned as
+// ErrOAuthLedgerAppendFailed so the /token response can refuse to claim a clean
+// outcome; the revocation is queued and retried by the journal flusher. A grant
+// that is already gone is not an error.
+func (s *Server) oauthRevokeFailClosed(grantID, reason string) error {
 	if s.oauth == nil {
+		return nil
+	}
+	_, err := s.oauth.RevokeFailClosed(grantID, "kernel", reason)
+	switch {
+	case err == nil, errors.Is(err, ErrOAuthGrantNotFound):
+		return nil
+	case errors.Is(err, ErrOAuthLedgerAppendFailed):
+		slog.Error("oauth: SECURITY revocation is in force in memory but NOT journaled; queued for retry. "+
+			"A restart before the ledger recovers would resurrect this grant.",
+			"event", "oauth.revocation_unjournaled", "grant_id", grantID, "reason", reason, "err", err)
+	default:
+		slog.Error("oauth: revoking a grant failed", "grant_id", grantID, "reason", reason, "err", err)
+	}
+	return err
+}
+
+// oauthJournalFlushInterval is how often queued, unjournaled revocations are
+// retried against the ledger.
+const oauthJournalFlushInterval = 15 * time.Second
+
+// startOAuthJournalFlusher retries unjournaled revocations until ctx ends.
+func (s *Server) startOAuthJournalFlusher(ctx context.Context, interval time.Duration) {
+	if s.oauth == nil || interval <= 0 {
 		return
 	}
-	if _, err := s.oauth.Revoke(grantID, "kernel", reason); err != nil && !errors.Is(err, ErrOAuthGrantNotFound) {
-		slog.Warn("oauth: revoking an unredeemed grant failed", "grant_id", grantID, "err", err)
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				s.oauthFlushJournal()
+			}
+		}
+	}()
+}
+
+// oauthFlushJournal runs one retry pass and reports the outcome.
+func (s *Server) oauthFlushJournal() int {
+	before := len(s.oauth.UnjournaledRevocations())
+	if before == 0 {
+		return 0
 	}
+	left := s.oauth.FlushUnjournaled()
+	if left > 0 {
+		slog.Error("oauth: revocations still not journaled", "event", "oauth.revocation_unjournaled", "pending", left)
+	} else {
+		slog.Warn("oauth: previously unjournaled revocations are now durable", "flushed", before)
+	}
+	return left
 }
 
 func (st *oauthASState) pendingCountLocked() int {

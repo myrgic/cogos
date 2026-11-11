@@ -683,6 +683,7 @@ func (s *Server) startBackground() {
 	s.reaperStop = stop
 	s.startSessionReaper(ctx, defaultSessionReapTTL, defaultSessionReapInterval)
 	s.startRunExecutorLocked(ctx)
+	s.startOAuthJournalFlusher(ctx, oauthJournalFlushInterval)
 	// ADR-093 §4: the managed-session reaper (idle_timeout + client leases),
 	// the kernel's backstop for session end-of-life (managed_session_reaper.go).
 	if s.managedSessions != nil {

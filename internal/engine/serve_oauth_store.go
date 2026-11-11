@@ -264,6 +264,10 @@ type OAuthStore struct {
 	tokens     map[string]*OAuthToken // by hash, every kind, rotated refresh included
 	tombstones map[string]struct{}    // hashes of tokens dropped with a dead grant (IsToken only)
 	issued     map[string]bool        // grants whose initial pair has been minted
+	// unjournaled holds security revocations that took effect in memory but whose
+	// ledger append failed (see RevokeFailClosed). They are retried until they
+	// land; a crash before then loses them, which is the one residual gap.
+	unjournaled map[string]*OAuthPendingRevocation
 
 	workspaceRoot string
 	appendEvent   identityGrantAppendFunc
@@ -281,6 +285,7 @@ func NewOAuthStoreWithLedger(workspaceRoot string) *OAuthStore {
 		tokens:        make(map[string]*OAuthToken),
 		tombstones:    make(map[string]struct{}),
 		issued:        make(map[string]bool),
+		unjournaled:   make(map[string]*OAuthPendingRevocation),
 		workspaceRoot: workspaceRoot,
 		appendEvent:   AppendEvent,
 		now:           func() time.Time { return time.Now().UTC() },
@@ -414,6 +419,9 @@ func (st *OAuthStore) Rotate(refreshToken string) (*OAuthTokenPair, error) {
 		}
 		st.dropGrantLocked(g.GrantID)
 		if lerr != nil {
+			// Dropped in memory but not durable: queue the revocation so it is
+			// retried instead of resurfacing on the next restart.
+			st.queueUnjournaledLocked(g.GrantID, "system", "refresh_reuse", now, lerr)
 			return nil, errors.Join(ErrOAuthRefreshReuse, fmt.Errorf("%w: %w", ErrOAuthLedgerAppendFailed, lerr))
 		}
 		return nil, ErrOAuthRefreshReuse
@@ -528,6 +536,87 @@ func (st *OAuthStore) Revoke(grantID, by, reason string) (*OAuthGrant, error) {
 	}
 	st.dropGrantLocked(grantID)
 	return g, nil
+}
+
+// OAuthPendingRevocation is a revocation that is in force in memory but not yet
+// in the ledger.
+type OAuthPendingRevocation struct {
+	GrantID  string    `json:"grant_id"`
+	By       string    `json:"by"`
+	Reason   string    `json:"reason"`
+	Since    time.Time `json:"since"`
+	Attempts int       `json:"attempts"`
+	LastErr  string    `json:"last_error"`
+}
+
+// RevokeFailClosed is the revocation for security events the kernel itself
+// triggers (authorization-code replay, a failed exchange, an unredeemed code):
+// the grant dies in memory FIRST, so no token under it resolves from this
+// instant, and the ledger append follows. Unlike Revoke (admin: write-ahead,
+// grant stays live if the append fails, the operator sees the error and retries)
+// there is nobody to retry for the kernel, and a grant left live because the disk
+// hiccuped is exactly the grant an attacker is trying to keep. If the append
+// fails the revocation is queued (FlushUnjournaled retries it) and the returned
+// error wraps ErrOAuthLedgerAppendFailed. A missing grant is ErrOAuthGrantNotFound.
+func (st *OAuthStore) RevokeFailClosed(grantID, by, reason string) (*OAuthGrant, error) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	g, ok := st.grants[grantID]
+	if !ok {
+		return nil, ErrOAuthGrantNotFound
+	}
+	now := st.now()
+	st.dropGrantLocked(grantID)
+	if err := st.appendLocked("identity.oauth.grant.revoked", revokedData(grantID, by, reason, now), now); err != nil {
+		st.queueUnjournaledLocked(grantID, by, reason, now, err)
+		return g, fmt.Errorf("%w: %w", ErrOAuthLedgerAppendFailed, err)
+	}
+	return g, nil
+}
+
+func (st *OAuthStore) queueUnjournaledLocked(grantID, by, reason string, now time.Time, cause error) {
+	if _, dup := st.unjournaled[grantID]; dup {
+		return
+	}
+	st.unjournaled[grantID] = &OAuthPendingRevocation{
+		GrantID: grantID, By: by, Reason: reason, Since: now, Attempts: 1, LastErr: cause.Error(),
+	}
+}
+
+// FlushUnjournaled retries every queued revocation and returns how many are
+// still unjournaled. Idempotent: a revoked event for a grant replay already
+// dropped changes nothing.
+func (st *OAuthStore) FlushUnjournaled() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for id, p := range st.unjournaled {
+		now := st.now()
+		if err := st.appendLocked("identity.oauth.grant.revoked", revokedData(id, p.By, p.Reason, p.Since), now); err != nil {
+			p.Attempts++
+			p.LastErr = err.Error()
+			continue
+		}
+		delete(st.unjournaled, id)
+	}
+	return len(st.unjournaled)
+}
+
+// UnjournaledRevocations lists revocations that are in force in memory but not
+// yet durable, oldest first. Empty is the healthy state.
+func (st *OAuthStore) UnjournaledRevocations() []OAuthPendingRevocation {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	out := make([]OAuthPendingRevocation, 0, len(st.unjournaled))
+	for _, p := range st.unjournaled {
+		out = append(out, *p)
+	}
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && (out[j].Since.Before(out[j-1].Since) ||
+			(out[j].Since.Equal(out[j-1].Since) && out[j].GrantID < out[j-1].GrantID)); j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
 }
 
 // Grant returns the live grant with that id.
