@@ -308,17 +308,15 @@ func TestOAuthK4S1_ShutdownFlushesAnyStillQueuedRevocation(t *testing.T) {
 	restore()
 	ctx, cancel := context.WithCancel(context.Background())
 	env.srv.startOAuthJournalFlusher(ctx, time.Hour) // a tick that will never fire naturally in this test
-	cancel()                                         // simulates stopBackground() cancelling the context on shutdown
-	// The flush goroutine runs asynchronously; give it a moment to execute its ctx.Done() branch.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(env.srv.oauth.UnjournaledRevocations()) == 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	cancel()
+	// k4-delta-review: polling with a timeout HID the real race -- stopBackground() used to return the
+	// instant cancel() fired, before the goroutine's ctx.Done() branch had actually run its flush, so a
+	// real shutdown could exit before the write landed. reaperWG.Wait() is the same join stopBackground()
+	// now does; asserting immediately after it returns (no sleep, no polling) is the synchronous check
+	// that would have caught the original bug.
+	env.srv.reaperWG.Wait()
 	if n := len(env.srv.oauth.UnjournaledRevocations()); n != 0 {
-		t.Fatalf("still queued after shutdown: %d, want 0 (the shutdown flush should have landed it)", n)
+		t.Fatalf("still queued immediately after the flusher's WaitGroup was joined: %d, want 0 (the shutdown flush did not land before the join returned)", n)
 	}
 
 	rebuilt, err := RebuildOAuthStoreFromLedger(root)

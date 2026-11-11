@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/myrgic/cogos/pkg/pathsafe"
@@ -573,26 +574,52 @@ func TestAppendEvent_HealsTornTailAndTruncatesOnFailedWrite(t *testing.T) {
 		t.Fatalf("file did not grow after a successful append: before=%d after=%d", sizeBefore.Size(), sizeAfterHeal.Size())
 	}
 
-	// Scenario 2: a write that fails must not leave a fresh torn fragment. Make the file read-only so the
-	// append's write fails; confirm the size is unchanged afterwards (the failed attempt added nothing).
-	if err := os.Chmod(eventsFile, 0444); err != nil {
-		t.Fatal(err)
+	// Scenario 2: a write that fails must not leave a fresh torn fragment. k4-delta-review caught that
+	// chmod 0444 fails at os.OpenFile itself (permission denied), never reaching the write -- so it never
+	// actually exercised the truncate-on-error path. Use RLIMIT_FSIZE instead: the file stays writable,
+	// opens fine, and only the WRITE fails once it would cross the limit (a real EFBIG from the kernel,
+	// not a simulated error), which is exactly the code path that needs covering.
+	var origLimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &origLimit); err != nil {
+		t.Skipf("RLIMIT_FSIZE unavailable on this platform: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(eventsFile, 0644) })
+	t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &origLimit) })
 	sizeBeforeFail := sizeAfterHeal.Size()
+	// Cur must be just below where the next full line would land, so the OPEN and the pre-write Stat both
+	// succeed (file already exists under the limit) and only the Fprintf of the new, larger line fails.
+	low := syscall.Rlimit{Cur: uint64(sizeBeforeFail) + 5, Max: origLimit.Max}
+	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &low); err != nil {
+		t.Skipf("could not lower RLIMIT_FSIZE: %v", err)
+	}
 	env2 := &EventEnvelope{
-		HashedPayload: EventPayload{Type: "test.should.fail", Timestamp: nowISO(), SessionID: sessionID},
+		HashedPayload: EventPayload{Type: "test.should.fail.past.the.file.size.limit", Timestamp: nowISO(), SessionID: sessionID},
 		Metadata:      EventMetadata{Source: "test"},
 	}
-	if err := AppendEvent(root, sessionID, env2); err == nil {
-		t.Skip("this environment lets root/the test user write a 0444 file (e.g. running as root); cannot exercise the write-failure path here")
+	appendErr := AppendEvent(root, sessionID, env2)
+	_ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &origLimit) // restore before any further I/O (Stat et al.)
+	if appendErr == nil {
+		t.Fatal("expected AppendEvent to fail once RLIMIT_FSIZE is below the new line's size")
 	}
 	sizeAfterFail, statErr := os.Stat(eventsFile)
 	if statErr != nil {
 		t.Fatal(statErr)
 	}
 	if sizeAfterFail.Size() != sizeBeforeFail {
-		t.Fatalf("a failed append grew the file: before=%d after=%d (should be unchanged, not left with a fresh torn fragment)",
+		t.Fatalf("a failed append grew the file: before=%d after=%d (should be truncated back, not left with a fresh torn fragment)",
 			sizeBeforeFail, sizeAfterFail.Size())
+	}
+	// And every COMPLETE line after the original synthetic torn fragment (line 0, which this test injected
+	// directly to simulate a pre-existing crash artifact and was never valid JSON on its own) must still be
+	// cleanly parseable -- no NEW torn tail left by this scenario's failed write.
+	raw2, err := os.ReadFile(eventsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rest := strings.Split(strings.TrimRight(string(raw2), "\n"), "\n")[1:]
+	for i, l := range rest {
+		var e EventEnvelope
+		if err := json.Unmarshal([]byte(l), &e); err != nil {
+			t.Fatalf("line %d (after the synthetic torn line) is not valid JSON after the failed write: %v\nline: %q", i+1, err, l)
+		}
 	}
 }

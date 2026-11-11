@@ -69,6 +69,11 @@ type Server struct {
 	// reaperStop ends the session reaper started by Start (nil until then).
 	reaperMu   sync.Mutex
 	reaperStop context.CancelFunc
+	// reaperWG is joined by stopBackground so a shutdown waits for every background loop's current
+	// pass to finish -- specifically the OAuth journal flusher's final flush (k4-delta-review S1): without
+	// this, stopBackground returns the instant the context is cancelled, the goroutine's ctx.Done() branch
+	// runs its last oauthFlushJournal() asynchronously, and the process can exit before that write lands.
+	reaperWG sync.WaitGroup
 	// Stage UI listener (serve_stage_ui.go); nil unless stage_ui.addr is set.
 	stageUIMu    sync.Mutex
 	stageUISrv   *http.Server
@@ -746,14 +751,18 @@ func (s *Server) backgroundRunning() bool {
 
 // stopBackground stops what startBackground started (idempotent): cancelling
 // reaperStop ends the serving-lifetime context, so both the session reaper and
-// every run host loop stop.
+// every run host loop stop. It then WAITS for every background loop's final
+// pass -- in particular the OAuth journal flusher's shutdown flush (k4-delta-
+// review S1) -- so a revocation queued right before shutdown reaches the
+// ledger before this call returns, instead of racing process exit.
 func (s *Server) stopBackground() {
 	s.reaperMu.Lock()
-	defer s.reaperMu.Unlock()
 	if s.reaperStop != nil {
 		s.reaperStop()
 		s.reaperStop = nil
 	}
+	s.reaperMu.Unlock()
+	s.reaperWG.Wait()
 }
 
 // Handler returns the HTTP handler, useful for httptest.NewServer in tests.

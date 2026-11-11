@@ -233,12 +233,19 @@ func AppendEvent(workspaceRoot, sessionID string, envelope *EventEnvelope) error
 			}
 		}
 	}
-	preSize := int64(0)
+	// k4-delta-review: if Stat fails here, preSize must NOT default to 0 -- a later truncate to a bogus 0
+	// would wipe the entire hash-chained ledger on a write failure, not just the new line. Skip the
+	// truncate-on-error entirely in that (rare: the file was just opened successfully) case.
+	preSize, statOK := int64(0), false
 	if info, statErr := f.Stat(); statErr == nil {
-		preSize = info.Size()
+		preSize, statOK = info.Size(), true
 	}
 	if _, err = fmt.Fprintf(f, "%s\n", line); err != nil {
-		if truncErr := f.Truncate(preSize); truncErr != nil {
+		if !statOK {
+			slog.Error("ledger: append failed and the pre-write size could not be read; skipping truncate "+
+				"to avoid wiping the ledger on a bogus size -- a torn line fragment may remain on disk",
+				"session", sessionID, "write_err", err)
+		} else if truncErr := f.Truncate(preSize); truncErr != nil {
 			slog.Error("ledger: append failed AND truncate-back-to-known-good-size also failed; "+
 				"a torn line fragment may remain on disk", "session", sessionID, "write_err", err, "truncate_err", truncErr)
 		}

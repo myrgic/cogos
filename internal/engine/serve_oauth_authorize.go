@@ -252,7 +252,9 @@ func (s *Server) startOAuthJournalFlusher(ctx context.Context, interval time.Dur
 	if s.oauth == nil || interval <= 0 {
 		return
 	}
+	s.reaperWG.Add(1)
 	go func() {
+		defer s.reaperWG.Done()
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
@@ -264,6 +266,10 @@ func (s *Server) startOAuthJournalFlusher(ctx context.Context, interval time.Dur
 				// replay -- exactly the scenario an operator triggers when restarting to pick up a
 				// ledger fix. One last pass here closes that: if the ledger has recovered by the time
 				// we're asked to stop, the revocation lands before the process actually exits.
+				//
+				// k4-delta-review follow-up: this flush used to run async with nothing joining it, so
+				// stopBackground could return (and the process could exit) before this write landed.
+				// reaperWG (added/Done here, waited on in stopBackground) closes that race.
 				s.oauthFlushJournal()
 				return
 			case <-t.C:
