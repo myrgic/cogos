@@ -30,6 +30,7 @@ package engine
 
 import (
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -126,10 +127,7 @@ func (l *oauthPublicLimiter) newBucket(limit int) *grantMintLimiter {
 // The per-IP bucket is charged first so one abusive IP cannot burn the global
 // budget with requests it was already going to be refused.
 func (l *oauthPublicLimiter) allow(ip string) (ok bool, retryAfter time.Duration) {
-	if len(ip) > 64 { // longer than any IPv6 literal; bound the table's key size
-		ip = ip[:64]
-	}
-	b := l.bucketFor(ip)
+	b := l.bucketFor(oauthLimiterKey(ip))
 	if !b.Allow() {
 		return false, b.retryAfter()
 	}
@@ -137,6 +135,30 @@ func (l *oauthPublicLimiter) allow(ip string) (ok bool, retryAfter time.Duration
 		return false, l.global.retryAfter()
 	}
 	return true, 0
+}
+
+// oauthLimiterKey maps a client IP to its per-IP bucket key. An IPv6 address
+// keys on its /64 (the smallest prefix a host or site is routinely handed), so
+// a single host rotating through its own /64 shares one bucket instead of
+// minting ~2^64 fresh ones and starving the global ceiling that real clients
+// share. IPv4 (and IPv4-mapped IPv6, unmapped first) keys on the full address.
+// The prefix is a real mask via net/netip, never a truncation of the text. A
+// string that is not an IP at all is used as-is, capped at 64 bytes to bound
+// the table's key size.
+func oauthLimiterKey(ip string) string {
+	if a, err := netip.ParseAddr(ip); err == nil {
+		a = a.Unmap().WithZone("")
+		if a.Is6() {
+			if p, err := a.Prefix(64); err == nil {
+				return p.String()
+			}
+		}
+		return a.String()
+	}
+	if len(ip) > 64 {
+		ip = ip[:64]
+	}
+	return ip
 }
 
 func (l *oauthPublicLimiter) bucketFor(ip string) *grantMintLimiter {
@@ -204,6 +226,13 @@ func (s *Server) oauthPublicHandler() http.Handler {
 	lim := newOAuthPublicLimiter(oauthTokenIPLimit, oauthTokenGlobalLimit, oauthTokenIPWindow, oauthTokenMaxTrackedIPs)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == oauthTokenPath {
+			// The read deadline is armed FIRST, before the limiter: net/http
+			// drains an unread request body before it writes a response, so a
+			// caller the limiter is about to refuse could otherwise stall its
+			// body and pin the connection for as long as it likes before the
+			// 429 can leave. Not supported by every ResponseWriter (httptest);
+			// the real listener's is, which is the case that matters.
+			_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(oauthTokenReadTimeout))
 			// Every method counts, before the body is read or parsed.
 			if ok, retry := lim.allow(stageClassify(r).ip); !ok {
 				w.Header().Set("Retry-After", strconv.Itoa(int((retry+time.Second-1)/time.Second)))
@@ -211,9 +240,6 @@ func (s *Server) oauthPublicHandler() http.Handler {
 					"too many token requests; retry after the interval in Retry-After")
 				return
 			}
-			// Not supported by every ResponseWriter (httptest); the real
-			// listener's is, which is the case that matters.
-			_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(oauthTokenReadTimeout))
 		}
 		mux.ServeHTTP(w, r)
 	})
