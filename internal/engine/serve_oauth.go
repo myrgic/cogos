@@ -33,6 +33,7 @@ import (
 // stage_ui listener's public-path predicate.
 const (
 	oauthWellKnownASPath     = "/.well-known/oauth-authorization-server"
+	oauthWellKnownPRPath     = "/.well-known/oauth-protected-resource/mcp"
 	oauthAuthorizePath       = "/oauth/authorize"
 	oauthAuthorizeStatusPath = "/oauth/authorize/status/"
 	oauthTokenPath           = "/oauth/token"
@@ -184,6 +185,7 @@ func (s *Server) registerOAuthRoutes(mux *http.ServeMux) {
 		return
 	}
 	s.route(mux, "GET "+oauthWellKnownASPath, s.handleOAuthASMetadata)
+	s.route(mux, "GET "+oauthWellKnownPRPath, s.handleOAuthPRMetadata)
 
 	// Public, self-authenticating (K3/K4).
 	s.route(mux, "GET "+oauthAuthorizePath, s.handleOAuthAuthorize)                    // K3
@@ -211,6 +213,33 @@ func (s *Server) handleOAuthASMetadata(w http.ResponseWriter, r *http.Request) {
 	_ = enc.Encode(s.oauthASMetadata())
 }
 
+// oauthPRMetadata builds the RFC 9728 protected-resource metadata document for
+// the stage's /mcp resource. Config only, no request state. "resource" is the
+// same RFC 8707 value the AS issues tokens for (oauthSettings().Resource, which
+// defaults to Issuer + "/mcp"), so the resource a client discovers here is the
+// audience the token endpoint binds.
+func (s *Server) oauthPRMetadata() map[string]any {
+	st := s.oauthSettings()
+	return map[string]any{
+		"resource":                 st.Resource,
+		"authorization_servers":    []string{st.Issuer},
+		"bearer_methods_supported": []string{"header"},
+	}
+}
+
+// handleOAuthPRMetadata serves GET /.well-known/oauth-protected-resource/mcp,
+// the target of the /mcp 401 challenge's resource_metadata pointer. Same
+// caching and CORS posture as the AS metadata route.
+func (s *Server) handleOAuthPRMetadata(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.WriteHeader(http.StatusOK)
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(s.oauthPRMetadata())
+}
+
 // handleOAuthNotImplemented is the placeholder for routes a later slice fills.
 func (s *Server) handleOAuthNotImplemented(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -222,7 +251,7 @@ func (s *Server) handleOAuthNotImplemented(w http.ResponseWriter, r *http.Reques
 // authenticate inside their own handlers: the discovery document and /oauth/*.
 // /v1/oauth/* is NOT public.
 func isOAuthPublicPath(path string) bool {
-	return path == oauthWellKnownASPath || strings.HasPrefix(path, oauthPublicPrefix)
+	return path == oauthWellKnownASPath || path == oauthWellKnownPRPath || strings.HasPrefix(path, oauthPublicPrefix)
 }
 
 // isOAuthInternalPath reports whether path is under /v1/oauth.
