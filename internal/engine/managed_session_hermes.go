@@ -108,6 +108,10 @@ type HermesACPDriverConfig struct {
 	// request's. "" = no durable records: every cold resume reads as the
 	// legacy default class.
 	RecordDir string
+	// DrainDir is where drain-cancel records go (managed_session_drain.go).
+	// "" = a drain-cancelled sibling of RecordDir; "" with no RecordDir = no
+	// durable record (logged as an error when a turn is cancelled).
+	DrainDir string
 	// JournalDir is where this driver's session journals are written —
 	// <workspace>/.cog/run/sessions for the kernel's own workspace. Per driver,
 	// never a process global: two kernels in one process each keep their own
@@ -210,6 +214,11 @@ type HermesACPDriver struct {
 	sessions map[string]*HermesACPSession
 	loads    map[string]*loadClaim // in-flight Create{Load: id}, one per id
 	closed   bool
+
+	// draining is set by BeginDrain before any record or cancel; drainRecorded
+	// holds the turns already recorded ("session/turn" -> record path).
+	draining      atomic.Bool
+	drainRecorded map[string]string
 
 	classProbeMu       sync.Mutex
 	classProbeCache    map[string]ManagedSessionClassStatus
@@ -638,6 +647,8 @@ type HermesACPSession struct {
 type hermesTurn struct {
 	id        string
 	startedAt time.Time
+	prompt    json.RawMessage   // the ACP content blocks the turn was started with (drain record)
+	forwards  []json.RawMessage // prompts forwarded into it (Redirect) that may not have landed; guarded by HermesACPSession.mu
 }
 
 type pendingPermission struct {
@@ -882,7 +893,14 @@ func (s *HermesACPSession) Prompt(content json.RawMessage) (string, error) {
 		s.mu.Unlock()
 		return "", ErrTurnInFlight
 	}
-	turn := &hermesTurn{id: "t" + strconv.FormatUint(s.turnSeq.Add(1), 10), startedAt: time.Now()}
+	// Checked under the lock that registers the turn: BeginDrain sets the flag
+	// first and then snapshots every session under this same lock, so a turn
+	// that registers here is either refused or seen by the drain record.
+	if s.proc.d.draining.Load() {
+		s.mu.Unlock()
+		return "", ErrDraining
+	}
+	turn := &hermesTurn{id: "t" + strconv.FormatUint(s.turnSeq.Add(1), 10), startedAt: time.Now(), prompt: blocks}
 	s.turn = turn
 	// Registered under the same lock the reaper decides under (reapVerdict):
 	// a session with a turn is never reaped, and one already reaped refused above.
@@ -1008,7 +1026,12 @@ func (s *HermesACPSession) Redirect(content json.RawMessage) (string, error) {
 		s.mu.Unlock()
 		return "", ErrTurnInFlight
 	}
+	if s.proc.d.draining.Load() {
+		s.mu.Unlock()
+		return "", ErrDraining
+	}
 	s.fwdPending++ // released below, in the same critical section that adopts or resolves the forward
+	turn.forwards = append(turn.forwards, blocks)
 	s.lastActivity = time.Now()
 	if s.leaseTTL > 0 {
 		s.leaseExpires = s.lastActivity.Add(s.leaseTTL)
@@ -1041,7 +1064,7 @@ func (s *HermesACPSession) Redirect(content json.RawMessage) (string, error) {
 			// is somehow still running; then the call is just slow, and we keep waiting for it.
 			s.mu.Lock()
 			if s.turn == nil {
-				adopted = &hermesTurn{id: fid, startedAt: time.Now()}
+				adopted = &hermesTurn{id: fid, startedAt: time.Now(), prompt: blocks}
 				s.turn = adopted
 			}
 			s.mu.Unlock()
@@ -1252,6 +1275,10 @@ func (d *HermesACPDriver) Create(ctx context.Context, opts HermesACPOpts) (*Herm
 	if d.closed {
 		d.mu.Unlock()
 		return nil, errors.New("hermes-acp: driver closed")
+	}
+	if d.draining.Load() {
+		d.mu.Unlock()
+		return nil, ErrDraining
 	}
 	var parent *HermesACPSession
 	if opts.ForkOf != "" {
@@ -1970,13 +1997,19 @@ func (d *HermesACPDriver) TurnsInFlight() int {
 // dozens of sessions (62 on darkstar, 2026-10-24) must not take minutes to
 // shut down.
 func (d *HermesACPDriver) Close() {
+	d.draining.Store(true)
 	d.mu.Lock()
 	d.closed = true
 	ids := make([]string, 0, len(d.sessions))
-	for id := range d.sessions {
+	all := make([]*HermesACPSession, 0, len(d.sessions))
+	for id, s := range d.sessions {
 		ids = append(ids, id)
+		all = append(all, s)
 	}
 	d.mu.Unlock()
+	// Record before cancelling (managed_session_drain.go): a no-op for turns
+	// BeginDrain already recorded, the record for the rest.
+	d.recordDrainCancels(all)
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, reapConcurrency)
 	for _, id := range ids {

@@ -646,6 +646,12 @@ func (s *Server) Serve(ln net.Listener) error {
 // cancelling it there ends the host loop of every run in flight (bounded: the
 // loop stops waiting for a turn and closes the run).
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Drain before anything else stops: stopBackground ends the run executor's
+	// host loops, which can end a run's turn on their own, and the record of
+	// that turn must be written while it is still in flight.
+	if s.managedSessions != nil {
+		s.managedSessions.BeginDrain()
+	}
 	s.stopBackground()
 	s.stopStageUI()
 	if s.managedSessions != nil {
