@@ -67,7 +67,7 @@ var oauthTokenReadTimeout = 15 * time.Second
 // "/OAuth/token" are not on the list and fall through to the proxy.
 func isOAuthListenerPath(p string) bool {
 	switch p {
-	case oauthWellKnownASPath, oauthAuthorizePath, oauthTokenPath:
+	case oauthWellKnownASPath, oauthWellKnownPRPath, oauthAuthorizePath, oauthTokenPath:
 		return true
 	}
 	if !strings.HasPrefix(p, oauthAuthorizeStatusPath) {
@@ -196,6 +196,7 @@ func (s *Server) oauthPublicHandler() http.Handler {
 		mux.HandleFunc(pattern, withSpan(method+" "+p, h, s.spanEmitter))
 	}
 	reg("GET "+oauthWellKnownASPath, s.handleOAuthASMetadata)
+	reg("GET "+oauthWellKnownPRPath, s.handleOAuthPRMetadata)
 	reg("GET "+oauthAuthorizePath, s.handleOAuthAuthorize)
 	reg("GET "+oauthAuthorizeStatusPath+"{id}", s.handleOAuthAuthorizeStatus)
 	reg("POST "+oauthTokenPath, s.handleOAuthToken)
