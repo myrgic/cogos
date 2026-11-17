@@ -105,6 +105,9 @@ func TestStageUIRoles_O01_OwnerOnlyRoutes404(t *testing.T) {
 	for _, pre := range []string{"/r/", "/k/"} {
 		for _, key := range []string{rkGuest, rkCollab} {
 			for _, p := range roleOwnerOnlyPaths {
+				if key == rkCollab && isOraclesPath(p) {
+					continue // a collaborator reaches the Oracles app: see O01c
+				}
 				for _, m := range []string{"GET", "POST"} {
 					up.reset()
 					rec := shadowDo(h, m, pre+key+p, "203.0.113.7", false)
@@ -401,5 +404,47 @@ func TestStageUIRoles_RoleIsTheLinkRole(t *testing.T) {
 	}
 	if rec := shadowDo(h, "GET", "/r/ROLEASOWNERKEY00000001/deck", "203.0.113.7", false); rec.Code != 200 || up.hits() != 1 {
 		t.Fatalf("owner-role link must pass: %d hits=%d", rec.Code, up.hits())
+	}
+}
+
+func isOraclesPath(p string) bool { return p == "/oracles" || strings.HasPrefix(p, "/oracles/") }
+
+// O01c. The Oracles app is open to a collaborator (the Stage's oracles_key_gate
+// says the same) and still 404s a guest. Every Oracles path the page loads is
+// listed, plus the pack paths the Stage gates by device pairing on its own.
+func TestStageUIRoles_O01c_CollaboratorReachesOracles(t *testing.T) {
+	paths := []string{
+		"/oracles", "/oracles/", "/oracles/web/", "/oracles/web/oracles-web.html",
+		"/oracles/web/@pin", "/oracles/web/@versions", "/oracles/web/api/me",
+		"/oracles/pack/manifest.json", "/oracles/extras/link.2bpp", "/oracles/x/y",
+	}
+	h, _, up := rolesFixture(t, StageUIKeysEnforce)
+	for _, pre := range []string{"/r/", "/k/"} {
+		for _, p := range paths {
+			for _, m := range []string{"GET", "POST", "PUT"} {
+				up.reset()
+				if rec := shadowDo(h, m, pre+rkCollab+p, "203.0.113.7", false); rec.Code != 200 || up.hits() != 1 {
+					t.Fatalf("collaborator %s %s...%s: got %d hits=%d, want the Stage to answer", m, pre, p, rec.Code, up.hits())
+				}
+				up.reset()
+				if rec := shadowDo(h, m, pre+rkGuest+p, "203.0.113.7", false); rec.Code != 404 || rec.Body.String() != "not found" || up.hits() != 0 {
+					t.Fatalf("guest %s %s...%s: got %d %q hits=%d, want 404 before the Stage", m, pre, p, rec.Code, rec.Body.String(), up.hits())
+				}
+			}
+		}
+	}
+	// A prefix is not a substring: oracles-x is not the Oracles app.
+	for _, p := range []string{"/oraclesx", "/oracles-x/y"} {
+		up.reset()
+		if rec := shadowDo(h, "GET", "/r/"+rkCollab+p, "203.0.113.7", false); up.hits() != 1 {
+			t.Fatalf("collaborator %s: %d hits=%d, want proxied (not an owner route, not ours)", p, rec.Code, up.hits())
+		}
+	}
+	// The other owner-only routes stay closed to a collaborator.
+	for _, p := range []string{"/deck", "/monengine", "/oscine", "/studio/api/x", "/device/request"} {
+		up.reset()
+		if rec := shadowDo(h, "GET", "/r/"+rkCollab+p, "203.0.113.7", false); rec.Code != 404 || up.hits() != 0 {
+			t.Fatalf("collaborator %s: got %d hits=%d, want 404 before the Stage", p, rec.Code, up.hits())
+		}
 	}
 }
