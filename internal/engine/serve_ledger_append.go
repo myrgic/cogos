@@ -9,10 +9,18 @@
 // identifier and recomputes both hashes so the caller can verify, byte for
 // byte, that what landed is what it sent, before trusting the archive.
 //
-// Content addressing follows ADR-047 (Content-Addressed Cognitive Substrate,
-// canonical, shipped in pkg/cogblock): the content hash is the hex SHA-256 of
-// the raw content bytes (HashEvent, the same function the chain uses). This
-// file does NOT rely on ADR-089 (draft, never promoted).
+// Content addressing follows the content-addressed substrate design (hash
+// algorithm: hex SHA-256 of the raw content bytes, via HashEvent -- the same
+// function the chain uses). That design (the private corpus's ADR-047) has
+// NOT been publicly ported into this repo's docs/adrs/ (which runs 090-104,
+// 121; see docs/rfcs/0002-public-corpus-migration.md's inventory, which
+// lists ADR-047 as part of the still-private 89-ADR corpus and states a
+// privately-accepted ADR ports as public draft, not canonical). cog-review
+// (PR #730, 2026-11-19) correctly caught an earlier draft of this file
+// citing ADR-047 as "canonical, shipped, in-repo" -- that was not verifiable
+// from this repository and is corrected here: cite the mechanism actually
+// visible in this tree (HashEvent, AppendEvent, the existing hash-chain
+// implementation in ledger.go), not an ADR number this repo cannot resolve.
 //
 // PROVISIONAL BUCKET CHOICE (pending RR-1): which ledger bucket a room's
 // content belongs in is an OPEN question (RR-1). Chaz said "build the
@@ -22,6 +30,15 @@
 // it is a new bucket rather than the real P4-3 `rooms` bucket because `rooms`
 // is folded by RoomBoardStore on boot and must stay board.entry-only. Changing
 // the default (or routing to the general session ledger) is a one-line change.
+// The bucket itself is an ALLOWLIST (see allowedLedgerAppendBuckets below), not
+// a denylist -- a denylist of fixed names cannot enumerate the kernel's
+// open-ended dynamic bucket namespace (live session IDs, "genesis"), which
+// cog-review also caught: an earlier denylist draft let this route splice a
+// chain-valid event into any live session's real ledger, or into "genesis".
+// The route additionally requires ScopeLedgerAppend (serve_grant_auth.go) --
+// an earlier draft had no scope mapping at all, so any live grant of any
+// scope could reach it; also caught by cog-review and fixed the same way
+// managed-sessions' identical gap (#346 in that file) was fixed before.
 package engine
 
 import (
@@ -47,17 +64,6 @@ const LedgerAppendEventType = "ledger.append"
 
 // maxLedgerAppendBody bounds the request body (content included).
 const maxLedgerAppendBody = 8 << 20
-
-// reservedLedgerBuckets are kernel-owned buckets the generic append route
-// must never write: their folds assume only their own event types.
-var reservedLedgerBuckets = map[string]bool{
-	RoomsLedgerBucket: true,
-	RunsLedgerBucket:  true,
-	"identity-grants":      true,
-	"identity-share-links": true,
-	"identity-pairing":     true,
-	"worktree-reconciler":  true,
-}
 
 // Append/read-back errors, mapped to HTTP statuses by the handlers.
 var (
@@ -101,16 +107,33 @@ type LedgerEntryResult struct {
 	Errors           []string               `json:"errors,omitempty"`
 }
 
+// allowedLedgerAppendBuckets is an ALLOWLIST, not a denylist: this route
+// appends an attacker/peer-controlled, chain-valid event into whatever
+// bucket it resolves to, and AppendEvent's bucket/sessionID namespace is
+// shared with an open-ended set of dynamic buckets elsewhere in the kernel
+// (live per-conversation sessions keyed by arbitrary session IDs, and the
+// literal "genesis" bucket GetHashAlgorithm reads). A denylist of fixed
+// names (the prior reservedLedgerBuckets) cannot enumerate that dynamic set,
+// so it let a caller splice a fabricated entry into any live session's real
+// hash chain, or into "genesis" -- found by cog-review (PR #730, 2026-11-19)
+// and confirmed by reading GetHashAlgorithm (ledger.go:334-351). Add a bucket
+// here only when a real caller needs it; "room-archive" is the only one
+// tonight (stage's archive_room, RFC-kernel-event-ledger-as-observation-point
+// D2) and its own name is PROVISIONAL pending RR-1.
+var allowedLedgerAppendBuckets = map[string]bool{
+	"room-archive": true,
+}
+
 // resolveLedgerAppendBucket validates a requested bucket (default applied).
 func resolveLedgerAppendBucket(b string) (string, error) {
 	if b == "" {
-		return DefaultLedgerAppendBucket, nil
+		b = DefaultLedgerAppendBucket
 	}
 	if pathsafe.SanitizeComponent(b) != b || b == "." || b == ".." {
 		return "", fmt.Errorf("%w: bucket %q is not a plain name", ErrLedgerAppendInvalid, b)
 	}
-	if reservedLedgerBuckets[b] {
-		return "", fmt.Errorf("%w: bucket %q is kernel-reserved", ErrLedgerAppendInvalid, b)
+	if !allowedLedgerAppendBuckets[b] {
+		return "", fmt.Errorf("%w: bucket %q is not allowlisted for this route", ErrLedgerAppendInvalid, b)
 	}
 	return b, nil
 }

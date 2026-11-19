@@ -79,6 +79,14 @@ func TestLedgerAppendNamedBucketLandsInThatBucket(t *testing.T) {
 	t.Cleanup(resetLedgerCacheForTest)
 	root := srv.cfg.WorkspaceRoot
 
+	// Named-bucket isolation needs a second real bucket name to prove a
+	// write lands in ITS bucket, not another. Extend the allowlist for this
+	// test only (allowedLedgerAppendBuckets is a production security
+	// boundary -- see serve_ledger_append.go's header -- so this must not
+	// leak into other tests or into the real default).
+	allowedLedgerAppendBuckets["bucket-a"] = true
+	t.Cleanup(func() { delete(allowedLedgerAppendBuckets, "bucket-a") })
+
 	w := postLedgerAppend(t, srv, `{"bucket":"bucket-a","room_id":"r","content":"alpha"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", w.Code, w.Body.String())
@@ -96,7 +104,7 @@ func TestLedgerAppendNamedBucketLandsInThatBucket(t *testing.T) {
 	if g := getLedgerEntry(t, srv, "bucket-a", ar.EventHash); g.Code != http.StatusOK {
 		t.Errorf("read from right bucket: %d", g.Code)
 	}
-	if g := getLedgerEntry(t, srv, "bucket-b", ar.EventHash); g.Code != http.StatusNotFound {
+	if g := getLedgerEntry(t, srv, DefaultLedgerAppendBucket, ar.EventHash); g.Code != http.StatusNotFound {
 		t.Errorf("read from wrong bucket: %d want 404", g.Code)
 	}
 }
@@ -104,8 +112,9 @@ func TestLedgerAppendNamedBucketLandsInThatBucket(t *testing.T) {
 func TestLedgerAppendRejectsBadRequests(t *testing.T) {
 	srv := newTestServer(t)
 	t.Cleanup(resetLedgerCacheForTest)
+
 	for name, body := range map[string]string{
-		"reserved bucket":   `{"bucket":"rooms","room_id":"r","content":"x"}`,
+		"not allowlisted bucket": `{"bucket":"rooms","room_id":"r","content":"x"}`,
 		"traversal bucket":  `{"bucket":"../x","room_id":"r","content":"x"}`,
 		"no content":        `{"room_id":"r"}`,
 		"no source or room": `{"content":"x"}`,
@@ -163,3 +172,43 @@ func TestLedgerReadBackDetectsCorruption(t *testing.T) {
 		})
 	}
 }
+
+// TestLedgerAppendRequiresScope exercises the REAL middleware chain (unlike
+// postLedgerAppend/getLedgerEntry above, which call the handlers directly
+// and so never touch grantAuthMiddleware). cog-review (PR #730, 2026-11-19)
+// found /v1/ledger/append had no entry in requiredScopeForRequest at all, so
+// any live grant of any scope -- or, with grant auth off, no grant -- could
+// reach it. This proves the fix: a grant missing ScopeLedgerAppend is
+// rejected, and one holding it succeeds.
+func TestLedgerAppendRequiresScope(t *testing.T) {
+	t.Parallel()
+	srv := newGrantAuthTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	t.Cleanup(resetLedgerCacheForTest)
+
+	wrongScope := mintScopedTestGrant(t, srv, "ledger-append-wrong-scope", ScopeWrite)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/ledger/append", strings.NewReader(`{"room_id":"r","content":"x"}`))
+	req.Header.Set(GrantHeaderName, wrongScope)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST (wrong scope): %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("wrong-scope grant: status %d, want 403", resp.StatusCode)
+	}
+
+	rightScope := mintScopedTestGrant(t, srv, "ledger-append-right-scope", ScopeLedgerAppend)
+	req2, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/ledger/append", strings.NewReader(`{"room_id":"r","content":"x"}`))
+	req2.Header.Set(GrantHeaderName, rightScope)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("POST (right scope): %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("right-scope grant: status %d, want 200", resp2.StatusCode)
+	}
+}
+
