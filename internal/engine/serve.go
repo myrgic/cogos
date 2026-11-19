@@ -74,8 +74,10 @@ type Server struct {
 	// races a stopBackground still waiting on the prior generation's loops). startBackground allocates a
 	// fresh *sync.WaitGroup under reaperMu each time it (re)starts the background loops; stopBackground
 	// reads it under the lock, releases the lock, then Waits on THAT instance only -- never on whatever a
-	// concurrent restart might allocate next. Joined so a shutdown waits for every background loop's final
-	// pass, in particular the OAuth journal flusher's shutdown flush (k4-followups-review S1).
+	// concurrent restart might allocate next. Joined so a shutdown waits for the OAuth journal flusher's
+	// final flush before returning (k4-followups-review S1) -- NOT every background loop: the session
+	// reaper, run executor and managed-session reaper only get their context cancelled (k4-delta-review6
+	// nit) and are not waited on, since none of them has a final write that must land before exit.
 	bgWG *sync.WaitGroup
 	// Stage UI listener (serve_stage_ui.go); nil unless stage_ui.addr is set.
 	stageUIMu    sync.Mutex
@@ -756,10 +758,12 @@ func (s *Server) backgroundRunning() bool {
 
 // stopBackground stops what startBackground started (idempotent): cancelling
 // reaperStop ends the serving-lifetime context, so both the session reaper and
-// every run host loop stop. It then WAITS for every background loop's final
-// pass -- in particular the OAuth journal flusher's shutdown flush (k4-delta-
-// review S1) -- so a revocation queued right before shutdown reaches the
-// ledger before this call returns, instead of racing process exit.
+// every run host loop stop. It then WAITS for the OAuth journal flusher's final
+// flush specifically (k4-delta-review S1) -- so a revocation queued right
+// before shutdown reaches the ledger before this call returns, instead of
+// racing process exit. The other background loops (session reaper, run
+// executor, managed-session reaper) are only cancelled, not joined (k4-delta-
+// review6 nit): none of them has a final write that needs to land before exit.
 func (s *Server) stopBackground() {
 	s.reaperMu.Lock()
 	wg := s.bgWG
