@@ -46,7 +46,19 @@ import (
 	"strings"
 )
 
-const stageRoleOwner = "owner"
+const (
+	stageRoleOwner        = "owner"
+	stageRoleCollaborator = "collaborator"
+)
+
+// stageCollabRoute reports whether a collaborator may use an otherwise
+// owner-only route. The Oracles app (oracles, oracles/*) is the collaborator's
+// working surface (Chaz 2026-11-17: "Vroku should have full access to
+// oracles"); stage.py's oracles_key_gate lets the same role through. Its
+// pack/ and extras/ paths stay behind the Stage's own device-pairing check.
+func stageCollabRoute(role, tail string) bool {
+	return role == stageRoleCollaborator && (tail == "oracles" || strings.HasPrefix(tail, "oracles/"))
+}
 
 // stageOwnerRouteExact are the owner_key_only routes with a fixed tail.
 var stageOwnerRouteExact = map[string]bool{
@@ -142,6 +154,9 @@ func (k *keyShadow) roleRefusal(method, p string, ws bool) *stageRoleAnswer {
 
 	// /r/ and /k/ carry room keys. A home key here was already answered by S5.
 	if strings.HasPrefix(l.Surface, stageHomeSurfacePrefix) {
+		return nil
+	}
+	if stageCollabRoute(l.Role, tail) {
 		return nil
 	}
 	if ws {
