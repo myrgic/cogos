@@ -83,7 +83,7 @@ Total sites: 255  (cog: 108, home: 2, elsewhere: 13, unanchored: 91, dynamic: 41
 | `<WorkspaceRoot>/.cog/ledger/identity-grants/events.jsonl` | (*IdentityGrantRegistry).appendExtendEventLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_identity_grants.go:744 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/identity-grants/events.jsonl` | (*IdentityGrantRegistry).appendGrantEventLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_identity_grants.go:802 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/identity-grants/events.jsonl` | (*IdentityGrantRegistry).appendSupersessionEventLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_identity_grants.go:846 | internal:engine |
-| `<WorkspaceRoot>/.cog/ledger/room-archive/events.jsonl` | AppendLedgerEnvelope (`engine.AppendEvent(bucket)`) | internal/engine/serve_ledger_append.go:178 | internal:engine |
+| `<WorkspaceRoot>/.cog/ledger/room-archive/events.jsonl` | AppendLedgerEnvelope (`engine.AppendEvent(bucket)`) | internal/engine/serve_ledger_append.go:201 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/identity-pairing/events.jsonl` | (*pairingStore).append (`engine.AppendEvent(bucket)`) | internal/engine/serve_pairing.go:147 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/identity-share-links/events.jsonl` | (*ShareLinkStore).appendLocked (`engine.AppendEvent(bucket)`) | internal/engine/serve_share_links.go:430 | internal:engine |
 | `<WorkspaceRoot>/.cog/ledger/worktree-reconciler/events.jsonl` | (*FilesystemLedgerWriter).EmitWorktreeEvent (`engine.AppendEvent(bucket)`) | internal/engine/worktree_spawn.go:273 | internal:engine |
