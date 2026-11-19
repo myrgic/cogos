@@ -212,3 +212,73 @@ func TestLedgerAppendRequiresScope(t *testing.T) {
 	}
 }
 
+// TestLedgerEntryReadBackRequiresScope proves the GET side is gated too, not
+// just POST. cog-review (PR #730, 2026-11-19) found isGrantExemptRequest's
+// blanket "every other GET is exempt" fallthrough was never carved out for
+// /v1/ledger/entry (unlike the sibling carve-outs for /v1/identity/*,
+// share-links, /v1/runs, managed-sessions/classes, /v1/rooms), so
+// requiredScopeForRequest's ScopeLedgerAppend mapping for GET was dead code
+// and any unauthenticated caller could read back another grant's appended
+// content. TestLedgerAppendRequiresScope above only ever exercised POST
+// through the real middleware -- the exact gap that let this ship untested.
+func TestLedgerEntryReadBackRequiresScope(t *testing.T) {
+	t.Parallel()
+	srv := newGrantAuthTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	t.Cleanup(resetLedgerCacheForTest)
+
+	// Append something real first, with a valid grant, so there is an
+	// entry to try to read back.
+	writer := mintScopedTestGrant(t, srv, "ledger-entry-writer", ScopeLedgerAppend)
+	postReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/ledger/append", strings.NewReader(`{"room_id":"r","content":"secret"}`))
+	postReq.Header.Set(GrantHeaderName, writer)
+	postResp, err := http.DefaultClient.Do(postReq)
+	if err != nil {
+		t.Fatalf("POST (setup): %v", err)
+	}
+	var ar LedgerAppendResult
+	_ = json.NewDecoder(postResp.Body).Decode(&ar)
+	postResp.Body.Close()
+	if ar.EventHash == "" {
+		t.Fatalf("setup append returned no event hash")
+	}
+
+	// No grant header at all: must NOT be treated as an exempt read.
+	getURL := ts.URL + "/v1/ledger/entry?bucket=" + DefaultLedgerAppendBucket + "&hash=" + ar.EventHash
+	noGrantResp, err := http.DefaultClient.Get(getURL)
+	if err != nil {
+		t.Fatalf("GET (no grant): %v", err)
+	}
+	noGrantResp.Body.Close()
+	if noGrantResp.StatusCode == http.StatusOK {
+		t.Fatalf("GET /v1/ledger/entry with NO grant returned 200 -- the route is unauthenticated")
+	}
+
+	// A live grant with the wrong scope: still refused.
+	wrongScope := mintScopedTestGrant(t, srv, "ledger-entry-wrong-scope", ScopeWrite)
+	wrongReq, _ := http.NewRequest(http.MethodGet, getURL, nil)
+	wrongReq.Header.Set(GrantHeaderName, wrongScope)
+	wrongResp, err := http.DefaultClient.Do(wrongReq)
+	if err != nil {
+		t.Fatalf("GET (wrong scope): %v", err)
+	}
+	wrongResp.Body.Close()
+	if wrongResp.StatusCode == http.StatusOK {
+		t.Fatalf("GET /v1/ledger/entry with wrong-scope grant returned 200")
+	}
+
+	// The right scope succeeds.
+	rightReq, _ := http.NewRequest(http.MethodGet, getURL, nil)
+	rightReq.Header.Set(GrantHeaderName, writer)
+	rightResp, err := http.DefaultClient.Do(rightReq)
+	if err != nil {
+		t.Fatalf("GET (right scope): %v", err)
+	}
+	defer rightResp.Body.Close()
+	if rightResp.StatusCode != http.StatusOK {
+		t.Errorf("right-scope grant: status %d, want 200", rightResp.StatusCode)
+	}
+}
+
+

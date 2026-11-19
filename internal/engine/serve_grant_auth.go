@@ -718,6 +718,17 @@ func isGrantExemptRequest(r *http.Request) bool {
 	if r.URL.Path == pairingRoutePrefix || strings.HasPrefix(r.URL.Path, pairingRoutePrefix+"/") {
 		return true
 	}
+	// The ledger read-back is gated on every method too: a GET must not
+	// bypass the grant gate, the same reasoning as /v1/runs above. Found
+	// missing by cog-review (PR #730, 2026-11-19) -- requiredScopeForRequest
+	// already mapped ScopeLedgerAppend onto this path, but without this
+	// carve-out the blanket GET exemption below returned true first and the
+	// scope check never ran, so any unauthenticated caller could read back
+	// another grant's appended content (source_uri, room_id, content,
+	// metadata) -- exactly what gating both methods was meant to prevent.
+	if r.URL.Path == "/v1/ledger/entry" {
+		return false
+	}
 	// Every other GET (and HEAD, which ServeMux treats as GET for handler
 	// dispatch) is a read — exempt. Everything else (POST/PUT/PATCH/DELETE
 	// on any other path) falls through to the grant check.
