@@ -121,6 +121,22 @@ type oauthAuthzEnv struct {
 	notices []oauthConsentNotice
 	// notifyErr makes the fake stage unreachable.
 	notifyErr error
+	// deviceLink is the live device link behind testDeviceHash.
+	deviceLink *ShareLink
+}
+
+// pairDevice mirrors a paired device (by credential hash) into the share-link
+// store the way the stage's keys_sync does.
+func (e *oauthAuthzEnv) pairDevice(t *testing.T, hash string) *ShareLink {
+	t.Helper()
+	l, err := e.srv.shareLinks.Import(ShareLinkImport{
+		Kind: ShareLinkKindDevice, Surface: "stage/device/" + hash[:8], Actor: oauthActor, Role: "owner",
+		Scope: []string{"stage:device"}, IntegrityHash: hash,
+	}, "")
+	if err != nil {
+		t.Fatalf("pair device: %v", err)
+	}
+	return l
 }
 
 func newOAuthAuthzEnv(t *testing.T) *oauthAuthzEnv {
@@ -132,6 +148,10 @@ func newOAuthAuthzEnv(t *testing.T) *oauthAuthzEnv {
 	cfg.OAuth = OAuthConfig{Enabled: true, Issuer: "https://stage.example.test", Resource: testResource}
 	srv := NewServer(cfg, makeNucleus("Test", "unit-tester"), NewProcess(cfg, makeNucleus("Test", "unit-tester")))
 	env := &oauthAuthzEnv{srv: srv, cimd: newFakeCIMDHost(t)}
+	// The stage mirrors its paired devices into the share-link store; the D3
+	// check (ApproverDeviceLive) reads that mirror at exchange, refresh and
+	// introspection, so the test device is live unless a test revokes it.
+	env.deviceLink = env.pairDevice(t, testDeviceHash)
 	env.state = srv.asState()
 	env.state.pollWait = testPollWaitFast
 	env.cimd.wire(t, env.state.cimd)

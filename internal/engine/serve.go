@@ -69,6 +69,16 @@ type Server struct {
 	// reaperStop ends the session reaper started by Start (nil until then).
 	reaperMu   sync.Mutex
 	reaperStop context.CancelFunc
+	// bgWG is a PER-GENERATION WaitGroup (k4-delta-review4: a single shared sync.WaitGroup reused across
+	// restarts panics -- "WaitGroup is reused before previous Wait has returned" -- if a startBackground
+	// races a stopBackground still waiting on the prior generation's loops). startBackground allocates a
+	// fresh *sync.WaitGroup under reaperMu each time it (re)starts the background loops; stopBackground
+	// reads it under the lock, releases the lock, then Waits on THAT instance only -- never on whatever a
+	// concurrent restart might allocate next. Joined so a shutdown waits for the OAuth journal flusher's
+	// final flush before returning (k4-followups-review S1) -- NOT every background loop: the session
+	// reaper, run executor and managed-session reaper only get their context cancelled (k4-delta-review6
+	// nit) and are not waited on, since none of them has a final write that must land before exit.
+	bgWG *sync.WaitGroup
 	// Stage UI listener (serve_stage_ui.go); nil unless stage_ui.addr is set.
 	stageUIMu    sync.Mutex
 	stageUISrv   *http.Server
@@ -681,8 +691,11 @@ func (s *Server) startBackground() {
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	s.reaperStop = stop
+	wg := new(sync.WaitGroup) // this generation's WaitGroup; see bgWG's doc comment
+	s.bgWG = wg
 	s.startSessionReaper(ctx, defaultSessionReapTTL, defaultSessionReapInterval)
 	s.startRunExecutorLocked(ctx)
+	s.startOAuthJournalFlusher(ctx, wg, oauthJournalFlushInterval)
 	// ADR-093 §4: the managed-session reaper (idle_timeout + client leases),
 	// the kernel's backstop for session end-of-life (managed_session_reaper.go).
 	if s.managedSessions != nil {
@@ -745,13 +758,22 @@ func (s *Server) backgroundRunning() bool {
 
 // stopBackground stops what startBackground started (idempotent): cancelling
 // reaperStop ends the serving-lifetime context, so both the session reaper and
-// every run host loop stop.
+// every run host loop stop. It then WAITS for the OAuth journal flusher's final
+// flush specifically (k4-delta-review S1) -- so a revocation queued right
+// before shutdown reaches the ledger before this call returns, instead of
+// racing process exit. The other background loops (session reaper, run
+// executor, managed-session reaper) are only cancelled, not joined (k4-delta-
+// review6 nit): none of them has a final write that needs to land before exit.
 func (s *Server) stopBackground() {
 	s.reaperMu.Lock()
-	defer s.reaperMu.Unlock()
+	wg := s.bgWG
 	if s.reaperStop != nil {
 		s.reaperStop()
 		s.reaperStop = nil
+	}
+	s.reaperMu.Unlock()
+	if wg != nil {
+		wg.Wait() // waits on THIS generation only -- a concurrent restart's new WaitGroup is untouched
 	}
 }
 

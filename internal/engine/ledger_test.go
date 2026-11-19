@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/myrgic/cogos/pkg/pathsafe"
@@ -514,5 +515,111 @@ func TestListLedgerSessionsColonFilter(t *testing.T) {
 	path := filepath.Join(root, ".cog", "ledger", sessions[0], "events.jsonl")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("resolved session dir does not exist: %v", err)
+	}
+}
+
+// TestAppendEvent_HealsTornTailAndTruncatesOnFailedWrite is k4-followups-review B1: a torn (no trailing
+// newline) line fragment from an earlier crash/short-write must not corrupt the NEXT append, and a failed
+// write must not itself leave a new torn fragment behind. Two scenarios in one test:
+//  1. heal: the file already ends in a torn line (simulating an earlier failure, pre-fix) -- the next
+//     successful AppendEvent must isolate its own complete line from that fragment, so a line-by-line JSONL
+//     reader (which is what boot replay/GetLastEvent effectively is) can parse the NEW line cleanly even
+//     though the OLD fragment before it is garbage.
+//  2. truncate-on-error: AppendEvent asked to append to a file it cannot write to (made read-only) returns
+//     an error and the file's size does not grow -- no fresh torn fragment is created by the failed attempt
+//     itself.
+func TestAppendEvent_HealsTornTailAndTruncatesOnFailedWrite(t *testing.T) {
+	t.Cleanup(resetLedgerCacheForTest)
+	root := t.TempDir()
+	sessionID := "b1-heal-session"
+	dir := filepath.Join(root, ".cog", "ledger", pathsafe.SanitizeComponent(sessionID))
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	eventsFile := filepath.Join(dir, "events.jsonl")
+
+	// Simulate a torn tail left by an earlier failure: a line fragment with NO trailing newline.
+	torn := `{"metadata":{"seq":1,"source":"test"},"hashed_payload":{"type":"test.torn","session_id":"` + sessionID + `"`
+	if err := os.WriteFile(eventsFile, []byte(torn), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sizeBefore, _ := os.Stat(eventsFile)
+
+	env := &EventEnvelope{
+		HashedPayload: EventPayload{Type: "test.after.torn", Timestamp: nowISO(), SessionID: sessionID},
+		Metadata:      EventMetadata{Source: "test"},
+	}
+	if err := AppendEvent(root, sessionID, env); err != nil {
+		t.Fatalf("AppendEvent after a torn tail: %v", err)
+	}
+
+	raw, err := os.ReadFile(eventsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected the healing newline to separate the torn fragment from the new line, got %d lines: %q", len(lines), raw)
+	}
+	last := lines[len(lines)-1]
+	var parsed EventEnvelope
+	if err := json.Unmarshal([]byte(last), &parsed); err != nil {
+		t.Fatalf("the new line must parse cleanly on its own even though the file started with a torn fragment: %v\nline: %q", err, last)
+	}
+	if parsed.HashedPayload.Type != "test.after.torn" {
+		t.Fatalf("parsed wrong event: %+v", parsed)
+	}
+	sizeAfterHeal, _ := os.Stat(eventsFile)
+	if sizeAfterHeal.Size() <= sizeBefore.Size() {
+		t.Fatalf("file did not grow after a successful append: before=%d after=%d", sizeBefore.Size(), sizeAfterHeal.Size())
+	}
+
+	// Scenario 2: a write that fails must not leave a fresh torn fragment. k4-delta-review caught that
+	// chmod 0444 fails at os.OpenFile itself (permission denied), never reaching the write -- so it never
+	// actually exercised the truncate-on-error path. Use RLIMIT_FSIZE instead: the file stays writable,
+	// opens fine, and only the WRITE fails once it would cross the limit (a real EFBIG from the kernel,
+	// not a simulated error), which is exactly the code path that needs covering.
+	var origLimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &origLimit); err != nil {
+		t.Skipf("RLIMIT_FSIZE unavailable on this platform: %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &origLimit) })
+	sizeBeforeFail := sizeAfterHeal.Size()
+	// Cur must be just below where the next full line would land, so the OPEN and the pre-write Stat both
+	// succeed (file already exists under the limit) and only the Fprintf of the new, larger line fails.
+	low := syscall.Rlimit{Cur: uint64(sizeBeforeFail) + 5, Max: origLimit.Max}
+	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &low); err != nil {
+		t.Skipf("could not lower RLIMIT_FSIZE: %v", err)
+	}
+	env2 := &EventEnvelope{
+		HashedPayload: EventPayload{Type: "test.should.fail.past.the.file.size.limit", Timestamp: nowISO(), SessionID: sessionID},
+		Metadata:      EventMetadata{Source: "test"},
+	}
+	appendErr := AppendEvent(root, sessionID, env2)
+	_ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &origLimit) // restore before any further I/O (Stat et al.)
+	if appendErr == nil {
+		t.Fatal("expected AppendEvent to fail once RLIMIT_FSIZE is below the new line's size")
+	}
+	sizeAfterFail, statErr := os.Stat(eventsFile)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if sizeAfterFail.Size() != sizeBeforeFail {
+		t.Fatalf("a failed append grew the file: before=%d after=%d (should be truncated back, not left with a fresh torn fragment)",
+			sizeBeforeFail, sizeAfterFail.Size())
+	}
+	// And every COMPLETE line after the original synthetic torn fragment (line 0, which this test injected
+	// directly to simulate a pre-existing crash artifact and was never valid JSON on its own) must still be
+	// cleanly parseable -- no NEW torn tail left by this scenario's failed write.
+	raw2, err := os.ReadFile(eventsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rest := strings.Split(strings.TrimRight(string(raw2), "\n"), "\n")[1:]
+	for i, l := range rest {
+		var e EventEnvelope
+		if err := json.Unmarshal([]byte(l), &e); err != nil {
+			t.Fatalf("line %d (after the synthetic torn line) is not valid JSON after the failed write: %v\nline: %q", i+1, err, l)
+		}
 	}
 }

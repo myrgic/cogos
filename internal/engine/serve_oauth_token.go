@@ -108,8 +108,14 @@ func (s *Server) oauthExchangeCode(w http.ResponseWriter, form map[string][]stri
 		switch {
 		case errors.Is(err, ErrOAuthCodeReplay):
 			// RFC 6749 4.1.2: a second use revokes what the first use produced.
-			s.oauthRevokeUnredeemed(rec.GrantID, "authorization code replayed")
+			// The revocation is in force in memory either way; if it could not be
+			// journaled the answer must not read as a clean "already used".
+			rerr := s.oauthRevokeFailClosed(rec.GrantID, "authorization code replayed")
 			slogOAuthFail("code_replay", rec)
+			if rerr != nil {
+				oauthTokenError(w, http.StatusServiceUnavailable, oauthErrTemporarilyUnavail, "oauth ledger unavailable")
+				return
+			}
 			oauthTokenError(w, http.StatusBadRequest, oauthErrInvalidGrant, "authorization code already used")
 		default:
 			oauthTokenError(w, http.StatusBadRequest, oauthErrInvalidGrant, "authorization code is invalid or expired")
@@ -119,8 +125,12 @@ func (s *Server) oauthExchangeCode(w http.ResponseWriter, form map[string][]stri
 
 	// The code is consumed. From here every failure revokes the grant.
 	fail := func(reason string) {
-		s.oauthRevokeUnredeemed(rec.GrantID, reason)
+		rerr := s.oauthRevokeFailClosed(rec.GrantID, reason)
 		slogOAuthFail(reason, rec)
+		if rerr != nil {
+			oauthTokenError(w, http.StatusServiceUnavailable, oauthErrTemporarilyUnavail, "oauth ledger unavailable")
+			return
+		}
 		oauthTokenError(w, http.StatusBadRequest, oauthErrInvalidGrant, "authorization code does not match this exchange")
 	}
 	if clientID != rec.ClientID {
@@ -137,6 +147,13 @@ func (s *Server) oauthExchangeCode(w http.ResponseWriter, form map[string][]stri
 	}
 	if !OAuthPKCEVerifyS256(rec.CodeChallenge, verifier) {
 		fail("pkce verifier mismatch")
+		return
+	}
+
+	// D3: the device that approved this grant must still be trusted when its
+	// first tokens are minted (it may have been revoked since approval).
+	if g, ok := s.oauth.Grant(rec.GrantID); !ok || !g.ApproverDeviceLive(s.shareLinks) {
+		fail("approver device not live")
 		return
 	}
 
@@ -171,6 +188,14 @@ func (s *Server) oauthRotateRefresh(w http.ResponseWriter, form map[string][]str
 		oauthTokenError(w, http.StatusBadRequest, oauthErrInvalidGrant, "resource does not match the grant")
 		return
 	}
+	// D3: a grant whose approving device is no longer a live device link must
+	// not mint fresh tokens. Refused before Rotate, so the refresh token is not
+	// consumed (a mirror that lags is recoverable; a revoked grant is not).
+	if !g.ApproverDeviceLive(s.shareLinks) {
+		slog.Warn("oauth: refresh refused; approver device is not live", "grant_id", g.GrantID)
+		oauthTokenError(w, http.StatusBadRequest, oauthErrInvalidGrant, "refresh token is invalid")
+		return
+	}
 	pair, err := s.oauth.Rotate(refresh)
 	if err != nil {
 		switch {
@@ -202,7 +227,7 @@ func (s *Server) oauthTokenIssueError(w http.ResponseWriter, err error, rec *oau
 	case errors.Is(err, ErrOAuthLedgerAppendFailed):
 		// Nothing was issued (memory is untouched). The code is spent, so the
 		// client must restart the flow; the grant is revoked so it cannot linger.
-		s.oauthRevokeUnredeemed(rec.GrantID, "token issue failed")
+		_ = s.oauthRevokeFailClosed(rec.GrantID, "token issue failed")
 		oauthTokenError(w, http.StatusServiceUnavailable, oauthErrTemporarilyUnavail, "oauth ledger unavailable")
 	case errors.Is(err, ErrOAuthEntropyUnavailable):
 		oauthTokenError(w, http.StatusInternalServerError, oauthErrServerError, "entropy unavailable")
@@ -259,7 +284,10 @@ func (s *Server) handleOAuthIntrospect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	info, ok := s.oauth.Resolve(body.Token)
-	if !ok {
+	// D3: a token is only active while the device that approved its grant is
+	// still a live device link. Same {"active":false} as every other dead
+	// token (no oracle), so a resource server that reads nothing else is safe.
+	if !ok || !info.Grant.ApproverDeviceLive(s.shareLinks) {
 		writeJSONResp(w, http.StatusOK, map[string]any{"active": false})
 		return
 	}
@@ -321,7 +349,12 @@ func (s *Server) handleOAuthGrantList(w http.ResponseWriter, r *http.Request) {
 			ApproverDeviceOK: g.ApproverDeviceLive(s.shareLinks),
 		})
 	}
-	writeJSONResp(w, http.StatusOK, map[string]any{"grants": out})
+	// unjournaled_revocations is empty when healthy. Anything listed is a grant
+	// that is dead in memory but whose revocation is not yet in the ledger.
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"grants":                  out,
+		"unjournaled_revocations": s.oauth.UnjournaledRevocations(),
+	})
 }
 
 type oauthRevokeRequest struct {
