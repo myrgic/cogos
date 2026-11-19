@@ -1635,7 +1635,7 @@
     },
     {
       "file": "internal/engine/serve.go",
-      "line": 1567,
+      "line": 1569,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",
@@ -1740,6 +1740,18 @@
       "resolved": true,
       "subsystem": "internal:engine",
       "raw": "identityGrantsLedgerSession"
+    },
+    {
+      "file": "internal/engine/serve_ledger_append.go",
+      "line": 201,
+      "column": 12,
+      "primitive": "engine.AppendEvent(bucket)",
+      "func": "AppendLedgerEnvelope",
+      "pattern": "\u003cWorkspaceRoot\u003e/.cog/ledger/room-archive/events.jsonl",
+      "category": "cog",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "bucket"
     },
     {
       "file": "internal/engine/serve_pairing.go",
@@ -3051,14 +3063,14 @@
     }
   ],
   "summary": {
-    "total": 254,
-    "cog": 107,
+    "total": 255,
+    "cog": 108,
     "home": 2,
     "elsewhere": 13,
     "unanchored": 91,
     "dynamic": 41,
     "by_primitive": {
-      "engine.AppendEvent(bucket)": 9,
+      "engine.AppendEvent(bucket)": 10,
       "io.Copy": 7,
       "os.Create": 6,
       "os.CreateTemp": 9,

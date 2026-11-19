@@ -258,6 +258,17 @@ const (
 	// particular scope.
 	ScopeRunsWrite = "runs:write"
 
+	// ScopeLedgerAppend authorizes POST /v1/ledger/append -- a generic
+	// write primitive into the kernel's hash-chained ledger. Deliberately
+	// separate from ScopeWrite: this route can append a chain-valid event
+	// into ANY bucket resolveLedgerAppendBucket allows (see its allowlist),
+	// which is a materially different blast radius from writing a cogdoc.
+	// cog-review (PR #730, 2026-11-19) found the route reachable by any
+	// live grant of any scope, because it had no entry in
+	// requiredScopeForRequest at all -- the same bug class #346 already
+	// fixed once for managed-sessions. Fixing the class here too.
+	ScopeLedgerAppend = "ledger:append"
+
 	// ScopeStageLocal authorizes a caller to reach the Stage UI listener's
 	// /local routes when stage_ui.local_auth is "enforce"
 	// (serve_stage_ui_guard.go). Those routes act as the Stage host itself
@@ -363,6 +374,15 @@ func requiredScopeForRequest(r *http.Request) string {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead &&
 		(path == runsRoutePrefix || strings.HasPrefix(path, runsRoutePrefix+"/")) {
 		return ScopeRunsWrite
+	}
+
+	// Ledger append + its read-back. Both methods, not just the write: the
+	// read-back path (/v1/ledger/entry) exists specifically to verify an
+	// append this grant made, so gating only the POST would let an
+	// unrelated caller read any bucket's content back once another grant
+	// has written it.
+	if path == "/v1/ledger/append" || path == "/v1/ledger/entry" {
+		return ScopeLedgerAppend
 	}
 
 	// Inference: the routes that spend provider tokens.
@@ -697,6 +717,17 @@ func isGrantExemptRequest(r *http.Request) bool {
 	// share link must reach them, which this gate would refuse.
 	if r.URL.Path == pairingRoutePrefix || strings.HasPrefix(r.URL.Path, pairingRoutePrefix+"/") {
 		return true
+	}
+	// The ledger read-back is gated on every method too: a GET must not
+	// bypass the grant gate, the same reasoning as /v1/runs above. Found
+	// missing by cog-review (PR #730, 2026-11-19) -- requiredScopeForRequest
+	// already mapped ScopeLedgerAppend onto this path, but without this
+	// carve-out the blanket GET exemption below returned true first and the
+	// scope check never ran, so any unauthenticated caller could read back
+	// another grant's appended content (source_uri, room_id, content,
+	// metadata) -- exactly what gating both methods was meant to prevent.
+	if r.URL.Path == "/v1/ledger/entry" {
+		return false
 	}
 	// Every other GET (and HEAD, which ServeMux treats as GET for handler
 	// dispatch) is a read — exempt. Everything else (POST/PUT/PATCH/DELETE
