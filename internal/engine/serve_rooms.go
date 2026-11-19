@@ -21,7 +21,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
+	"time"
 )
 
 func (s *Server) registerRoomRoutes(mux *http.ServeMux) {
@@ -32,6 +35,7 @@ func (s *Server) registerRoomRoutes(mux *http.ServeMux) {
 	s.route(mux, "POST /v1/rooms/{room}/ops", s.handleRoomOps)
 	s.route(mux, "GET /v1/rooms/{room}/board", s.handleRoomBoard)
 	s.route(mux, "GET /v1/rooms/{room}/archive", s.handleRoomArchive)
+	s.route(mux, "GET /v1/rooms/{room}/wait", s.handleRoomWait)
 }
 
 func (s *Server) roomBoardOr503(w http.ResponseWriter) *RoomBoardStore {
@@ -261,4 +265,108 @@ func (s *Server) handleRoomArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeRoomJSON(w, http.StatusOK, map[string]any{"items": st.Archive(roomID)})
+}
+
+// roomWaitMaxTimeout caps the hold at ~50s, under the bridge's 55s idle-timeout ceiling (the same figure
+// claude-web's own probe confirmed against the live cloudflared/claude.ai path). roomWaitDefaultTimeout is
+// the hold used when the caller omits wait_s, matching the pairing poll's existing precedent.
+const (
+	roomWaitDefaultTimeout = 25 * time.Second
+	roomWaitMaxTimeout     = 50 * time.Second
+)
+
+// writeStreamError answers a held read with the bus RFC's fallback-contract shape: {error, code, fallback}
+// (see RFC-bus-stream-transport-polling-and-envelope's sse-gap-v3 example), so a caller already handling
+// that contract for the bus needs no second error shape for this one. `fallback` is the plain poll the
+// caller can retry with instead of waiting — for a held read, that is this same route with no wait_s.
+func writeStreamError(w http.ResponseWriter, status int, code, msg, fallback string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": msg, "code": code, "fallback": fallback})
+}
+
+// roomHeadsVector parses a heads-vector query parameter ({"log":seq,...}, the exact RoomHeads cursor
+// shape) from its JSON-encoded string form. An empty string is the empty vector (give everything).
+func roomHeadsVector(raw string) (map[string]uint64, error) {
+	out := map[string]uint64{}
+	if raw == "" {
+		return out, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// handleRoomWait serves GET /v1/rooms/{room}/wait?after=<heads-json>&wait_s=<n>: the held read over the
+// room chain. `after` is a per-writer heads vector {log: seq} (room node RFC §6.9.1's RoomHeads shape,
+// NOT a single counter -- a room can span more than one authoring node's log). `wait_s` caps the hold,
+// clamped to roomWaitMaxTimeout; 0 means return immediately either way (a plain poll, no hold).
+//
+// Response is always {entries, heads}, timeout or not: entries is empty on a timeout with nothing new,
+// but heads is ALWAYS the room's current heads vector at the moment of response -- never an empty success
+// with a stale cursor. The caller resumes with after=heads on its next call, timeout or not; that IS the
+// in-band heartbeat (room node RFC's own RoomHeads anti-entropy idea, long-poll shaped for one HTTP call).
+//
+// RR-1 note: this reads room-chain data P4-3 already writes to the kernel ledger today (board.entry
+// events in the `rooms` bucket). It adds a wait on top of an existing read path and settles nothing about
+// whether MORE entries move onto the kernel ledger -- that stays Chaz's ruling (§6.10.14 RR-1).
+func (s *Server) handleRoomWait(w http.ResponseWriter, r *http.Request) {
+	st := s.roomBoardOr503(w)
+	if st == nil {
+		return
+	}
+	roomID := r.PathValue("room")
+	if _, ok := st.Board(roomID); !ok {
+		// room_closed: a room this node once held but no longer does (e.g. closed) is NOT_FOUND at the
+		// plain board route too, but the stream contract names it explicitly so a long-lived waiter knows
+		// to stop polling this room rather than treat a 404 as a transient gap.
+		writeStreamError(w, http.StatusNotFound, "room_closed", "no such room", "GET /v1/rooms")
+		return
+	}
+	if !st.Authorize(roomID, s.roomCallerFromRequest(r)) {
+		writeJSONError(w, http.StatusForbidden, "member_grant_required", "a member grant is required to read this room")
+		return
+	}
+	after, err := roomHeadsVector(r.URL.Query().Get("after"))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request", "after must be a JSON object of {log: seq}")
+		return
+	}
+	// cursor_gone (resync): this room's chain has no eviction (every entry is retained in the ledger
+	// forever), so the bus RFC's ring-buffer "the window moved past your cursor" case cannot happen here.
+	// The structurally equivalent failure on an append-only log is a cursor claiming MORE than the room
+	// actually has on some log -- impossible to honor, and silently holding for the timeout would just
+	// hide a real caller bug (a stale snapshot from a different room, a hand-edited cursor, a bug in the
+	// caller's own bookkeeping). Caught up front, with the real current heads so the caller can resync.
+	if heads, ok := st.Heads(roomID); ok {
+		for log, seq := range after {
+			if seq > heads[log] {
+				writeStreamError(w, http.StatusConflict, "cursor_gone",
+					fmt.Sprintf("after[%s]=%d is ahead of this room's actual head %d; resync from the returned heads", log, seq, heads[log]),
+					"GET /v1/rooms/{room}/entries")
+				return
+			}
+		}
+	}
+	timeout := roomWaitDefaultTimeout
+	if raw := r.URL.Query().Get("wait_s"); raw != "" {
+		secs, perr := strconv.ParseFloat(raw, 64)
+		if perr != nil || secs < 0 {
+			writeJSONError(w, http.StatusBadRequest, "invalid_request", "wait_s must be a non-negative number")
+			return
+		}
+		timeout = time.Duration(secs * float64(time.Second))
+	}
+	if timeout > roomWaitMaxTimeout {
+		timeout = roomWaitMaxTimeout
+	}
+	entries, heads, ok := st.WaitAfter(r.Context(), roomID, after, timeout)
+	if !ok {
+		// The room existed at the Board() check above but is gone now (a close raced this request): same
+		// stream code as the up-front check, for the same reason.
+		writeStreamError(w, http.StatusNotFound, "room_closed", "room closed during the wait", "GET /v1/rooms")
+		return
+	}
+	writeRoomJSON(w, http.StatusOK, map[string]any{"entries": entries, "heads": heads})
 }

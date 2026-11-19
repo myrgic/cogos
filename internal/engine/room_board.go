@@ -25,6 +25,7 @@ package engine
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
@@ -168,6 +169,12 @@ type roomRec struct {
 	board      *room.Board
 	hash       string
 	dirty      bool // certs changed (e.g. ConfigureNodeKey): refold before read
+	// notify is closed and replaced (under st.mu) every time appendLocked lands a new entry for this room.
+	// A waiter captures the current channel under RLock, releases the lock, then selects on it: the close
+	// happens-after the append that produced it, so the waiter is guaranteed to see the new entries once
+	// notify fires (held-read / bus RFC long-poll, RR-1 note: this is a read-side wait helper over data
+	// P4-3 already writes to the kernel ledger; it settles nothing about whether MORE entries move there).
+	notify chan struct{}
 }
 
 // RoomBoardStore is the ledger-backed room board.
@@ -328,7 +335,7 @@ func (st *RoomBoardStore) appendLocked(roomID string, raw []byte, certDER []byte
 		if e.Kind != room.KindGenesis {
 			return RoomEntryView{}, fmt.Errorf("%w: %s", ErrRoomNotFound, roomID)
 		}
-		rec = &roomRec{id: roomID, genesisLog: e.Log}
+		rec = &roomRec{id: roomID, genesisLog: e.Log, notify: make(chan struct{})}
 	}
 	st.ensureFoldedLocked(rec)
 
@@ -390,6 +397,12 @@ func (st *RoomBoardStore) appendLocked(roomID string, raw []byte, certDER []byte
 		st.order = append(st.order, roomID)
 	}
 	rec.entries = entries
+	// Held-read signal: close this generation's channel and swing in a fresh one, all under st.mu. Any
+	// waiter already holding the OLD channel in a select sees it close now; the next waiter calls Heads
+	// (which reads the just-updated rec.entries under the same lock) and selects on the NEW channel.
+	oldNotify := rec.notify
+	rec.notify = make(chan struct{})
+	close(oldNotify)
 	if len(certDER) > 0 && !hasCertDER(rec.certs, certDER) {
 		rec.certs = append(rec.certs, certDER)
 	}
@@ -704,6 +717,111 @@ func (st *RoomBoardStore) Entries(roomID string) []RoomEntryView {
 	return out
 }
 
+// Heads returns the room's current per-writer heads vector {log: highest seq seen}, the cursor shape the
+// bus RFC and the rooms RFC's RoomHeads both use. A log with no entries yet is simply absent, not zero —
+// matching RoomHeads's own "per room this peer replicates" semantics (room node RFC §6.9.1 wire table).
+func (st *RoomBoardStore) Heads(roomID string) (map[string]uint64, bool) {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	rec := st.rooms[roomID]
+	if rec == nil {
+		return nil, false
+	}
+	return headsLocked(rec), true
+}
+
+func headsLocked(rec *roomRec) map[string]uint64 {
+	heads := make(map[string]uint64, 1)
+	for _, e := range rec.entries {
+		if e.Seq > heads[e.Log] {
+			heads[e.Log] = e.Seq
+		}
+	}
+	return heads
+}
+
+// entriesAfterLocked returns every stored entry whose (log, seq) is strictly beyond the caller's cursor.
+// after[log] == 0 (or absent) means "give me everything on that log"; a log in after that this room has
+// never heard of is simply never matched (nothing to return for it yet).
+func entriesAfterLocked(rec *roomRec, after map[string]uint64) []RoomEntryView {
+	out := make([]RoomEntryView, 0)
+	for _, e := range rec.entries {
+		if e.Seq > after[e.Log] {
+			id, _ := e.ID()
+			out = append(out, viewOfEntry(e, id))
+		}
+	}
+	return out
+}
+
+// headsAtOrBeyond reports whether `after` already covers everything in `heads` (nothing new for the
+// caller to see) -- the condition WaitAfter uses to decide whether to hold at all.
+func headsAtOrBeyond(heads, after map[string]uint64) bool {
+	for log, seq := range heads {
+		if after[log] < seq {
+			return false
+		}
+	}
+	return true
+}
+
+// WaitAfter is the held read: a bus-RFC-shaped long-poll over the room chain, per RoomHeads's own cursor
+// shape (RR-1 note: this reads data P4-3 already writes to the kernel ledger today; it adds a wait on top
+// of existing reads and decides nothing about whether MORE entries move there -- that stays Chaz's ruling).
+// If `after` is already behind the room's current heads, it returns immediately with everything new. If
+// `after` already covers the current heads, it waits up to `timeout` for the NEXT append, then returns
+// whatever is new at that point (possibly nothing, if the wait timed out) plus the heads as they stand —
+// never an empty success with stale heads: the caller always gets a true cursor to resume from, timeout or
+// not, exactly like RoomHeads's own anti-entropy role (node RFC §6.9.1: "a peer that sees another's head
+// behind its own sends the missing suffix"; this is the same idea, long-poll shaped for one HTTP caller).
+func (st *RoomBoardStore) WaitAfter(ctx context.Context, roomID string, after map[string]uint64, timeout time.Duration) ([]RoomEntryView, map[string]uint64, bool) {
+	st.mu.RLock()
+	rec := st.rooms[roomID]
+	if rec == nil {
+		st.mu.RUnlock()
+		return nil, nil, false
+	}
+	heads := headsLocked(rec)
+	if !headsAtOrBeyond(heads, after) {
+		entries := entriesAfterLocked(rec, after)
+		st.mu.RUnlock()
+		return entries, heads, true
+	}
+	ch := rec.notify
+	st.mu.RUnlock()
+
+	if timeout > 0 {
+		wctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		select {
+		case <-ch:
+		case <-wctx.Done():
+			// Timeout or caller disconnect either way: re-read current heads so the response is never an
+			// empty success with a stale cursor -- the caller can always resume from what comes back here.
+			st.mu.RLock()
+			rec2 := st.rooms[roomID]
+			if rec2 == nil {
+				st.mu.RUnlock()
+				return nil, heads, true
+			}
+			heads = headsLocked(rec2)
+			st.mu.RUnlock()
+			return nil, heads, true
+		}
+	}
+
+	st.mu.RLock()
+	rec = st.rooms[roomID]
+	if rec == nil {
+		st.mu.RUnlock()
+		return nil, heads, true
+	}
+	heads = headsLocked(rec)
+	entries := entriesAfterLocked(rec, after)
+	st.mu.RUnlock()
+	return entries, heads, true
+}
+
 // Board returns the folded board for a room.
 func (st *RoomBoardStore) Board(roomID string) (*room.Board, bool) {
 	st.mu.Lock()
@@ -901,6 +1019,7 @@ func RebuildRoomBoardStoreFromLedger(workspaceRoot string) (*RoomBoardStore, err
 			spec:       lastSpec(out),
 			board:      board,
 			hash:       hash,
+			notify:     make(chan struct{}),
 		}
 		if p.alias != "" {
 			st.aliases[p.alias] = roomID
