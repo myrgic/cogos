@@ -314,6 +314,8 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 	s.route(mux, "GET /v1/hud/state", s.handleHUDState)
 	s.route(mux, "GET /v1/proprioceptive", s.handleProprioceptive)
 	s.route(mux, "GET /v1/ledger", s.handleLedger)
+	s.route(mux, "POST /v1/ledger/append", s.handleLedgerAppend)
+	s.route(mux, "GET /v1/ledger/entry", s.handleLedgerEntry)
 	s.route(mux, "GET /v1/traces", s.handleTraces)
 	s.route(mux, "GET /v1/lightcone", s.handleLightCone)
 	s.route(mux, "POST /v1/context/foveated", s.handleFoveatedContext)
