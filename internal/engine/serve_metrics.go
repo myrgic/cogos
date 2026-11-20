@@ -19,8 +19,10 @@ package engine
 import (
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // prometheusContentType is the exact Content-Type the Prometheus text
@@ -34,7 +36,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	snap := buildKernelHealthSnapshotPeek(r.Context())
 
 	w.Header().Set("Content-Type", prometheusContentType)
-	_, _ = w.Write([]byte(renderPrometheusMetrics(snap)))
+	_, _ = w.Write([]byte(renderPrometheusMetrics(snap) + renderTokenSpendMetrics()))
 }
 
 // promMetric describes one exposition-format metric block: HELP + TYPE
@@ -152,6 +154,87 @@ func renderPrometheusMetrics(snap KernelHealthSnapshot) string {
 		fmt.Fprintf(&b, "# HELP %s %s\n", m.name, m.help)
 		fmt.Fprintf(&b, "# TYPE %s %s\n", m.name, m.mtype)
 		fmt.Fprintf(&b, "%s %s\n", m.name, m.value)
+	}
+	return b.String()
+}
+
+// tokenSpendKey identifies one cogos_tokens_spent_total label set.
+type tokenSpendKey struct {
+	provider string
+	model    string
+}
+
+// tokenSpend is the process-lifetime token accumulator fed by RecordTurn.
+// Guarded by tokenSpendMu: RecordTurn and the /metrics renderer run
+// concurrently. Counts reset on kernel restart (Prometheus counter
+// semantics: a reset is a normal counter discontinuity).
+var (
+	tokenSpendMu sync.Mutex
+	tokenSpend   = map[tokenSpendKey]*TurnUsage{}
+)
+
+// recordTokenSpend adds one turn's usage to the per-(provider, model)
+// accumulator. A zero usage (errored turn, no provider usage) is a no-op,
+// so nothing is fabricated.
+func recordTokenSpend(provider, model string, u TurnUsage) {
+	if u == (TurnUsage{}) {
+		return
+	}
+	tokenSpendMu.Lock()
+	defer tokenSpendMu.Unlock()
+	k := tokenSpendKey{provider: provider, model: model}
+	acc := tokenSpend[k]
+	if acc == nil {
+		acc = &TurnUsage{}
+		tokenSpend[k] = acc
+	}
+	acc.InputTokens += u.InputTokens
+	acc.OutputTokens += u.OutputTokens
+	acc.CacheReadTokens += u.CacheReadTokens
+	acc.CacheWriteTokens += u.CacheWriteTokens
+}
+
+// renderTokenSpendMetrics renders the cogos_tokens_spent_total counter
+// family, one series per (provider, model, kind). Kept separate from
+// renderPrometheusMetrics because it is a labeled family, not the
+// one-sample-per-block shape that renderPrometheusMetrics enforces.
+// Empty when no turn has recorded usage yet (no fabricated zero series).
+func renderTokenSpendMetrics() string {
+	tokenSpendMu.Lock()
+	keys := make([]tokenSpendKey, 0, len(tokenSpend))
+	snap := make(map[tokenSpendKey]TurnUsage, len(tokenSpend))
+	for k, v := range tokenSpend {
+		keys = append(keys, k)
+		snap[k] = *v
+	}
+	tokenSpendMu.Unlock()
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].provider != keys[j].provider {
+			return keys[i].provider < keys[j].provider
+		}
+		return keys[i].model < keys[j].model
+	})
+
+	var b strings.Builder
+	const name = "cogos_tokens_spent_total"
+	fmt.Fprintf(&b, "# HELP %s Cumulative provider tokens spent per provider, model, and kind, since kernel process start (rolled up from turn usage in RecordTurn).\n", name)
+	fmt.Fprintf(&b, "# TYPE %s counter\n", name)
+	for _, k := range keys {
+		u := snap[k]
+		for _, kv := range []struct {
+			kind string
+			n    int
+		}{
+			{"input", u.InputTokens},
+			{"output", u.OutputTokens},
+			{"cache_read", u.CacheReadTokens},
+			{"cache_write", u.CacheWriteTokens},
+		} {
+			fmt.Fprintf(&b, "%s{provider=%q,model=%q,kind=%q} %d\n", name, k.provider, k.model, kv.kind, kv.n)
+		}
 	}
 	return b.String()
 }

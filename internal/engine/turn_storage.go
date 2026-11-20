@@ -418,6 +418,10 @@ func (p *Process) RecordTurn(turn *TurnRecord) error {
 		slog.Warn("RecordTurn: sidecar append failed", "err", fmt.Sprintf("%v", err), "session", turn.SessionID)
 	}
 
+	// 1b. Roll the turn's usage into the in-process token-spend counters
+	// surfaced on /metrics as cogos_tokens_spent_total (see serve_metrics.go).
+	recordTokenSpend(turn.Provider, turn.Model, turn.Usage)
+
 	// 2. Build the ledger preview payload.
 	promptCap := DefaultPromptPreviewCap
 	respCap := DefaultResponsePreviewCap
