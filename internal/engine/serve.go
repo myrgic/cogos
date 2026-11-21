@@ -341,6 +341,8 @@ func NewServer(cfg *Config, nucleus *Nucleus, process *Process) *Server {
 	s.route(mux, "GET /v1/hud/state", s.handleHUDState)
 	s.route(mux, "GET /v1/proprioceptive", s.handleProprioceptive)
 	s.route(mux, "GET /v1/ledger", s.handleLedger)
+	s.route(mux, "POST /v1/ledger/append", s.handleLedgerAppend)
+	s.route(mux, "GET /v1/ledger/entry", s.handleLedgerEntry)
 	s.route(mux, "GET /v1/traces", s.handleTraces)
 	s.route(mux, "GET /v1/lightcone", s.handleLightCone)
 	s.route(mux, "POST /v1/context/foveated", s.handleFoveatedContext)
@@ -674,6 +676,12 @@ func (s *Server) Serve(ln net.Listener) error {
 // cancelling it there ends the host loop of every run in flight (bounded: the
 // loop stops waiting for a turn and closes the run).
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Drain before anything else stops: stopBackground ends the run executor's
+	// host loops, which can end a run's turn on their own, and the record of
+	// that turn must be written while it is still in flight.
+	if s.managedSessions != nil {
+		s.managedSessions.BeginDrain()
+	}
 	s.stopBackground()
 	s.stopStageUI()
 	if s.managedSessions != nil {

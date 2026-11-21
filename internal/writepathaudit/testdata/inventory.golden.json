@@ -1143,7 +1143,7 @@
     },
     {
       "file": "internal/engine/mcp_stubs.go",
-      "line": 108,
+      "line": 124,
       "column": 13,
       "primitive": "sql.Open(sqlite3)",
       "func": "searchMemoryFTSDriftRepair",
@@ -1155,7 +1155,7 @@
     },
     {
       "file": "internal/engine/mcp_stubs.go",
-      "line": 215,
+      "line": 231,
       "column": 13,
       "primitive": "sql.Open(sqlite3)",
       "func": "searchMemoryFTS",
@@ -1167,7 +1167,7 @@
     },
     {
       "file": "internal/engine/mcp_stubs.go",
-      "line": 643,
+      "line": 702,
       "column": 9,
       "primitive": "engine.AppendEvent(bucket)",
       "func": "EmitLedgerEvent",
@@ -1179,7 +1179,7 @@
     },
     {
       "file": "internal/engine/mcp_stubs.go",
-      "line": 666,
+      "line": 725,
       "column": 13,
       "primitive": "sql.Open(sqlite3)",
       "func": "buildMemoryIndexFromDB",
@@ -1215,7 +1215,7 @@
     },
     {
       "file": "internal/engine/node_cmd.go",
-      "line": 337,
+      "line": 329,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "syncJSON",
@@ -1227,7 +1227,7 @@
     },
     {
       "file": "internal/engine/node_cmd.go",
-      "line": 370,
+      "line": 362,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "syncSed",
@@ -1239,7 +1239,7 @@
     },
     {
       "file": "internal/engine/node_cmd.go",
-      "line": 424,
+      "line": 416,
       "column": 12,
       "primitive": "os.WriteFile",
       "func": "syncPlist",
@@ -1635,7 +1635,7 @@
     },
     {
       "file": "internal/engine/serve.go",
-      "line": 1543,
+      "line": 1569,
       "column": 19,
       "primitive": "os.MkdirTemp",
       "func": "(*Server).handleChat",
@@ -1742,6 +1742,18 @@
       "raw": "identityGrantsLedgerSession"
     },
     {
+      "file": "internal/engine/serve_ledger_append.go",
+      "line": 201,
+      "column": 12,
+      "primitive": "engine.AppendEvent(bucket)",
+      "func": "AppendLedgerEnvelope",
+      "pattern": "\u003cWorkspaceRoot\u003e/.cog/ledger/room-archive/events.jsonl",
+      "category": "cog",
+      "resolved": true,
+      "subsystem": "internal:engine",
+      "raw": "bucket"
+    },
+    {
       "file": "internal/engine/serve_pairing.go",
       "line": 147,
       "column": 9,
@@ -1767,7 +1779,7 @@
     },
     {
       "file": "internal/engine/session_journal.go",
-      "line": 137,
+      "line": 145,
       "column": 12,
       "primitive": "os.MkdirAll",
       "func": "NewSessionJournal",
@@ -1779,7 +1791,7 @@
     },
     {
       "file": "internal/engine/session_journal.go",
-      "line": 140,
+      "line": 148,
       "column": 12,
       "primitive": "os.OpenFile",
       "func": "NewSessionJournal",
@@ -3051,14 +3063,14 @@
     }
   ],
   "summary": {
-    "total": 254,
-    "cog": 107,
+    "total": 255,
+    "cog": 108,
     "home": 2,
     "elsewhere": 13,
     "unanchored": 91,
     "dynamic": 41,
     "by_primitive": {
-      "engine.AppendEvent(bucket)": 9,
+      "engine.AppendEvent(bucket)": 10,
       "io.Copy": 7,
       "os.Create": 6,
       "os.CreateTemp": 9,
@@ -3353,8 +3365,18 @@
       "dir_known": false
     },
     {
+      "file": "internal/engine/managed_session_drain.go",
+      "line": 338,
+      "column": 15,
+      "func": "func literal (line 337)",
+      "subsystem": "internal:engine",
+      "raw": "exec.CommandContext(ctx, \"git\", append([]string{\"-C\", rec.Worktree}, args...)...)",
+      "dir": "",
+      "dir_known": false
+    },
+    {
       "file": "internal/engine/managed_session_hermes.go",
-      "line": 277,
+      "line": 314,
       "column": 9,
       "func": "(*hermesProcess).start",
       "subsystem": "internal:engine",
@@ -3364,13 +3386,23 @@
     },
     {
       "file": "internal/engine/managed_session_hermes.go",
-      "line": 1619,
+      "line": 1928,
       "column": 9,
       "func": "(*HermesACPDriver).runClassProbe",
       "subsystem": "internal:engine",
       "raw": "exec.Command(argv[0], argv[1:]...)",
       "dir": "{rc.Cwd}",
       "dir_known": true
+    },
+    {
+      "file": "internal/engine/managed_session_procs.go",
+      "line": 46,
+      "column": 14,
+      "func": "psSnapshot",
+      "subsystem": "internal:engine",
+      "raw": "exec.CommandContext(ctx, \"ps\", \"-A\", \"-o\", \"pid=,ppid=,rss=\")",
+      "dir": "",
+      "dir_known": false
     },
     {
       "file": "internal/engine/mcp_architecture.go",
@@ -3414,7 +3446,7 @@
     },
     {
       "file": "internal/engine/node_cmd.go",
-      "line": 132,
+      "line": 124,
       "column": 14,
       "func": "findPIDOnPort",
       "subsystem": "internal:engine",
@@ -3424,7 +3456,7 @@
     },
     {
       "file": "internal/engine/node_cmd.go",
-      "line": 144,
+      "line": 136,
       "column": 14,
       "func": "processUptime",
       "subsystem": "internal:engine",
@@ -3434,7 +3466,7 @@
     },
     {
       "file": "internal/engine/node_cmd.go",
-      "line": 193,
+      "line": 185,
       "column": 14,
       "func": "processName",
       "subsystem": "internal:engine",

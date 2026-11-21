@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -61,6 +62,12 @@ type Projection struct {
 	// Suffix is appended to the resolved path for "direct" patterns
 	// (e.g. ".cog.md" for specs).
 	Suffix string
+	// SuffixRetry lists suffixes tried, in order, when a "direct" path with no
+	// forced Suffix does not exist as written (e.g. ".cog.md" so that
+	// cog:mem/x and cog:mem/x.md find x.cog.md).  The as-written path always
+	// wins when it exists; when nothing exists the as-written path is
+	// returned unchanged (so writers still target exactly what was named).
+	SuffixRetry []string
 	// GlobPat is a fmt.Sprintf template (one %s) for "glob" patterns.
 	// E.g. "%s-*.md" matches numbered ADR files.
 	GlobPat string
@@ -70,7 +77,7 @@ type Projection struct {
 // Aliases (e.g. "role"/"roles") point to equivalent Projections.
 var projections = map[string]*Projection{
 	// ── Memory corpus ────────────────────────────────────────────────────
-	"mem": {Base: ".cog/mem/", Pattern: "direct"},
+	"mem": {Base: ".cog/mem/", Pattern: "direct", SuffixRetry: []string{".cog.md", ".md"}},
 
 	// ── Architecture decision records ────────────────────────────────────
 	"adr": {Base: ".cog/adr/", Pattern: "glob", GlobPat: "%s-*.md"},
@@ -128,6 +135,15 @@ var projections = map[string]*Projection{
 
 	// ── Hooks ────────────────────────────────────────────────────────────
 	"hooks": {Base: ".cog/hooks/", Pattern: "direct"},
+
+	// ── Registered aliases (URI fix U3) ──────────────────────────────────
+	// cog://memory is the pre-projection name for cog://mem (cogdoc refs).
+	"memory": {Base: ".cog/mem/", Pattern: "direct"},
+	// cog://I/ is the identity card; the path component is ignored.
+	"I": {Base: ".cog/bin/agents/identities/identity_cog_interface.md", Pattern: "singleton"},
+	// cog://architecture and cog://rfc live in the workspace-root architecture tree.
+	"architecture": {ExtBase: "architecture/", Pattern: "direct"},
+	"rfc":          {ExtBase: "architecture/rfcs/", Pattern: "direct"},
 }
 
 // ── Resolution ───────────────────────────────────────────────────────────────
@@ -301,7 +317,11 @@ func resolveProjection(workspaceRoot string, proj *Projection, uriPath string) (
 		return filepath.Join(workspaceRoot, proj.Base), nil
 
 	case "direct":
-		return filepath.Join(base, uriPath) + proj.Suffix, nil
+		p := filepath.Join(base, uriPath) + proj.Suffix
+		if len(proj.SuffixRetry) > 0 && proj.Suffix == "" && uriPath != "" {
+			p = resolveSuffixVariants(p, proj.SuffixRetry)
+		}
+		return p, nil
 
 	case "directory":
 		if uriPath == "" {
@@ -324,6 +344,33 @@ func resolveProjection(workspaceRoot string, proj *Projection, uriPath string) (
 	default:
 		return "", fmt.Errorf("unknown projection pattern %q", proj.Pattern)
 	}
+}
+
+// resolveSuffixVariants returns p when it exists as written; otherwise the
+// first existing variant among: p+retry[i], and — for a p ending in a bare
+// ".md" (not ".cog.md") — p with ".md" swapped for each retry suffix.  This
+// makes cog:mem/x, cog:mem/x.md, cog:mem/x.cog.md all find x.cog.md, the form
+// docs actually use.  When no variant exists p is returned unchanged.
+func resolveSuffixVariants(p string, retry []string) string {
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	cands := make([]string, 0, 2*len(retry))
+	for _, sfx := range retry {
+		cands = append(cands, p+sfx)
+	}
+	if strings.HasSuffix(p, ".md") && !strings.HasSuffix(p, ".cog.md") {
+		stem := strings.TrimSuffix(p, ".md")
+		for _, sfx := range retry {
+			cands = append(cands, stem+sfx)
+		}
+	}
+	for _, c := range cands {
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			return c
+		}
+	}
+	return p
 }
 
 // ── Reverse mapping (path → URI) ─────────────────────────────────────────────

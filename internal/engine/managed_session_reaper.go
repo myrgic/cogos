@@ -2,7 +2,7 @@
 // hermes-acp driver: the kernel's backstop for session end-of-life.
 //
 // Before this, nothing ended a managed session unless a client asked
-// (cog apps/stage/docs/briefs/session-eol.md): on 2026-10-24 darkstar carried
+// (cog apps/stage/docs/briefs/session-eol.md): on 2026-10-24 one busy node carried
 // 62 live sessions, ~300 agent processes and ~11 GB RSS, most of them finished
 // work threads and room fronts idle for days, because the client that opened
 // them never sent DELETE and the kernel had no idle_timeout.

@@ -172,18 +172,46 @@ type anthropicMessage struct {
 
 // anthropicContentBlock is a structured content block for tool_use, tool_result, and image.
 type anthropicContentBlock struct {
-	Type         string                 `json:"type"`                  // "text", "tool_use", "tool_result", "image"
-	Text         string                 `json:"text,omitempty"`        // type == "text"
-	ID           string                 `json:"id,omitempty"`          // type == "tool_use"
-	ToolUseID    string                 `json:"tool_use_id,omitempty"` // type == "tool_result"
-	Name         string                 `json:"name,omitempty"`        // type == "tool_use"
-	Input        json.RawMessage        `json:"input,omitempty"`       // type == "tool_use"
-	Content      string                 `json:"content,omitempty"`     // type == "tool_result"
-	Source       *anthropicImageSource  `json:"source,omitempty"`      // type == "image"
-	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+	Type      string          `json:"type"`                  // "text", "tool_use", "tool_result", "image"
+	Text      string          `json:"text,omitempty"`        // type == "text"
+	ID        string          `json:"id,omitempty"`          // type == "tool_use"
+	ToolUseID string          `json:"tool_use_id,omitempty"` // type == "tool_result"
+	Name      string          `json:"name,omitempty"`        // type == "tool_use"
+	Input     json.RawMessage `json:"input,omitempty"`       // type == "tool_use"
+	Content   string          `json:"content,omitempty"`     // type == "tool_result"
+	// ResultBlocks, when non-empty on a tool_result block, is serialised as the
+	// "content" array (text + image blocks) instead of the Content string, so a
+	// tool can return pixels to the model. See MarshalJSON.
+	ResultBlocks []anthropicContentBlock `json:"-"`
+	Source       *anthropicImageSource   `json:"source,omitempty"` // type == "image"
+	CacheControl *anthropicCacheControl  `json:"cache_control,omitempty"`
 	// Thinking block fields (type == "thinking" or "redacted_thinking").
 	Thinking  string `json:"thinking,omitempty"`  // type == "thinking"
 	Signature string `json:"signature,omitempty"` // type == "thinking" signed block (may be present on redacted_thinking too)
+}
+
+// MarshalJSON emits tool_result.content as an array when ResultBlocks is set
+// (Anthropic accepts text and image blocks there); otherwise it is unchanged.
+func (b anthropicContentBlock) MarshalJSON() ([]byte, error) {
+	type plain anthropicContentBlock // no methods: avoids recursion
+	if len(b.ResultBlocks) == 0 {
+		return json.Marshal(plain(b))
+	}
+	b.Content = ""
+	raw, err := json.Marshal(plain(b))
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	arr, err := json.Marshal(b.ResultBlocks)
+	if err != nil {
+		return nil, err
+	}
+	m["content"] = arr
+	return json.Marshal(m)
 }
 
 // anthropicImageSource is the base64 image payload for Anthropic vision requests.
@@ -355,13 +383,19 @@ func buildAnthropicRequest(model string, req *CompletionRequest, stream bool, ma
 			// Tool result: always emit a fresh role:"user" message with one
 			// tool_result block. The normalizer (I2) will merge consecutive user
 			// messages and (I4) will ensure tool_result blocks lead.
+			tr := anthropicContentBlock{
+				Type:      "tool_result",
+				ToolUseID: m.ToolCallID,
+				Content:   m.Content,
+			}
+			// Images in a tool result (e.g. vision_analyze's native fast path)
+			// must reach the model as image blocks inside tool_result.content.
+			if hasImageParts(m.ContentParts) {
+				tr.ResultBlocks = contentPartsToAnthropicBlocks(m.ContentParts)
+			}
 			ar.Messages = append(ar.Messages, anthropicMessage{
-				Role: "user",
-				Content: []anthropicContentBlock{{
-					Type:      "tool_result",
-					ToolUseID: m.ToolCallID,
-					Content:   m.Content,
-				}},
+				Role:    "user",
+				Content: []anthropicContentBlock{tr},
 			})
 
 		case m.Role == "assistant" && len(m.ToolCalls) > 0:

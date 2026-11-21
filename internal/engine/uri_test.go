@@ -356,3 +356,86 @@ func TestCogURIPatternDoesNotMatchHTTPS(t *testing.T) {
 		t.Errorf("expected 1 cog: ref; got %d: %v", len(refs), refs)
 	}
 }
+
+// ── Registered aliases (URI fix U3) ──────────────────────────────────────────
+
+func TestResolveURIAliasMemory(t *testing.T) {
+	t.Parallel()
+	root := "/workspace"
+	res, err := ResolveURI(root, "cog://memory/semantic/insights/foo.cog.md")
+	if err != nil {
+		t.Fatalf("cog://memory: %v", err)
+	}
+	want := filepath.Join(root, ".cog", "mem", "semantic", "insights", "foo.cog.md")
+	if res.Path != want {
+		t.Errorf("cog://memory path = %q, want %q", res.Path, want)
+	}
+}
+
+func TestResolveURIAliasIdentityCard(t *testing.T) {
+	t.Parallel()
+	root := "/workspace"
+	res, err := ResolveURI(root, "cog://I/")
+	if err != nil {
+		t.Fatalf("cog://I/: %v", err)
+	}
+	want := filepath.Join(root, ".cog", "bin", "agents", "identities", "identity_cog_interface.md")
+	if res.Path != want {
+		t.Errorf("cog://I/ path = %q, want %q", res.Path, want)
+	}
+}
+
+func TestResolveURIAliasArchitecture(t *testing.T) {
+	t.Parallel()
+	root := "/workspace"
+	res, err := ResolveURI(root, "cog://architecture/adrs/ADR-foo.cog.md")
+	if err != nil {
+		t.Fatalf("cog://architecture: %v", err)
+	}
+	want := filepath.Join(root, "architecture", "adrs", "ADR-foo.cog.md")
+	if res.Path != want {
+		t.Errorf("cog://architecture path = %q, want %q", res.Path, want)
+	}
+}
+
+func TestResolveURIAliasRFC(t *testing.T) {
+	t.Parallel()
+	root := "/workspace"
+	res, err := ResolveURI(root, "cog://rfc/RFC-foo.cog.md")
+	if err != nil {
+		t.Fatalf("cog://rfc: %v", err)
+	}
+	want := filepath.Join(root, "architecture", "rfcs", "RFC-foo.cog.md")
+	if res.Path != want {
+		t.Errorf("cog://rfc path = %q, want %q", res.Path, want)
+	}
+}
+
+func TestResolveURIAliasSkillsResolvesToSkillsDir(t *testing.T) {
+	t.Parallel()
+	root := "/workspace"
+	res, err := ResolveURI(root, "cog:skill/dispatch-agent")
+	if err != nil {
+		t.Fatalf("cog:skill: %v", err)
+	}
+	want := filepath.Join(root, ".claude", "skills", "dispatch-agent") + string(filepath.Separator)
+	if res.Path != want {
+		t.Errorf("cog:skill path = %q, want %q", res.Path, want)
+	}
+}
+
+// cog:secret is a vault REFERENCE scheme (cli_doctor_secrets.go:25). It must
+// never resolve to a filesystem path or value: ResolveURI has to reject it.
+func TestResolveURISecretIsNotResolvable(t *testing.T) {
+	t.Parallel()
+	root := "/workspace"
+	for _, uri := range []string{"cog:secret/discord/cog", "cog://secret/discord/cog"} {
+		res, err := ResolveURI(root, uri)
+		if err == nil {
+			t.Errorf("%s resolved to %+v; a secret reference must not resolve to a path/value", uri, res)
+		}
+		if res != nil {
+			t.Errorf("%s returned a non-nil resolution %+v alongside the error", uri, res)
+		}
+	}
+}
