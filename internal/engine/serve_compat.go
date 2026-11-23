@@ -914,6 +914,14 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 	// contract inside a bugfix — a separate change if anyone wants it.
 	const limit = 20
 
+	// sources= opts out of the transcript side (cogdoc-only). The default
+	// includes both, so the path can see what was said (myrgic/cogos#650).
+	includeTranscripts, err := parseMemorySearchSources(r.URL.Query().Get("sources"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	// A retrieval error must surface as an error, not as an empty result set:
 	// the caller has to be able to tell "no matches" from "I am broken".
 	out, err := SearchMemory(s.cfg.WorkspaceRoot, query, limit, "")
@@ -923,8 +931,12 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cogdoc hits come from SearchMemory. Transcript hits come from the wired
+	// observatory searcher, and the "sources" map reports each side.
+	fused := fuseMemorySearch(query, out, limit, includeTranscripts)
+
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(out)
+	_ = json.NewEncoder(w).Encode(fused)
 }
 
 // handleMemoryRead reads a CogDoc by path.

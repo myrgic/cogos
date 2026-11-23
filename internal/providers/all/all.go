@@ -309,6 +309,9 @@ func RegisterConversations(provider *conversations.Provider) {
 	// Wire conversations URI resolver.
 	engine.SetConversationsResolver(&conversationsURIResolver{p: provider})
 
+	// Wire transcript search for GET /memory/search (myrgic/cogos#650).
+	engine.SetConversationSearcher(&conversationsSearcher{p: provider})
+
 	// Wire GET /v1/observatory/coverage (v0.2 coverage metric surface).
 	prevHTTP := engine.RegisterHTTPExtensions
 	engine.RegisterHTTPExtensions = func(s *engine.Server, mux *http.ServeMux) {
