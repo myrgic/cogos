@@ -311,6 +311,10 @@ func parseClientMetadata(clientID string, body []byte) (*oauthClientMetadata, er
 		ClientName              string   `json:"client_name"`
 		RedirectURIs            []string `json:"redirect_uris"`
 		TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+		// RFC 7591 section 2: the auth methods the client CAN use. A client
+		// may declare a primary method (e.g. private_key_jwt) while still
+		// supporting "none" (public client) as an option; ChatGPT does this.
+		TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, fmt.Errorf("%w: metadata document is not valid JSON", ErrOAuthClientMetadata)
@@ -318,8 +322,14 @@ func parseClientMetadata(clientID string, body []byte) (*oauthClientMetadata, er
 	if doc.ClientID != clientID {
 		return nil, fmt.Errorf("%w: document client_id does not match the URL it was fetched from", ErrOAuthClientMetadata)
 	}
-	if doc.TokenEndpointAuthMethod != "none" {
-		return nil, fmt.Errorf("%w: token_endpoint_auth_method must be none (public client)", ErrOAuthClientMetadata)
+	supportsNone := doc.TokenEndpointAuthMethod == "none"
+	for _, m := range doc.TokenEndpointAuthMethodsSupported {
+		if m == "none" {
+			supportsNone = true
+		}
+	}
+	if !supportsNone {
+		return nil, fmt.Errorf("%w: client must support token_endpoint_auth_method none (public client)", ErrOAuthClientMetadata)
 	}
 	if len(doc.RedirectURIs) == 0 || len(doc.RedirectURIs) > 16 {
 		return nil, fmt.Errorf("%w: redirect_uris must hold 1 to 16 entries", ErrOAuthClientMetadata)
