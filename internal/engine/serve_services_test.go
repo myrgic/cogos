@@ -338,3 +338,118 @@ func TestServicesLaunchdSupervisor(t *testing.T) {
 		t.Errorf("supervisor_label = %q; want %q", view.SupervisorLabel, "com.cogos.kernel")
 	}
 }
+
+// newServicesTestServerWith is newServicesTestServer with the kernel port and an
+// optional ServiceSupervisor wired, for the live-state projection tests.
+func newServicesTestServerWith(t *testing.T, manifest *NodeManifest, health *NodeHealth, port int, sup ServiceSupervisor) http.Handler {
+	t.Helper()
+	root := t.TempDir()
+	cfg := makeConfig(t, root)
+	cfg.Port = port
+	proc := NewProcess(cfg, makeNucleus("Test", "tester"))
+	proc.nodeManifest = manifest
+	if health != nil {
+		proc.nodeHealth = health
+	}
+	srv := NewServer(cfg, makeNucleus("Test", "tester"), proc)
+	if sup != nil {
+		srv.SetServiceSupervisor(sup)
+	}
+	t.Cleanup(func() {
+		if b := proc.Broker(); b != nil {
+			_ = b.Close()
+		}
+	})
+	return srv.Handler()
+}
+
+func getServiceView(t *testing.T, h http.Handler, name string) serviceView {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services/"+name, nil))
+	var v serviceView
+	if err := json.NewDecoder(rec.Body).Decode(&v); err != nil {
+		t.Fatalf("decode %s: %v", name, err)
+	}
+	return v
+}
+
+// TestServicesKernelSelfEntryIsRunning: the prober skips the kernel's own
+// port, so the snapshot has no row for it; the API must not read that as down
+// (#677). The sibling with the same empty snapshot must stay not running.
+func TestServicesKernelSelfEntryIsRunning(t *testing.T) {
+	t.Parallel()
+	h := newServicesTestServerWith(t, testManifest(), nil, 6931, nil)
+
+	k := getServiceView(t, h, "kernel")
+	if !k.Running {
+		t.Error("kernel running = false; want true (the request is being answered by it)")
+	}
+	if k.Health == nil || k.Health.Status != "healthy" {
+		t.Errorf("kernel health = %+v; want status healthy", k.Health)
+	}
+	if m := getServiceView(t, h, "mod3"); m.Running {
+		t.Error("mod3 running = true with an empty health snapshot; only the self entry may be synthesized")
+	}
+
+	// The list route goes through the same projection.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
+	var resp struct {
+		Services []serviceView `json:"services"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	for _, v := range resp.Services {
+		if v.Name == "kernel" && !v.Running {
+			t.Error("list: kernel running = false; want true")
+		}
+	}
+}
+
+// TestServicesUnknownHealthAsksLaunchd: an observed service with no health
+// path is probe-status "unknown"; when its launchd job is live it must read
+// running:true, while health stays "unknown" and it stays uncontrollable.
+func TestServicesUnknownHealthAsksLaunchd(t *testing.T) {
+	t.Parallel()
+	m := testManifest()
+	m.Services["vault"] = ServiceDef{Kind: ServiceKindObserved, Port: 8222, Launchd: "com.cogos.vault"}
+	m.Services["vault-down"] = ServiceDef{Kind: ServiceKindObserved, Port: 8223, Launchd: "com.cogos.vault-down"}
+	m.Services["nolabel"] = ServiceDef{Kind: ServiceKindObserved, Port: 8224}
+	nh := NewNodeHealth()
+	nh.mu.Lock()
+	for _, n := range []string{"vault", "vault-down", "nolabel"} {
+		nh.services[n] = ServiceHealth{Port: m.Services[n].Port, Status: "unknown"}
+	}
+	nh.mu.Unlock()
+
+	sup := newStubSupervisor()
+	sup.statusResult = &ServiceStatus{Running: true, LaunchdRegistered: true, PID: 4242}
+	h := newServicesTestServerWith(t, m, nh, 6931, sup)
+
+	v := getServiceView(t, h, "vault")
+	if !v.Running {
+		t.Error("vault running = false; want true when launchd reports a live PID")
+	}
+	if v.PID == nil || *v.PID != 4242 {
+		t.Errorf("vault pid = %v; want 4242", v.PID)
+	}
+	if v.Health == nil || v.Health.Status != "unknown" {
+		t.Errorf("vault health = %+v; want status unknown (launchd proves alive, not healthy)", v.Health)
+	}
+	if v.Controllable {
+		t.Error("observed service must stay controllable=false")
+	}
+	if nl := getServiceView(t, h, "nolabel"); nl.Running {
+		t.Error("service with no launchd label running = true; there is nothing to ask launchd")
+	}
+
+	// A loaded-but-not-running job stays not running.
+	sup.mu.Lock()
+	sup.statusResult = &ServiceStatus{Running: false, LaunchdRegistered: true}
+	sup.mu.Unlock()
+	if d := getServiceView(t, h, "vault-down"); d.Running {
+		t.Error("vault-down running = true; launchd reports no live PID")
+	}
+}
