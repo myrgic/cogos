@@ -46,14 +46,22 @@ type fakeCIMDHost struct {
 
 func newFakeCIMDHost(t *testing.T) *fakeCIMDHost {
 	t.Helper()
+	return newFakeCIMDHostNamed(t, testCIMDHost, testClientID, testRedirectURI)
+}
+
+// newFakeCIMDHostNamed is newFakeCIMDHost for an arbitrary host name: the TLS
+// certificate is issued for host, and the default document serves clientID
+// with redirectURI in its redirect_uris array.
+func newFakeCIMDHostNamed(t *testing.T, host, clientID, redirectURI string) *fakeCIMDHost {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: testCIMDHost},
-		DNSNames:              []string{testCIMDHost},
+		Subject:               pkix.Name{CommonName: host},
+		DNSNames:              []string{host},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
@@ -70,7 +78,7 @@ func newFakeCIMDHost(t *testing.T) *fakeCIMDHost {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"client_id":%q,"client_name":"Claude","client_uri":"https://claude.ai","redirect_uris":[%q],`+
 			`"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none"}`,
-			testClientID, testRedirectURI)
+			clientID, redirectURI)
 	}
 	f.srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()

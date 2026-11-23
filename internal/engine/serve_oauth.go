@@ -145,10 +145,13 @@ func (s *Server) oauthSettings() oauthSettings {
 		out.Resource = out.Issuer + "/mcp"
 	}
 	if len(out.AllowedClientHosts) == 0 {
-		out.AllowedClientHosts = []string{"claude.ai"}
+		out.AllowedClientHosts = []string{"claude.ai", "chatgpt.com"}
 	}
 	if len(out.RedirectURIs) == 0 {
-		out.RedirectURIs = []string{"https://claude.ai/api/mcp/auth_callback"}
+		out.RedirectURIs = []string{
+			"https://claude.ai/api/mcp/auth_callback",
+			"https://chatgpt.com/connector/oauth/xpkWNdN9JZkc",
+		}
 	}
 	if out.StageNotifyURL == "" {
 		out.StageNotifyURL = "http://127.0.0.1:7872/local/oauth-consent"

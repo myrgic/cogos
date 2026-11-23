@@ -139,7 +139,7 @@ func TestOAuthIssuerDefaults(t *testing.T) {
 	if st.Issuer != "http://127.0.0.1:6931" || st.Resource != "http://127.0.0.1:6931/mcp" {
 		t.Errorf("loopback defaults: %+v", st)
 	}
-	if len(st.AllowedClientHosts) != 1 || st.AllowedClientHosts[0] != "claude.ai" {
+	if len(st.AllowedClientHosts) != 2 || st.AllowedClientHosts[0] != "claude.ai" || st.AllowedClientHosts[1] != "chatgpt.com" {
 		t.Errorf("allowed hosts: %v", st.AllowedClientHosts)
 	}
 	s.cfg.StageUI.PublicHost = "stage.myrgic.com"
