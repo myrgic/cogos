@@ -113,6 +113,7 @@ func (c *Constellation) IndexWorkspace() error {
 	//     parse" (a malformed-but-still-present doc must keep its stale row,
 	//     not be treated as a ghost — see TestIndexWorkspaceToleratesMalformedFrontmatter).
 	roots := c.walkRoots()
+	excluded := c.excludedRoots()
 	visited := make(map[string]bool)
 	for _, walkRoot := range roots {
 		err = filepath.WalkDir(walkRoot, func(path string, d fs.DirEntry, err error) error {
@@ -122,6 +123,10 @@ func (c *Constellation) IndexWorkspace() error {
 
 			// Skip .state directory
 			if d.IsDir() && d.Name() == ".state" {
+				return fs.SkipDir
+			}
+			// Skip cogdocs.yaml excludePaths (e.g. .cog/workers/ worktree copies).
+			if d.IsDir() && isUnderAnyRoot(filepath.Clean(path), excluded) {
 				return fs.SkipDir
 			}
 
@@ -356,6 +361,35 @@ type cogdocsConfig struct {
 	// e.g. .cog/config/cogdocs.yaml's requiredPaths. walkRoots uses this to
 	// derive extra walk roots outside .cog/ rather than hardcoding them.
 	RequiredPaths []string `yaml:"requiredPaths"`
+	// ExcludePaths lists workspace-relative directories the indexer never walks
+	// or indexes (e.g. ".cog/workers/", whose disposable worktree copies would
+	// otherwise multiply the document count ~8x and crowd real hits). Rows
+	// already indexed under an excluded path are pruned on the next
+	// IndexWorkspace run, and IndexFile refuses paths under them.
+	ExcludePaths []string `yaml:"excludePaths"`
+}
+
+// excludedRoots returns cogdocs.yaml's excludePaths as absolute, cleaned
+// paths, symlink-resolved when they exist (a not-yet-created directory is
+// still excluded by its literal form).
+func (c *Constellation) excludedRoots() []string {
+	cfg, err := loadCogdocsConfig(c.root)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, rel := range cfg.ExcludePaths {
+		abs := rel
+		if !filepath.IsAbs(rel) {
+			abs = filepath.Join(c.root, rel)
+		}
+		abs = filepath.Clean(abs)
+		out = append(out, abs)
+		if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil && resolved != abs {
+			out = append(out, resolved)
+		}
+	}
+	return out
 }
 
 // loadCogdocsConfig reads the optional .cog/config/cogdocs.yaml declaration,
@@ -511,6 +545,12 @@ func (c *Constellation) IndexFile(path string) error {
 	storagePath := realPath
 	if !isUnderAnyRoot(realPath, c.walkRoots()) {
 		storagePath = path
+	}
+
+	// cogdocs.yaml excludePaths: never index these (a no-op, not an error, so
+	// watchers and services that hand us any path stay quiet).
+	if excl := c.excludedRoots(); isUnderAnyRoot(filepath.Clean(path), excl) || isUnderAnyRoot(realPath, excl) {
+		return nil
 	}
 
 	tx, err := c.db.Begin()
